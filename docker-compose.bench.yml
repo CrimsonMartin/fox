@@ -1,5 +1,5 @@
 services:
-  ferrumox-cpu:
+  ferrumox:
     build:
       context: .
       dockerfile: Dockerfile
@@ -45,7 +45,7 @@ services:
       timeout: 3s
       retries: 12
 
-  ollama-cpu:
+  ollama:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"

@@ -141,13 +141,13 @@ run_bench_single() {
 
 # ── Phase 1: ferrumox CPU ────────────────────────────────────────────────────
 echo "Starting ferrumox (CPU)..."
-docker compose -f "$COMPOSE_FILE" up -d --build ferrumox-cpu
+docker compose -f "$COMPOSE_FILE" up -d --build ferrumox
 
 echo "Waiting for ferrumox..."
-wait_http "$FOX_URL/health" "ferrumox-cpu" 120
+wait_http "$FOX_URL/health" "ferrumox" 120
 
 echo "Pulling model in ferrumox..."
-docker compose -f "$COMPOSE_FILE" exec ferrumox-cpu fox pull "$MODEL"
+docker compose -f "$COMPOSE_FILE" exec ferrumox fox pull "$MODEL"
 
 echo "Benchmarking ferrumox (CPU)..."
 FERRUMOX_CPU_JSON="$(run_bench_single "$FOX_URL" "$MODEL")"
@@ -178,13 +178,13 @@ fi
 OLLAMA_CPU_JSON=""
 if [[ $VLLM_MODE -eq 0 ]]; then
     echo "Starting Ollama (CPU)..."
-    docker compose -f "$COMPOSE_FILE" up -d ollama-cpu
+    docker compose -f "$COMPOSE_FILE" up -d ollama
 
     echo "Waiting for Ollama..."
-    wait_http "$OLLAMA_URL/api/tags" "ollama-cpu" 60
+    wait_http "$OLLAMA_URL/api/tags" "ollama" 60
 
     echo "Pulling model in Ollama..."
-    docker compose -f "$COMPOSE_FILE" exec ollama-cpu ollama pull "$MODEL"
+    docker compose -f "$COMPOSE_FILE" exec ollama ollama pull "$MODEL"
 
     echo "Benchmarking Ollama (CPU)..."
     OLLAMA_CPU_JSON="$(run_bench_single "$OLLAMA_URL" "$MODEL")"

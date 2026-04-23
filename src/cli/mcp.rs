@@ -63,6 +63,9 @@ pub async fn run_mcp(args: McpArgs) -> Result<()> {
         split_mode: 1, // layer
         tensor_split: vec![],
         moe_offload_cpu: false,
+        mmproj_path: None,
+        discovered_models: vec![],
+        flash_attn: true,
     };
 
     let registry = Arc::new(ModelRegistry::new(registry_cfg, aliases));

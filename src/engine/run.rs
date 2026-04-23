@@ -107,9 +107,7 @@ impl InferenceEngine {
         let mut text_model_requests: Vec<InferenceRequestForModel> = Vec::new();
 
         for r in &requests {
-            if let (Some(vision_image), Some(vision_prompt)) =
-                (&r.vision_image, &r.vision_prompt)
-            {
+            if let (Some(vision_image), Some(vision_prompt)) = (&r.vision_image, &r.vision_prompt) {
                 vision_ids.push(r.id);
                 // If this vision request got a false prefix cache hit (prompt_tokens
                 // are dummy zeros that matched a prior entry), clean up the prefix

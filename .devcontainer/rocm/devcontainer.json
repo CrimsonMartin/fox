@@ -7,6 +7,9 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "runArgs": ["--device=/dev/kfd", "--device=/dev/dri"],
+  "mounts": [
+    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -14,6 +17,9 @@
         "vadimcn.vscode-lldb"
       ]
     }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": {}
   },
   "postCreateCommand": "cargo fetch"
 }

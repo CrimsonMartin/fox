@@ -1,3 +1,5 @@
 [submodule "vendor/llama.cpp"]
 	path = vendor/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp.git
+	# build.rs patches hip.h in-place for ROCm 6.2 FP8 compat (see build.rs)
+	ignore = dirty

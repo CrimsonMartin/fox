@@ -1,0 +1,19 @@
+{
+  "name": "Fox (ROCm)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "../.."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "runArgs": ["--device=/dev/kfd", "--device=/dev/dri"],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  },
+  "postCreateCommand": "cargo fetch"
+}

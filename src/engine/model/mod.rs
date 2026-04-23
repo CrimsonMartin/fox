@@ -210,7 +210,10 @@ pub trait Model: Send + Sync {
 
     /// Preprocess a vision request: decode image, tokenize, and CLIP-encode.
     /// This only needs an mtmd context (not llama_context) and can run off the inference thread.
-    fn vision_preprocess_sync(&self, _params: &VisionPreprocessParams) -> Result<PreprocessedVision> {
+    fn vision_preprocess_sync(
+        &self,
+        _params: &VisionPreprocessParams,
+    ) -> Result<PreprocessedVision> {
         anyhow::bail!("vision not supported by this model backend")
     }
 

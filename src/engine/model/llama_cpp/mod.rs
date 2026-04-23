@@ -141,9 +141,8 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         }
         anyhow!("{}", msg.trim_end())
     } else {
-        let mut msg = format!(
-            "failed to load '{model_name}': llama.cpp could not load the model.\n",
-        );
+        let mut msg =
+            format!("failed to load '{model_name}': llama.cpp could not load the model.\n",);
         if let Some(vram) = gpu_free {
             msg.push_str(&format!(
                 "  GPU free:  {:.1} GB\n",
@@ -157,7 +156,9 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
             ));
         }
         msg.push_str("\nPossible causes:\n");
-        msg.push_str("  • GPU backend libraries (libggml-cuda.so / libggml-vulkan.so) not found.\n");
+        msg.push_str(
+            "  • GPU backend libraries (libggml-cuda.so / libggml-vulkan.so) not found.\n",
+        );
         msg.push_str("  • KV cache context allocation too large — try --max-context-len 2048.\n");
         msg.push_str("  • GGUF version not supported by this build of Fox.\n");
         msg.push_str("  • File corrupt or from an incomplete download.\n");
@@ -480,8 +481,7 @@ impl LlamaCppModel {
             if pool_ctxs.is_empty() {
                 None
             } else {
-                let n_embd_inp =
-                    unsafe { ffi::llama_model_n_embd_inp(model.as_ptr()) } as usize;
+                let n_embd_inp = unsafe { ffi::llama_model_n_embd_inp(model.as_ptr()) } as usize;
                 if n_contexts > 1 {
                     tracing::info!(
                         count = pool_ctxs.len(),

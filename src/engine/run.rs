@@ -173,8 +173,7 @@ impl InferenceEngine {
                 }));
             }
 
-            let mut preprocessed: Vec<(u64, usize, super::model::PreprocessedVision)> =
-                Vec::new();
+            let mut preprocessed: Vec<(u64, usize, super::model::PreprocessedVision)> = Vec::new();
             for handle in preprocess_handles {
                 let (req_id, pp) = handle
                     .await

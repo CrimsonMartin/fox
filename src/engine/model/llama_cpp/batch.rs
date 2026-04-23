@@ -380,8 +380,7 @@ impl LlamaCppModel {
                     return Err(anyhow!("mtmd_encode_chunk failed (code {})", encode_ret));
                 }
 
-                let n_tokens =
-                    unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as usize;
+                let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as usize;
                 let embd_ptr = unsafe { mtmd_ffi::mtmd_get_output_embd(mtmd_ptr) };
                 if embd_ptr.is_null() {
                     unsafe { mtmd_ffi::mtmd_input_chunks_free(chunks) };
@@ -459,8 +458,7 @@ impl LlamaCppModel {
                     }
 
                     let text_batch = unsafe { ffi::llama_batch_init(n_batch, 0, 1) };
-                    let tokens =
-                        unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
+                    let tokens = unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
 
                     let mut ti = 0usize;
                     while ti < n_tokens_out {
@@ -496,7 +494,10 @@ impl LlamaCppModel {
                         let ret = unsafe { ffi::llama_decode(lctx, text_batch) };
                         if ret != 0 {
                             unsafe { ffi::llama_batch_free(text_batch) };
-                            return Err(anyhow!("llama_decode failed on text chunk (code {})", ret));
+                            return Err(anyhow!(
+                                "llama_decode failed on text chunk (code {})",
+                                ret
+                            ));
                         }
                     }
                     unsafe { ffi::llama_batch_free(text_batch) };
@@ -535,8 +536,7 @@ impl LlamaCppModel {
                 return Err(anyhow!("no logits after vision decode prefill"));
             }
             let n_vocab = self.config.vocab_size as i32;
-            let logits_slice =
-                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
+            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
 
             let sampled = sample_token(
                 logits_slice,

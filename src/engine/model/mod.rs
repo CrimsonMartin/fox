@@ -245,7 +245,7 @@ pub struct VisionPreprocessParams {
 /// Result of vision preprocessing: tokenized chunks + pre-encoded CLIP embeddings.
 /// Owns the C-allocated chunks pointer and frees it on drop.
 pub struct PreprocessedVision {
-    pub(crate) chunks: *mut crate::engine::mtmd_ffi::mtmd_input_chunks,
+    pub(crate) chunks: *mut std::ffi::c_void,
     /// Pre-encoded CLIP embeddings for each image/audio chunk, keyed by chunk index.
     pub(crate) image_embeddings: Vec<(usize, Vec<f32>)>,
 }
@@ -254,8 +254,13 @@ unsafe impl Send for PreprocessedVision {}
 
 impl Drop for PreprocessedVision {
     fn drop(&mut self) {
+        #[cfg(not(fox_stub))]
         if !self.chunks.is_null() {
-            unsafe { crate::engine::mtmd_ffi::mtmd_input_chunks_free(self.chunks) };
+            unsafe {
+                crate::engine::mtmd_ffi::mtmd_input_chunks_free(
+                    self.chunks as *mut crate::engine::mtmd_ffi::mtmd_input_chunks,
+                )
+            };
         }
     }
 }

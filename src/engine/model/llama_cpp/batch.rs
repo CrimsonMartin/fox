@@ -393,7 +393,7 @@ impl LlamaCppModel {
             }
 
             Ok(PreprocessedVision {
-                chunks,
+                chunks: chunks as *mut std::ffi::c_void,
                 image_embeddings,
             })
         })();
@@ -431,7 +431,7 @@ impl LlamaCppModel {
             let lctx_mtmd = lctx as *mut mtmd_ffi::llama_context;
             let n_batch = self.effective_ctx as i32;
 
-            let chunks = preprocessed.chunks;
+            let chunks = preprocessed.chunks as *mut mtmd_ffi::mtmd_input_chunks;
             let n_chunks = unsafe { mtmd_ffi::mtmd_input_chunks_size(chunks) };
             let mut n_past: i32 = 0;
 

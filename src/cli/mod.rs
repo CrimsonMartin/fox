@@ -3,6 +3,7 @@
 pub mod alias;
 pub mod bench;
 pub mod bench_kv;
+pub mod gpu_info;
 pub mod list;
 pub mod models;
 pub mod ps;
@@ -58,12 +59,14 @@ pub enum Command {
     Search(search::SearchArgs),
     /// Manage model name aliases
     Alias(alias::AliasArgs),
+    /// Display GPU backend, VRAM, and driver details
+    GpuInfo(gpu_info::GpuInfoArgs),
 }
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
     "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search",
-    "alias", "help",
+    "alias", "gpu-info", "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
@@ -97,5 +100,6 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Models(args) => models::run_models(args).await,
         Command::Search(args) => search::run_search(args).await,
         Command::Alias(args) => alias::run_alias(args).await,
+        Command::GpuInfo(args) => gpu_info::run_gpu_info(args).await,
     }
 }

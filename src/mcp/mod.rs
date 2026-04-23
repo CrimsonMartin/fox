@@ -542,7 +542,10 @@ async fn run_inference(
         temperature,
         top_p: 0.9,
         top_k: 0,
+        min_p: 0.0,
         repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
         seed: None,
         stop: None,
         show_thinking: false,
@@ -697,6 +700,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -729,6 +735,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -759,6 +768,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -796,6 +808,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -832,6 +847,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -861,6 +879,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -889,6 +910,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -917,6 +941,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -946,6 +973,9 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj_path: None,
+            discovered_models: vec![],
+            flash_attn: true,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());

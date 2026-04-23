@@ -7,6 +7,9 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "runArgs": ["--device=/dev/kfd", "--device=/dev/dri"],
+  "mounts": [
+    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -15,5 +18,9 @@
       ]
     }
   },
-  "postCreateCommand": "cargo fetch"
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "lts" }
+  },
+  "postCreateCommand": "git config --global safe.directory /workspace && git config --global safe.directory /workspace/vendor/llama.cpp && cargo fetch && npm install -g @anthropic-ai/claude-code"
 }

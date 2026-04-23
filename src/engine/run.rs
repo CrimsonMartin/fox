@@ -4,7 +4,10 @@ use anyhow::Result;
 
 use crate::scheduler::StopReason;
 
-use super::model::{InferenceRequestForModel, Logits, VisionPrefillParams};
+use super::model::{
+    InferenceRequestForModel, Logits, VisionDecodeParams, VisionPrefillParams,
+    VisionPreprocessParams,
+};
 use super::InferenceEngine;
 
 impl InferenceEngine {
@@ -104,7 +107,7 @@ impl InferenceEngine {
         let mut text_model_requests: Vec<InferenceRequestForModel> = Vec::new();
 
         for r in &requests {
-            if r.vision_image.is_some() && r.vision_prompt.is_some() {
+            if let (Some(vision_image), Some(vision_prompt)) = (&r.vision_image, &r.vision_prompt) {
                 vision_ids.push(r.id);
                 // If this vision request got a false prefix cache hit (prompt_tokens
                 // are dummy zeros that matched a prior entry), clean up the prefix
@@ -117,8 +120,8 @@ impl InferenceEngine {
                 self.model.clear_sequence(r.kv_seq_id);
                 vision_params.push(VisionPrefillParams {
                     seq_id: r.kv_seq_id,
-                    text_prompt: r.vision_prompt.clone().unwrap(),
-                    image_bytes: Arc::clone(r.vision_image.as_ref().unwrap()),
+                    text_prompt: vision_prompt.clone(),
+                    image_bytes: Arc::clone(vision_image),
                     temperature: r.sampling.temperature,
                     top_p: r.sampling.top_p,
                     top_k: r.sampling.top_k,
@@ -152,22 +155,62 @@ impl InferenceEngine {
 
         let mut all_results: Vec<(u64, Logits)> = Vec::new();
 
-        // Vision requests: process sequentially via vision_prefill_sync.
+        // Vision requests: async preprocess (CLIP encode off inference thread),
+        // then decode with pre-encoded embeddings on inference thread.
         if !vision_ids.is_empty() {
+            // Phase 1: Preprocess all vision requests in parallel (off inference thread).
+            // Each preprocessing task acquires an mtmd context from the pool independently.
+            let mut preprocess_handles = Vec::new();
+            for (i, id) in vision_ids.iter().enumerate() {
+                let model = self.model.clone();
+                let params = VisionPreprocessParams {
+                    text_prompt: vision_params[i].text_prompt.clone(),
+                    image_bytes: Arc::clone(&vision_params[i].image_bytes),
+                };
+                let req_id = *id;
+                preprocess_handles.push(tokio::task::spawn_blocking(move || {
+                    model.vision_preprocess_sync(&params).map(|p| (req_id, p))
+                }));
+            }
+
+            let mut preprocessed: Vec<(u64, usize, super::model::PreprocessedVision)> = Vec::new();
+            for handle in preprocess_handles {
+                let (req_id, pp) = handle
+                    .await
+                    .map_err(|e| anyhow::anyhow!("vision preprocess spawn_blocking: {}", e))??;
+                // Find the index in vision_params for this request.
+                let param_idx = vision_ids
+                    .iter()
+                    .position(|&id| id == req_id)
+                    .expect("vision request id must exist");
+                preprocessed.push((req_id, param_idx, pp));
+            }
+
+            // Phase 2: Decode all preprocessed vision requests on the inference thread.
+            let vision_params_arc = Arc::new(vision_params);
             let model = self.model.clone();
-            let vision_ids_clone = vision_ids.clone();
             let vision_results = tokio::task::spawn_blocking(move || {
                 let mut results = Vec::new();
-                for (i, id) in vision_ids_clone.iter().enumerate() {
-                    match model.vision_prefill_sync(&vision_params[i]) {
-                        Ok((n_past, logits)) => results.push((*id, n_past, logits)),
+                for (req_id, param_idx, pp) in preprocessed {
+                    let vp = &vision_params_arc[param_idx];
+                    let decode_params = VisionDecodeParams {
+                        seq_id: vp.seq_id,
+                        preprocessed: pp,
+                        temperature: vp.temperature,
+                        top_p: vp.top_p,
+                        top_k: vp.top_k,
+                        repetition_penalty: vp.repetition_penalty,
+                        seed: vp.seed,
+                    };
+                    match model.vision_decode_prefill_sync(&decode_params) {
+                        Ok((n_past, logits)) => results.push((req_id, n_past, logits)),
                         Err(e) => return Err(e),
                     }
                 }
                 Ok(results)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("vision prefill spawn_blocking: {}", e))??;
+            .map_err(|e| anyhow::anyhow!("vision decode spawn_blocking: {}", e))??;
 
             for (id, n_past, logits) in vision_results {
                 self.scheduler.set_prefilled_tokens(id, n_past);

@@ -18,7 +18,8 @@
     }
   },
   "features": {
-    "ghcr.io/devcontainers/features/sshd:1": {}
+    "ghcr.io/devcontainers/features/sshd:1": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "lts" }
   },
-  "postCreateCommand": "cargo fetch"
+  "postCreateCommand": "git config --global safe.directory /workspace && git config --global safe.directory /workspace/vendor/llama.cpp && cargo fetch && npm install -g @anthropic-ai/claude-code"
 }

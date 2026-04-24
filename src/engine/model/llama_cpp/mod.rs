@@ -236,6 +236,12 @@ pub struct LlamaCppModel {
     /// Pool of multimodal (vision) contexts for parallel CLIP encoding.
     /// None when no multimodal projector is loaded.
     pub(super) mtmd_pool: Option<MtmdPool>,
+    /// Cached vision config: whether the model uses M-RoPE positioning for image embeddings.
+    pub(super) vision_use_mrope: bool,
+    /// Cached vision config: whether the model uses non-causal attention for image chunks.
+    pub(super) vision_use_non_causal: bool,
+    /// Input embedding dimension (from model), used for inline image chunk decode.
+    pub(super) n_embd_inp: usize,
 }
 
 #[cfg(not(fox_stub))]
@@ -494,6 +500,20 @@ impl LlamaCppModel {
             None
         };
 
+        // Cache vision config from the first mtmd context (avoids pool acquire in decode path).
+        let (vision_use_mrope, vision_use_non_causal, n_embd_inp) =
+            if let Some(ref pool) = mtmd_pool {
+                let tmp = pool.acquire();
+                let mrope = unsafe { mtmd_ffi::mtmd_decode_use_mrope(tmp.as_ptr()) };
+                let non_causal =
+                    unsafe { mtmd_ffi::mtmd_decode_use_non_causal(tmp.as_ptr(), std::ptr::null()) };
+                let embd = pool.n_embd_inp;
+                pool.release(tmp);
+                (mrope, non_causal, embd)
+            } else {
+                (false, false, 0)
+            };
+
         Ok(Self {
             _model: model,
             _ctx: ctx_arc,
@@ -503,6 +523,9 @@ impl LlamaCppModel {
             effective_ctx: effective_max_ctx,
             owns_model: true,
             mtmd_pool,
+            vision_use_mrope,
+            vision_use_non_causal,
+            n_embd_inp,
         })
     }
 
@@ -575,6 +598,9 @@ impl LlamaCppModel {
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
             mtmd_pool: None,   // new_context is for bench-kv; vision not needed
+            vision_use_mrope: false,
+            vision_use_non_causal: false,
+            n_embd_inp: 0,
         })
     }
 }
@@ -763,6 +789,18 @@ impl Model for LlamaCppModel {
         self.do_vision_preprocess(&params.text_prompt, &params.image_bytes)
     }
 
+    fn vision_preprocess_sync_with_cache(
+        &self,
+        params: &super::VisionPreprocessParams,
+        cached_embeddings: Option<std::sync::Arc<Vec<f32>>>,
+    ) -> Result<super::PreprocessedVision> {
+        self.do_vision_preprocess_with_cache(
+            &params.text_prompt,
+            &params.image_bytes,
+            cached_embeddings,
+        )
+    }
+
     fn vision_decode_prefill_sync(
         &self,
         params: &super::VisionDecodeParams,
@@ -776,6 +814,13 @@ impl Model for LlamaCppModel {
             params.repetition_penalty,
             params.seed,
         )
+    }
+
+    fn vision_decode_prefill_batch_sync(
+        &self,
+        params: Vec<super::VisionDecodeParams>,
+    ) -> Result<Vec<(usize, Logits)>> {
+        self.do_vision_decode_prefill_batch(params)
     }
 }
 

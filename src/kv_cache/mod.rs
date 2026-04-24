@@ -12,6 +12,16 @@ use tracing::debug;
 
 use crate::engine::model::ModelConfig;
 
+pub struct KvCacheConfig {
+    pub gpu_memory_bytes: usize,
+    pub gpu_memory_fraction: f32,
+    pub block_size: usize,
+    pub type_k: u32,
+    pub type_v: u32,
+    pub context_len: u32,
+    pub max_batch_size: usize,
+}
+
 /// Physical block ID in the KV cache pool.
 pub type BlockId = usize;
 
@@ -111,7 +121,9 @@ pub fn kv_type_bytes(t: u32) -> (u64, u64) {
 }
 
 /// Configuration for KV cache sizing.
-/// Blocks = gpu_memory_bytes * fraction / bytes_per_block
+/// Blocks = min(vram_blocks, demand_blocks)
+///   vram_blocks  = gpu_memory_bytes * fraction / bytes_per_block
+///   demand_blocks = ceil(context_len / block_size) * max_batch_size
 /// bytes_per_block = block_size × num_layers × num_heads_kv × head_dim × (bytes_K + bytes_V)
 #[allow(clippy::too_many_arguments)]
 fn compute_total_blocks(
@@ -123,6 +135,8 @@ fn compute_total_blocks(
     head_dim: usize,
     type_k: u32,
     type_v: u32,
+    context_len: u32,
+    max_batch_size: usize,
 ) -> usize {
     let elements = (block_size * num_layers * num_heads_kv * head_dim) as u64;
     let (k_num, k_den) = kv_type_bytes(type_k);
@@ -131,8 +145,22 @@ fn compute_total_blocks(
     let k_bytes = (elements * k_num).div_ceil(k_den);
     let v_bytes = (elements * v_num).div_ceil(v_den);
     let bytes_per_block = (k_bytes + v_bytes) as usize;
-    let available = (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize;
-    (available / bytes_per_block).max(1)
+    let vram_blocks =
+        (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize / bytes_per_block;
+    let blocks_per_seq = (context_len as usize).div_ceil(block_size);
+    let demand_blocks = blocks_per_seq * max_batch_size;
+    let total = vram_blocks.min(demand_blocks).max(1);
+    if demand_blocks < vram_blocks {
+        tracing::info!(
+            demand_blocks,
+            vram_blocks,
+            context_len,
+            max_batch_size,
+            "KV cache capped by context_len * batch_size (saving {} blocks)",
+            vram_blocks - demand_blocks,
+        );
+    }
+    total
 }
 
 /// Thread-safe KV cache block manager.
@@ -158,32 +186,18 @@ pub struct KVCacheManager {
 }
 
 impl KVCacheManager {
-    /// Create a new KV cache manager.
-    ///
-    /// # Arguments
-    /// * `model_config` - Model architecture (num_layers, num_heads_kv, head_dim)
-    /// * `gpu_memory_bytes` - Total GPU memory in bytes (or fallback for CPU)
-    /// * `gpu_memory_fraction` - Fraction to use for KV cache (0.0-1.0)
-    /// * `block_size` - Tokens per block
-    /// * `type_k` - Key cache element type (see `kv_type` constants)
-    /// * `type_v` - Value cache element type (see `kv_type` constants)
-    pub fn new(
-        model_config: &ModelConfig,
-        gpu_memory_bytes: usize,
-        gpu_memory_fraction: f32,
-        block_size: usize,
-        type_k: u32,
-        type_v: u32,
-    ) -> Self {
+    pub fn new(model_config: &ModelConfig, cfg: &KvCacheConfig) -> Self {
         let total_blocks = compute_total_blocks(
-            gpu_memory_bytes,
-            gpu_memory_fraction,
-            block_size,
+            cfg.gpu_memory_bytes,
+            cfg.gpu_memory_fraction,
+            cfg.block_size,
             model_config.num_layers,
             model_config.num_heads_kv,
             model_config.head_dim,
-            type_k,
-            type_v,
+            cfg.type_k,
+            cfg.type_v,
+            cfg.context_len,
+            cfg.max_batch_size,
         );
 
         let free_list: Vec<BlockId> = (0..total_blocks).collect();
@@ -191,12 +205,12 @@ impl KVCacheManager {
 
         debug!(
             total_blocks,
-            block_size, gpu_memory_bytes, "KV cache manager initialized"
+            cfg.block_size, cfg.gpu_memory_bytes, "KV cache manager initialized"
         );
 
         Self {
             total_blocks,
-            block_size,
+            block_size: cfg.block_size,
             free_list: Mutex::new(free_list),
             allocated_count: AtomicUsize::new(0),
             ref_count,
@@ -357,7 +371,18 @@ mod tests {
     fn test_allocate_free() {
         let config = test_model_config();
         let gpu_bytes = 8 * 1024 * 1024 * 1024; // 8 GB
-        let mgr = KVCacheManager::new(&config, gpu_bytes, 0.85, 16, 1, 1);
+        let mgr = KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: gpu_bytes,
+                gpu_memory_fraction: 0.85,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        );
 
         assert!(mgr.can_allocate(10));
         let ids = mgr.allocate(10).unwrap();
@@ -370,7 +395,18 @@ mod tests {
     #[test]
     fn test_memory_usage() {
         let config = test_model_config();
-        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1);
+        let mgr = KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: 1_000_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        );
 
         let ids = mgr.allocate(1).unwrap();
         let usage = mgr.memory_usage();
@@ -381,7 +417,18 @@ mod tests {
     #[test]
     fn test_ref_count_sharing() {
         let config = test_model_config();
-        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1);
+        let mgr = KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: 1_000_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        );
 
         let ids = mgr.allocate(1).unwrap();
         let id = ids[0];
@@ -403,7 +450,18 @@ mod tests {
     #[test]
     fn test_copy_on_write() {
         let config = test_model_config();
-        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1);
+        let mgr = KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: 1_000_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        );
 
         let ids = mgr.allocate(1).unwrap();
         let id = ids[0];

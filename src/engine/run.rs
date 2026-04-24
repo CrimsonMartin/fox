@@ -4,15 +4,20 @@ use anyhow::Result;
 
 use crate::scheduler::StopReason;
 
-use super::model::{InferenceRequestForModel, Logits, VisionDecodeParams, VisionPreprocessParams};
+use super::model::{
+    InferenceRequestForModel, Logits, VisionDecodeParams, VisionPrefillParams,
+    VisionPreprocessParams,
+};
 use super::InferenceEngine;
 
 impl InferenceEngine {
     /// Main inference loop.
+    ///
+    /// Vision requests: CLIP preprocessing runs in parallel via the mtmd pool,
+    /// then all preprocessed results are decoded into KV in a single batch.
+    /// Text prefill and token decode are batched as usual.
     pub async fn run_loop(self: Arc<Self>) -> Result<()> {
         let engine = self.clone();
-        // Delta trackers: AtomicU64 counters in the scheduler are monotonically increasing.
-        // We increment the Prometheus IntCounters by the step delta each loop iteration.
         let mut last_prefix_hits: u64 = 0;
         let mut last_prefix_misses: u64 = 0;
 
@@ -51,241 +56,263 @@ impl InferenceEngine {
                 continue;
             }
 
-            let prefill_ids = batch.prefill.clone();
+            // Partition prefill into vision and text-only requests.
+            let mut vision_params: Vec<(u64, i32, Option<i32>, VisionPrefillParams)> = Vec::new();
+            let mut text_prefill_ids = Vec::new();
+            if !batch.prefill.is_empty() {
+                let prefill_requests = engine.scheduler.get_running(&batch.prefill);
+                for req in &prefill_requests {
+                    if let (Some(vision_image), Some(vision_prompt)) =
+                        (&req.vision_image, &req.vision_prompt)
+                    {
+                        vision_params.push((
+                            req.id,
+                            req.kv_seq_id,
+                            req.prefix_seq_id,
+                            VisionPrefillParams {
+                                seq_id: req.kv_seq_id,
+                                text_prompt: vision_prompt.clone(),
+                                image_bytes: Arc::clone(vision_image),
+                                temperature: req.sampling.temperature,
+                                top_p: req.sampling.top_p,
+                                top_k: req.sampling.top_k,
+                                repetition_penalty: req.sampling.repetition_penalty,
+                                seed: req.sampling.seed,
+                            },
+                        ));
+                    } else {
+                        text_prefill_ids.push(req.id);
+                    }
+                }
+            }
+
             let decode_ids = batch.decode.clone();
 
-            // Run prefill and decode concurrently. They operate on disjoint
-            // request sets (determined by schedule_step above). The GPU work
-            // serializes on the llama_context mutex, but vision CLIP preprocessing
-            // and async bookkeeping overlap with decode.
-            let prefill_engine = engine.clone();
-            let decode_engine = engine.clone();
-
-            let (prefill_result, decode_result) = tokio::join!(
-                async {
-                    if prefill_ids.is_empty() {
-                        return Ok(());
+            // 1. Text prefill (batched, one mutex acquisition).
+            if !text_prefill_ids.is_empty() {
+                match engine.run_prefill(&text_prefill_ids).await {
+                    Ok(prefill_results) => {
+                        engine.handle_logits(&prefill_results, true).await?;
                     }
-                    match prefill_engine.run_prefill(&prefill_ids).await {
-                        Ok(prefill_results) => {
-                            prefill_engine.handle_logits(&prefill_results, true).await
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "prefill failed (KV cache full?): {} — stopping {} request(s) with Length",
-                                e,
-                                prefill_ids.len()
-                            );
-                            for req_id in &prefill_ids {
-                                prefill_engine
-                                    .scheduler
-                                    .mark_finished(*req_id, StopReason::Length);
-                            }
-                            Ok(())
-                        }
-                    }
-                },
-                async {
-                    if decode_ids.is_empty() {
-                        return Ok(());
-                    }
-                    match decode_engine.run_decode(&decode_ids).await {
-                        Ok(decode_results) => {
-                            decode_engine.handle_logits(&decode_results, false).await
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "decode failed (KV cache full?): {} — stopping {} request(s) with Length",
-                                e,
-                                decode_ids.len()
-                            );
-                            for req_id in &decode_ids {
-                                decode_engine
-                                    .scheduler
-                                    .mark_finished(*req_id, StopReason::Length);
-                            }
-                            Ok(())
+                    Err(e) => {
+                        tracing::warn!(
+                            "prefill failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            e,
+                            text_prefill_ids.len()
+                        );
+                        for req_id in &text_prefill_ids {
+                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
                 }
-            );
-            prefill_result?;
-            decode_result?;
+            }
+
+            // 2. Vision KV decode — CLIP was pre-computed at submission time.
+            if !vision_params.is_empty() {
+                for (_, kv_seq_id, prefix_seq_id, _) in &vision_params {
+                    if let Some(psid) = *prefix_seq_id {
+                        engine.model.clear_sequence(psid);
+                        engine.scheduler.return_prefix_seq_id(psid);
+                    }
+                    engine.model.clear_sequence(*kv_seq_id);
+                }
+
+                let t0 = std::time::Instant::now();
+                let mut decode_params: Vec<VisionDecodeParams> = Vec::new();
+                let mut decode_req_ids: Vec<u64> = Vec::new();
+                let mut fallback_handles = Vec::new();
+
+                for (req_id, kv_seq_id, _, params) in vision_params {
+                    if let Some((_, preprocessed)) =
+                        engine.vision_preprocess_results.remove(&req_id)
+                    {
+                        decode_req_ids.push(req_id);
+                        decode_params.push(VisionDecodeParams {
+                            seq_id: kv_seq_id,
+                            preprocessed,
+                            temperature: params.temperature,
+                            top_p: params.top_p,
+                            top_k: params.top_k,
+                            repetition_penalty: params.repetition_penalty,
+                            seed: params.seed,
+                        });
+                    } else {
+                        let model = engine.model.clone();
+                        let pp = VisionPreprocessParams {
+                            text_prompt: params.text_prompt.clone(),
+                            image_bytes: Arc::clone(&params.image_bytes),
+                        };
+                        let handle =
+                            tokio::task::spawn_blocking(move || model.vision_preprocess_sync(&pp));
+                        fallback_handles.push((req_id, kv_seq_id, params, handle));
+                    }
+                }
+
+                for (req_id, kv_seq_id, params, handle) in fallback_handles {
+                    match handle.await {
+                        Ok(Ok(preprocessed)) => {
+                            decode_req_ids.push(req_id);
+                            decode_params.push(VisionDecodeParams {
+                                seq_id: kv_seq_id,
+                                preprocessed,
+                                temperature: params.temperature,
+                                top_p: params.top_p,
+                                top_k: params.top_k,
+                                repetition_penalty: params.repetition_penalty,
+                                seed: params.seed,
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                request_id = req_id,
+                                "vision preprocess failed: {} — stopping with Length",
+                                e
+                            );
+                            engine.scheduler.mark_finished(req_id, StopReason::Length);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                request_id = req_id,
+                                "vision preprocess spawn failed: {} — stopping with Length",
+                                e
+                            );
+                            engine.scheduler.mark_finished(req_id, StopReason::Length);
+                        }
+                    }
+                }
+                let preprocess_ms = t0.elapsed().as_millis() as u64;
+
+                if !decode_params.is_empty() {
+                    let n_vision = decode_req_ids.len();
+                    let model = engine.model.clone();
+                    let decode_result = tokio::task::spawn_blocking(move || {
+                        model.vision_decode_prefill_batch_sync(decode_params)
+                    })
+                    .await;
+                    let total_ms = t0.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        n = n_vision,
+                        preprocess_ms,
+                        decode_ms = total_ms - preprocess_ms,
+                        total_ms,
+                        "vision batch prefill complete"
+                    );
+
+                    match decode_result {
+                        Ok(Ok(results)) => {
+                            for (i, (n_past, logits)) in results.into_iter().enumerate() {
+                                let req_id = decode_req_ids[i];
+                                engine.scheduler.set_prefilled_tokens(req_id, n_past);
+                                engine.handle_logits(&[(req_id, logits)], true).await?;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("vision batch decode failed: {}", e);
+                            for req_id in &decode_req_ids {
+                                engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("vision batch decode spawn failed: {}", e);
+                            for req_id in &decode_req_ids {
+                                engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Batched decode for all Decoding requests.
+            if !decode_ids.is_empty() {
+                let t_decode = std::time::Instant::now();
+                match engine.run_decode(&decode_ids).await {
+                    Ok(decode_results) => {
+                        let gpu_ms = t_decode.elapsed().as_millis() as u64;
+                        engine.handle_logits(&decode_results, false).await?;
+                        let total_ms = t_decode.elapsed().as_millis() as u64;
+                        if total_ms > 10 {
+                            tracing::info!(
+                                n = decode_ids.len(),
+                                gpu_ms,
+                                total_ms,
+                                "decode step slow"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "decode failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            e,
+                            decode_ids.len()
+                        );
+                        for req_id in &decode_ids {
+                            engine.model.cleanup_request(*req_id);
+                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                        }
+                    }
+                }
+            }
         }
     }
 
+    /// Text-only prefill.
     pub(super) async fn run_prefill(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
         let requests = self.scheduler.get_running(req_ids);
 
-        // Partition into vision and text-only requests.
-        let mut vision_ids: Vec<u64> = Vec::new();
-        let mut vision_seq_ids: Vec<i32> = Vec::new();
-        let mut vision_preprocess_params: Vec<VisionPreprocessParams> = Vec::new();
-        let mut vision_sampling: Vec<(f32, f32, u32, f32, Option<u64>)> = Vec::new();
-        let mut text_ids: Vec<u64> = Vec::new();
-        let mut text_model_requests: Vec<InferenceRequestForModel> = Vec::new();
-
-        for r in &requests {
-            if let (Some(vision_image), Some(vision_prompt)) = (&r.vision_image, &r.vision_prompt) {
-                vision_ids.push(r.id);
-                if let Some(prefix_sid) = r.prefix_seq_id {
-                    self.model.clear_sequence(prefix_sid);
-                    self.scheduler.return_prefix_seq_id(prefix_sid);
-                }
-                self.model.clear_sequence(r.kv_seq_id);
-                vision_seq_ids.push(r.kv_seq_id);
-                vision_preprocess_params.push(VisionPreprocessParams {
-                    text_prompt: vision_prompt.clone(),
-                    image_bytes: Arc::clone(vision_image),
-                });
-                vision_sampling.push((
-                    r.sampling.temperature,
-                    r.sampling.top_p,
-                    r.sampling.top_k,
-                    r.sampling.repetition_penalty,
-                    r.sampling.seed,
-                ));
-            } else {
-                text_ids.push(r.id);
-                text_model_requests.push(InferenceRequestForModel {
-                    id: r.id,
-                    prompt_tokens: Arc::clone(&r.prompt_tokens),
-                    last_token: r.last_token,
-                    generated_tokens: r.generated_tokens,
-                    max_new_tokens: r.max_new_tokens,
-                    context_len: r.context_len(),
-                    kv_seq_id: r.kv_seq_id,
-                    temperature: r.sampling.temperature,
-                    top_p: r.sampling.top_p,
-                    top_k: r.sampling.top_k,
-                    min_p: r.sampling.min_p,
-                    repetition_penalty: r.sampling.repetition_penalty,
-                    frequency_penalty: r.sampling.frequency_penalty,
-                    presence_penalty: r.sampling.presence_penalty,
-                    seed: r.sampling.seed,
-                    generated_token_ids: r.generated_token_ids.clone(),
-                    skip_prefix_tokens: r.skip_prefix_tokens,
-                    prefix_seq_id: r.prefix_seq_id,
-                });
-            }
-        }
-
-        let mut all_results: Vec<(u64, Logits)> = Vec::new();
-
-        // Vision requests: parallel CLIP preprocess, pipelined decode.
-        // CLIP results are decoded as soon as they're ready (overlapping CLIP and decode).
-        if !vision_ids.is_empty() {
-            // Fire all CLIP preprocess tasks in parallel.
-            let mut preprocess_handles = Vec::new();
-            for (i, _id) in vision_ids.iter().enumerate() {
-                let image_bytes = Arc::clone(&vision_preprocess_params[i].image_bytes);
-                let image_hash = Self::hash_image_bytes(&image_bytes);
-                let cached = self
-                    .clip_cache
-                    .lock()
-                    .ok()
-                    .and_then(|mut c| c.get(&image_hash).map(Arc::clone));
-
-                let model = self.model.clone();
-                let params = VisionPreprocessParams {
-                    text_prompt: vision_preprocess_params[i].text_prompt.clone(),
-                    image_bytes: Arc::clone(&vision_preprocess_params[i].image_bytes),
-                };
-
-                preprocess_handles.push((
-                    i,
-                    tokio::task::spawn_blocking(move || {
-                        let pp = model
-                            .vision_preprocess_sync_with_cache(&params, cached)
-                            .or_else(|_| model.vision_preprocess_sync(&params))?;
-                        Ok::<_, anyhow::Error>((image_hash, pp))
-                    }),
-                ));
-            }
-
-            // Process CLIP results as they complete, immediately starting decode.
-            // FuturesUnordered yields results in completion order, so fast CLIP
-            // results get decoded while slower ones are still encoding.
-            use futures::stream::{FuturesUnordered, StreamExt};
-            let mut futs: FuturesUnordered<_> = preprocess_handles
-                .into_iter()
-                .map(|(idx, handle)| async move { (idx, handle.await) })
-                .collect();
-
-            while let Some((idx, join_result)) = futs.next().await {
-                let (image_hash, pp) = join_result
-                    .map_err(|e| anyhow::anyhow!("vision preprocess spawn_blocking: {}", e))??;
-
-                // Store CLIP embeddings in cache.
-                if let Ok(mut cache) = self.clip_cache.lock() {
-                    if let Some((_, embd)) = pp.image_embeddings.first() {
-                        cache.put(image_hash, Arc::clone(embd));
-                    }
-                }
-
-                let (temp, top_p, top_k, rep_pen, seed) = vision_sampling[idx];
-                let decode_params = vec![VisionDecodeParams {
-                    seq_id: vision_seq_ids[idx],
-                    preprocessed: pp,
-                    temperature: temp,
-                    top_p,
-                    top_k,
-                    repetition_penalty: rep_pen,
-                    seed,
-                }];
-                let req_id = vision_ids[idx];
-
-                // Decode immediately — acquires llama_context mutex.
-                // While this decode runs, other CLIP tasks continue on separate threads.
-                let model = self.model.clone();
-                let mut results = tokio::task::spawn_blocking(move || {
-                    model.vision_decode_prefill_batch_sync(decode_params)
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("vision decode spawn_blocking: {}", e))??;
-
-                if let Some((n_past, logits)) = results.pop() {
-                    self.scheduler.set_prefilled_tokens(req_id, n_past);
-                    all_results.push((req_id, logits));
-                }
-            }
-        }
-
-        // Text-only requests: existing batched prefill path.
-        if !text_ids.is_empty() {
-            let prefix_cleanup: Vec<i32> = text_model_requests
-                .iter()
-                .filter_map(|r| r.prefix_seq_id)
-                .collect();
-
-            let model = self.model.clone();
-            let text_ids_clone = text_ids.clone();
-            let raw = tokio::task::spawn_blocking(move || {
-                model.prefill_sync(&text_ids_clone, &text_model_requests)
+        let model_requests: Vec<InferenceRequestForModel> = requests
+            .iter()
+            .map(|r| InferenceRequestForModel {
+                id: r.id,
+                prompt_tokens: Arc::clone(&r.prompt_tokens),
+                last_token: r.last_token,
+                generated_tokens: r.generated_tokens,
+                max_new_tokens: r.max_new_tokens,
+                context_len: r.context_len(),
+                kv_seq_id: r.kv_seq_id,
+                temperature: r.sampling.temperature,
+                top_p: r.sampling.top_p,
+                top_k: r.sampling.top_k,
+                min_p: r.sampling.min_p,
+                repetition_penalty: r.sampling.repetition_penalty,
+                frequency_penalty: r.sampling.frequency_penalty,
+                presence_penalty: r.sampling.presence_penalty,
+                seed: r.sampling.seed,
+                generated_token_ids: r.generated_token_ids.clone(),
+                skip_prefix_tokens: r.skip_prefix_tokens,
+                prefix_seq_id: r.prefix_seq_id,
             })
+            .collect();
+
+        let prefix_cleanup: Vec<i32> = model_requests
+            .iter()
+            .filter_map(|r| r.prefix_seq_id)
+            .collect();
+
+        let model = self.model.clone();
+        let ids = req_ids.to_vec();
+        let raw = tokio::task::spawn_blocking(move || model.prefill_sync(&ids, &model_requests))
             .await
             .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
 
-            for prefix_seq_id in prefix_cleanup {
-                self.model.clear_sequence(prefix_seq_id);
-                self.scheduler.return_prefix_seq_id(prefix_seq_id);
-            }
-
-            for (id, logits, tokens_in_kv) in raw {
-                if tokens_in_kv > 0 {
-                    self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
-                }
-                all_results.push((id, logits));
-            }
+        for prefix_seq_id in prefix_cleanup {
+            self.model.clear_sequence(prefix_seq_id);
+            self.scheduler.return_prefix_seq_id(prefix_seq_id);
         }
 
-        Ok(all_results)
+        let mut results = Vec::new();
+        for (id, logits, tokens_in_kv) in raw {
+            if tokens_in_kv > 0 {
+                self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
+            }
+            results.push((id, logits));
+        }
+
+        Ok(results)
     }
 
     pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
         // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
         // allocate a new exclusive copy before llama.cpp writes to it.
-        // Fetch all requests in one call to avoid per-request lock acquisition.
         {
             let cow_requests = self.scheduler.get_running(req_ids);
             for req in &cow_requests {

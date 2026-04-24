@@ -15,7 +15,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::engine::InferenceEngine;
-use crate::kv_cache::KVCacheManager;
+use crate::kv_cache::{KVCacheManager, KvCacheConfig};
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
 use super::{get_gpu_memory_bytes, get_total_gpu_memory_bytes, resolve_model_path, theme};
@@ -132,11 +132,15 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
     let gpu_memory_bytes = gpu_memory_bytes_load;
     let kv_cache = Arc::new(KVCacheManager::new(
         &model_config,
-        gpu_memory_bytes,
-        0.85,
-        16,
-        1,
-        1,
+        &KvCacheConfig {
+            gpu_memory_bytes,
+            gpu_memory_fraction: 0.85,
+            block_size: 16,
+            type_k: 1,
+            type_v: 1,
+            context_len: u32::MAX,
+            max_batch_size: 1,
+        },
     ));
     let scheduler = Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
     let model = Arc::new(model);

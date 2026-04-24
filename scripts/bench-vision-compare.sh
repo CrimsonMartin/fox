@@ -47,13 +47,13 @@ cleanup() {
     rm -rf "$TMPDIR"
 }
 
-# Generate unique 32x32 PNGs
-echo -n "Generating $REQUESTS unique images..."
+# Generate unique 256x256 PNGs (realistic size for vision benchmarks)
+echo -n "Generating $REQUESTS unique images (256x256)..."
 python3 - "$REQUESTS" "$TMPDIR" << 'PYEOF'
 import struct, zlib, base64, os, sys
 
 def make_png(r, g, b):
-    width, height = 32, 32
+    width, height = 256, 256
     raw = b''
     for _ in range(height):
         raw += b'\x00' + bytes([r, g, b]) * width
@@ -106,6 +106,21 @@ run_bench() {
         -d @"$TMPDIR/req_${req_prefix}_1.json" -o /dev/null
     echo " done"
 
+    # Measure VRAM after warmup (model fully loaded)
+    local VRAM_MIB
+    VRAM_MIB=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
+
+    # Sample peak VRAM during benchmark in background
+    local VRAM_PEAK="$VRAM_MIB"
+    (
+        while true; do
+            v=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
+            echo "$v" >> "$outdir/vram_samples.txt"
+            sleep 0.5
+        done
+    ) &
+    local VRAM_SAMPLER_PID=$!
+
     echo "  Running $REQUESTS requests at concurrency $CONCURRENCY..."
     local START END ELAPSED_MS
     START=$(date +%s%N)
@@ -134,6 +149,13 @@ run_bench() {
 
     END=$(date +%s%N)
     ELAPSED_MS=$(( (END - START) / 1000000 ))
+
+    # Stop VRAM sampler and find peak
+    kill "$VRAM_SAMPLER_PID" 2>/dev/null; wait "$VRAM_SAMPLER_PID" 2>/dev/null || true
+    if [ -f "$outdir/vram_samples.txt" ]; then
+        VRAM_PEAK=$(sort -n "$outdir/vram_samples.txt" | tail -1)
+    fi
+    echo "  VRAM: ${VRAM_MIB} MiB loaded, ${VRAM_PEAK} MiB peak"
 
     # Collect results
     local TIMES=() ERRORS=0 TOTAL_TOKENS=0
@@ -167,8 +189,8 @@ run_bench() {
     ELAPSED_S=$(echo "scale=2; $ELAPSED_MS / 1000" | bc)
     RPS=$(echo "scale=2; $REQUESTS / ($ELAPSED_MS / 1000)" | bc)
 
-    # Save summary
-    echo "${ELAPSED_S}|${RPS}|${P50}|${P95}|${P99}|${MIN}|${MAX}|${ERRORS}|${TOTAL_TOKENS}" > "$outdir/summary.txt"
+    # Save summary (added VRAM_MIB and VRAM_PEAK at the end)
+    echo "${ELAPSED_S}|${RPS}|${P50}|${P95}|${P99}|${MIN}|${MAX}|${ERRORS}|${TOTAL_TOKENS}|${VRAM_MIB}|${VRAM_PEAK}" > "$outdir/summary.txt"
     echo "  Done: ${ELAPSED_S}s, ${RPS} req/s, P50=${P50}s, ${ERRORS} errors"
 }
 
@@ -251,16 +273,103 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${BOLD}=== Results ($REQUESTS requests, concurrency $CONCURRENCY) ===${NC}"
-printf "%-16s %8s %8s %8s %8s %6s %6s\n" "Server" "Time(s)" "Req/s" "P50(s)" "P95(s)" "P99(s)" "Errs"
-printf "%-16s %8s %8s %8s %8s %6s %6s\n" "────────────────" "────────" "────────" "────────" "────────" "──────" "──────"
+printf "%-16s %8s %8s %8s %8s %6s %10s %10s\n" "Server" "Time(s)" "Req/s" "P50(s)" "P95(s)" "Errs" "VRAM(MiB)" "Peak(MiB)"
+printf "%-16s %8s %8s %8s %8s %6s %10s %10s\n" "────────────────" "────────" "────────" "────────" "────────" "──────" "──────────" "──────────"
 
 for label in fox llamacpp ollama; do
     summary="$TMPDIR/$label/summary.txt"
     if [ -f "$summary" ]; then
-        IFS='|' read -r elapsed rps p50 p95 p99 _min _max errs tokens < "$summary"
-        printf "%-16s %8s %8s %8s %8s %6s %6s\n" "$label" "$elapsed" "$rps" "$p50" "$p95" "$errs" "$tokens"
+        IFS='|' read -r elapsed rps p50 p95 p99 _min _max errs tokens vram vpeak < "$summary"
+        printf "%-16s %8s %8s %8s %8s %6s %10s %10s\n" "$label" "$elapsed" "$rps" "$p50" "$p95" "$errs" "$vram" "$vpeak"
     else
         printf "%-16s %8s\n" "$label" "SKIPPED"
+    fi
+done
+
+# Bar charts
+echo ""
+echo -e "${BOLD}Throughput (req/s)${NC}"
+MAX_RPS=0
+declare -A RPS_MAP VRAM_MAP
+for label in fox llamacpp ollama; do
+    summary="$TMPDIR/$label/summary.txt"
+    if [ -f "$summary" ]; then
+        IFS='|' read -r _e rps _p50 _p95 _p99 _mn _mx _er _tk vram vpeak < "$summary"
+        RPS_MAP[$label]="$rps"
+        VRAM_MAP[$label]="$vpeak"
+        rps_int=${rps%.*}
+        [ "$rps_int" -gt "$MAX_RPS" ] && MAX_RPS=$rps_int
+    fi
+done
+BAR_WIDTH=40
+for label in fox llamacpp ollama; do
+    if [ -n "${RPS_MAP[$label]:-}" ]; then
+        rps="${RPS_MAP[$label]}"
+        rps_int=${rps%.*}
+        if [ "$MAX_RPS" -gt 0 ]; then
+            bar_len=$(( rps_int * BAR_WIDTH / MAX_RPS ))
+        else
+            bar_len=0
+        fi
+        bar=$(printf '%0.s█' $(seq 1 $bar_len 2>/dev/null) 2>/dev/null || true)
+        printf "  %-10s %s %s req/s\n" "$label" "$bar" "$rps"
+    else
+        printf "  %-10s SKIPPED\n" "$label"
+    fi
+done
+
+echo ""
+echo -e "${BOLD}VRAM Usage (MiB, peak during benchmark)${NC}"
+MAX_VRAM=0
+for label in fox llamacpp ollama; do
+    if [ -n "${VRAM_MAP[$label]:-}" ]; then
+        v="${VRAM_MAP[$label]}"
+        v_int=${v%.*}
+        [ "$v_int" -gt "$MAX_VRAM" ] && MAX_VRAM=$v_int
+    fi
+done
+for label in fox llamacpp ollama; do
+    if [ -n "${VRAM_MAP[$label]:-}" ]; then
+        v="${VRAM_MAP[$label]}"
+        v_int=${v%.*}
+        if [ "$MAX_VRAM" -gt 0 ]; then
+            bar_len=$(( v_int * BAR_WIDTH / MAX_VRAM ))
+        else
+            bar_len=0
+        fi
+        bar=$(printf '%0.s█' $(seq 1 $bar_len 2>/dev/null) 2>/dev/null || true)
+        printf "  %-10s %s %s MiB\n" "$label" "$bar" "$v"
+    else
+        printf "  %-10s SKIPPED\n" "$label"
+    fi
+done
+
+echo ""
+echo -e "${BOLD}Latency P50 (seconds, lower is better)${NC}"
+MAX_P50=0
+declare -A P50_MAP
+for label in fox llamacpp ollama; do
+    summary="$TMPDIR/$label/summary.txt"
+    if [ -f "$summary" ]; then
+        IFS='|' read -r _e _r p50 _p95 _p99 _mn _mx _er _tk _v _vp < "$summary"
+        P50_MAP[$label]="$p50"
+        p50_ms=$(echo "$p50 * 1000" | bc | cut -d. -f1)
+        [ "$p50_ms" -gt "$MAX_P50" ] && MAX_P50=$p50_ms
+    fi
+done
+for label in fox llamacpp ollama; do
+    if [ -n "${P50_MAP[$label]:-}" ]; then
+        p50="${P50_MAP[$label]}"
+        p50_ms=$(echo "$p50 * 1000" | bc | cut -d. -f1)
+        if [ "$MAX_P50" -gt 0 ]; then
+            bar_len=$(( p50_ms * BAR_WIDTH / MAX_P50 ))
+        else
+            bar_len=0
+        fi
+        bar=$(printf '%0.s█' $(seq 1 $bar_len 2>/dev/null) 2>/dev/null || true)
+        printf "  %-10s %s %ss\n" "$label" "$bar" "$p50"
+    else
+        printf "  %-10s SKIPPED\n" "$label"
     fi
 done
 echo ""

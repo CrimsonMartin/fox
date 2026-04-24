@@ -16,7 +16,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::engine::InferenceEngine;
-use crate::kv_cache::KVCacheManager;
+use crate::kv_cache::{KVCacheManager, KvCacheConfig};
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
 use super::resolve_model_path;
@@ -219,11 +219,15 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     let gpu_memory_bytes = gpu_memory_bytes_load;
     let kv_cache = std::sync::Arc::new(KVCacheManager::new(
         &model_config,
-        gpu_memory_bytes,
-        args.gpu_memory_fraction,
-        args.block_size,
-        1,
-        1,
+        &KvCacheConfig {
+            gpu_memory_bytes,
+            gpu_memory_fraction: args.gpu_memory_fraction,
+            block_size: args.block_size,
+            type_k: 1,
+            type_v: 1,
+            context_len: model.context_len(),
+            max_batch_size: 1,
+        },
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
 

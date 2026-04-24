@@ -1,13 +1,83 @@
 use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
-use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
 use crate::engine::model::{
     InferenceRequestForModel, Logits, PreprocessedVision, VisionDecodeParams,
 };
 use crate::engine::mtmd_ffi;
 
 use super::LlamaCppModel;
+
+struct FfiSamplerParams<'a> {
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    min_p: f32,
+    repetition_penalty: f32,
+    frequency_penalty: f32,
+    presence_penalty: f32,
+    generated_ids: &'a [i32],
+    seed: Option<u64>,
+}
+
+unsafe fn create_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi::llama_sampler {
+    let params = ffi::llama_sampler_chain_default_params();
+    let chain = ffi::llama_sampler_chain_init(params);
+
+    let has_penalties =
+        p.repetition_penalty != 1.0 || p.frequency_penalty != 0.0 || p.presence_penalty != 0.0;
+
+    if has_penalties {
+        ffi::llama_sampler_chain_add(
+            chain,
+            ffi::llama_sampler_init_penalties(
+                p.generated_ids.len() as i32,
+                p.repetition_penalty,
+                p.frequency_penalty,
+                p.presence_penalty,
+            ),
+        );
+    }
+
+    if p.top_k > 0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_top_k(p.top_k as i32));
+    }
+    if p.top_p < 1.0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_top_p(p.top_p, 1));
+    }
+    if p.min_p > 0.0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_min_p(p.min_p, 1));
+    }
+
+    if p.temperature <= 0.0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_greedy());
+    } else {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_temp(p.temperature));
+        let seed_val = p.seed.unwrap_or(0xFFFFFFFF_u64) as u32;
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_dist(seed_val));
+    }
+
+    if has_penalties {
+        for &tok in p.generated_ids {
+            ffi::llama_sampler_accept(chain, tok);
+        }
+    }
+
+    chain
+}
+
+/// One-shot sample: creates an ephemeral chain, samples, frees. Used for prefill
+/// and vision paths that are called once per request.
+unsafe fn ffi_sample(
+    ctx: *mut ffi::llama_context,
+    batch_idx: i32,
+    p: &FfiSamplerParams<'_>,
+) -> i32 {
+    let chain = create_sampler_chain(p);
+    let token = ffi::llama_sampler_sample(chain, ctx, batch_idx);
+    ffi::llama_sampler_free(chain);
+    token
+}
 
 impl LlamaCppModel {
     pub(super) fn do_prefill(
@@ -113,7 +183,6 @@ impl LlamaCppModel {
             return Err(anyhow!("llama_decode failed: {}", ret));
         }
 
-        let n_vocab = self.config.vocab_size as i32;
         let mut results = Vec::with_capacity(requests.len());
 
         for (i, &req_id) in req_ids.iter().enumerate() {
@@ -132,29 +201,44 @@ impl LlamaCppModel {
                 results.push((req_id, Logits::new(vec![], self.eos_token), tokens_in_kv));
                 continue;
             }
-            let logits_slice: &[f32] =
-                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
             let sampled = if let Some(r) = req {
-                sample_token(
-                    logits_slice,
-                    SamplerParams {
-                        temperature: r.temperature,
-                        top_p: r.top_p,
-                        top_k: r.top_k,
-                        min_p: r.min_p,
-                        repetition_penalty: r.repetition_penalty,
-                        frequency_penalty: r.frequency_penalty,
-                        presence_penalty: r.presence_penalty,
-                        generated_ids: &r.generated_token_ids,
-                        seed: r.seed,
-                        token_count: r.generated_tokens,
-                    },
-                )
+                unsafe {
+                    ffi_sample(
+                        ctx,
+                        batch_idx,
+                        &FfiSamplerParams {
+                            temperature: r.temperature,
+                            top_p: r.top_p,
+                            top_k: r.top_k,
+                            min_p: r.min_p,
+                            repetition_penalty: r.repetition_penalty,
+                            frequency_penalty: r.frequency_penalty,
+                            presence_penalty: r.presence_penalty,
+                            generated_ids: &r.generated_token_ids,
+                            seed: r.seed,
+                        },
+                    )
+                }
             } else {
-                sample_greedy(logits_slice)
+                unsafe {
+                    ffi_sample(
+                        ctx,
+                        batch_idx,
+                        &FfiSamplerParams {
+                            temperature: 0.0,
+                            top_p: 1.0,
+                            top_k: 0,
+                            min_p: 0.0,
+                            repetition_penalty: 1.0,
+                            frequency_penalty: 0.0,
+                            presence_penalty: 0.0,
+                            generated_ids: &[],
+                            seed: None,
+                        },
+                    )
+                }
             };
-            let values: Vec<f32> = logits_slice.to_vec();
-            results.push((req_id, Logits::new(values, sampled), tokens_in_kv));
+            results.push((req_id, Logits::new(vec![], sampled), tokens_in_kv));
         }
 
         unsafe { ffi::llama_batch_free(batch) };
@@ -170,6 +254,7 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
+        let t0 = std::time::Instant::now();
         let n_tokens = requests.len() as i32;
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
 
@@ -178,10 +263,8 @@ impl LlamaCppModel {
                 .last_token
                 .or_else(|| req.prompt_tokens.last().copied())
                 .unwrap_or(self.eos_token);
-            // context_len = prompt_len + generated_tokens (already incremented after prefill),
-            // so the correct KV position for this token is context_len - 1.
             let pos = req.context_len as i32 - 1;
-            let seq_id = req.kv_seq_id; // stable ID — never the batch slot index
+            let seq_id = req.kv_seq_id;
 
             unsafe {
                 *batch.token.add(batch_slot) = input_token;
@@ -194,54 +277,82 @@ impl LlamaCppModel {
             batch.n_tokens += 1;
         }
 
+        let t_batch = t0.elapsed();
         let ctx_guard = self
             ._ctx
             .lock()
             .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
+        let t_lock = t0.elapsed();
 
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        let t_decode = t0.elapsed();
         if ret != 0 {
             unsafe { ffi::llama_batch_free(batch) };
             return Err(anyhow!("llama_decode failed: {}", ret));
         }
 
-        let n_vocab = self.config.vocab_size as i32;
         let mut results = Vec::with_capacity(requests.len());
 
-        for (out_idx, &req_id) in req_ids.iter().enumerate() {
-            let req = requests.get(out_idx);
-            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, out_idx as i32) };
-            if logits_ptr.is_null() {
-                results.push((req_id, Logits::new(vec![], self.eos_token)));
-                continue;
+        {
+            let mut chains = self
+                .sampler_chains
+                .lock()
+                .expect("sampler_chains lock poisoned");
+
+            for (out_idx, &req_id) in req_ids.iter().enumerate() {
+                let req = requests.get(out_idx);
+                let chain = chains.entry(req_id).or_insert_with(|| {
+                    let p = req
+                        .map(|r| FfiSamplerParams {
+                            temperature: r.temperature,
+                            top_p: r.top_p,
+                            top_k: r.top_k,
+                            min_p: r.min_p,
+                            repetition_penalty: r.repetition_penalty,
+                            frequency_penalty: r.frequency_penalty,
+                            presence_penalty: r.presence_penalty,
+                            generated_ids: &r.generated_token_ids,
+                            seed: r.seed,
+                        })
+                        .unwrap_or(FfiSamplerParams {
+                            temperature: 0.0,
+                            top_p: 1.0,
+                            top_k: 0,
+                            min_p: 0.0,
+                            repetition_penalty: 1.0,
+                            frequency_penalty: 0.0,
+                            presence_penalty: 0.0,
+                            generated_ids: &[],
+                            seed: None,
+                        });
+                    unsafe { create_sampler_chain(&p) }
+                });
+
+                let sampled = unsafe {
+                    let token = ffi::llama_sampler_sample(*chain, ctx, out_idx as i32);
+                    ffi::llama_sampler_accept(*chain, token);
+                    token
+                };
+                results.push((req_id, Logits::new(vec![], sampled)));
             }
-            let logits_slice: &[f32] =
-                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
-            let sampled = if let Some(r) = req {
-                sample_token(
-                    logits_slice,
-                    SamplerParams {
-                        temperature: r.temperature,
-                        top_p: r.top_p,
-                        top_k: r.top_k,
-                        min_p: r.min_p,
-                        repetition_penalty: r.repetition_penalty,
-                        frequency_penalty: r.frequency_penalty,
-                        presence_penalty: r.presence_penalty,
-                        generated_ids: &r.generated_token_ids,
-                        seed: r.seed,
-                        token_count: r.generated_tokens,
-                    },
-                )
-            } else {
-                sample_greedy(logits_slice)
-            };
-            let values: Vec<f32> = logits_slice.to_vec();
-            results.push((req_id, Logits::new(values, sampled)));
         }
+        let t_sample = t0.elapsed();
 
         unsafe { ffi::llama_batch_free(batch) };
+
+        if t_sample.as_millis() > 10 {
+            tracing::info!(
+                n = n_tokens,
+                batch_us = t_batch.as_micros() as u64,
+                lock_us = (t_lock - t_batch).as_micros() as u64,
+                decode_ms = (t_decode - t_lock).as_millis() as u64,
+                sample_us = (t_sample - t_decode).as_micros() as u64,
+                total_ms = t_sample.as_millis() as u64,
+                "do_decode breakdown"
+            );
+        }
+
         Ok(results)
     }
 
@@ -529,29 +640,24 @@ impl LlamaCppModel {
             }
         }
 
-        let logits_ptr = unsafe { ffi::llama_get_logits_ith(lctx, -1) };
-        if logits_ptr.is_null() {
-            return Err(anyhow!("no logits after vision decode prefill"));
-        }
-        let n_vocab = self.config.vocab_size as i32;
-        let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
-        let sampled = sample_token(
-            logits_slice,
-            SamplerParams {
-                temperature,
-                top_p,
-                top_k,
-                min_p: 0.0,
-                repetition_penalty,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
-                generated_ids: &[],
-                seed,
-                token_count: 0,
-            },
-        );
-        let values = logits_slice.to_vec();
-        Ok((n_past as usize, Logits::new(values, sampled)))
+        let sampled = unsafe {
+            ffi_sample(
+                lctx,
+                -1,
+                &FfiSamplerParams {
+                    temperature,
+                    top_p,
+                    top_k,
+                    min_p: 0.0,
+                    repetition_penalty,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    generated_ids: &[],
+                    seed,
+                },
+            )
+        };
+        Ok((n_past as usize, Logits::new(vec![], sampled)))
     }
 
     /// Preprocess with optional cached CLIP embeddings.
@@ -671,34 +777,62 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
+        let t0 = std::time::Instant::now();
         let ctx_guard = self
             ._ctx
             .lock()
             .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let lctx = ctx_guard.as_ptr();
+        let lock_us = t0.elapsed().as_micros();
         let n_batch = self.effective_ctx as i32;
-        let n_vocab = self.config.vocab_size as i32;
         let n_mmproj_embd = self.n_embd_inp;
+        let n_requests = params.len();
 
-        let mut results = Vec::with_capacity(params.len());
-
+        // Pre-parse all requests' chunk info so we can batch across requests.
+        struct RequestChunkInfo {
+            n_chunks: usize,
+        }
+        let mut req_infos: Vec<RequestChunkInfo> = Vec::with_capacity(n_requests);
         for p in &params {
             let chunks = p.preprocessed.chunks as *mut mtmd_ffi::mtmd_input_chunks;
             let n_chunks = unsafe { mtmd_ffi::mtmd_input_chunks_size(chunks) };
-            let mut n_past: i32 = 0;
+            req_infos.push(RequestChunkInfo { n_chunks });
+        }
+        let max_chunks = req_infos.iter().map(|r| r.n_chunks).max().unwrap_or(0);
 
-            let mut embd_map: std::collections::HashMap<usize, &Vec<f32>> =
-                std::collections::HashMap::new();
-            for (idx, embd) in &p.preprocessed.image_embeddings {
-                embd_map.insert(*idx, embd.as_ref());
-            }
+        // Per-request position tracking.
+        let mut n_past: Vec<i32> = vec![0; n_requests];
 
-            for i in 0..n_chunks {
-                let chunk = unsafe { mtmd_ffi::mtmd_input_chunks_get(chunks, i) };
+        // Build per-request embedding lookup.
+        let embd_maps: Vec<std::collections::HashMap<usize, &Vec<f32>>> = params
+            .iter()
+            .map(|p| {
+                p.preprocessed
+                    .image_embeddings
+                    .iter()
+                    .map(|(idx, embd)| (*idx, embd.as_ref()))
+                    .collect()
+            })
+            .collect();
+
+        let mut text_decode_us: u64 = 0;
+        let mut embd_decode_us: u64 = 0;
+
+        // Process chunks by index across all requests (enables future cross-request batching).
+        for chunk_idx in 0..max_chunks {
+            // Separate text and image chunks at this index.
+            for (ri, p) in params.iter().enumerate() {
+                if chunk_idx >= req_infos[ri].n_chunks {
+                    continue;
+                }
+                let chunks = p.preprocessed.chunks as *mut mtmd_ffi::mtmd_input_chunks;
+                let chunk = unsafe { mtmd_ffi::mtmd_input_chunks_get(chunks, chunk_idx) };
                 let chunk_type = unsafe { mtmd_ffi::mtmd_input_chunk_get_type(chunk) };
-                let is_last = i == n_chunks - 1;
+                let is_last = chunk_idx == req_infos[ri].n_chunks - 1;
 
                 if chunk_type == 0 {
+                    // Text chunk
+                    let tc = std::time::Instant::now();
                     let mut n_tokens_out: usize = 0;
                     let tokens_ptr = unsafe {
                         mtmd_ffi::mtmd_input_chunk_get_tokens_text(chunk, &mut n_tokens_out)
@@ -721,13 +855,13 @@ impl LlamaCppModel {
                             let j = unsafe { (*batch_ptr).n_tokens } as usize;
                             unsafe {
                                 *(*batch_ptr).token.add(j) = tokens[ti];
-                                *(*batch_ptr).pos.add(j) = n_past;
+                                *(*batch_ptr).pos.add(j) = n_past[ri];
                                 *(*batch_ptr).n_seq_id.add(j) = 1;
                                 *(*(*batch_ptr).seq_id.add(j)) = p.seq_id;
                                 *(*batch_ptr).logits.add(j) = 0;
                                 (*batch_ptr).n_tokens += 1;
                             }
-                            n_past += 1;
+                            n_past[ri] += 1;
                             ti += 1;
                         }
 
@@ -751,10 +885,13 @@ impl LlamaCppModel {
                         }
                     }
                     unsafe { ffi::llama_batch_free(text_batch) };
+                    text_decode_us += tc.elapsed().as_micros() as u64;
                 } else {
-                    let embd = embd_map
-                        .get(&i)
-                        .ok_or_else(|| anyhow!("missing pre-encoded embeddings for chunk {}", i))?;
+                    // Image embedding chunk
+                    let tc = std::time::Instant::now();
+                    let embd = embd_maps[ri].get(&chunk_idx).ok_or_else(|| {
+                        anyhow!("missing pre-encoded embeddings for chunk {}", chunk_idx)
+                    })?;
 
                     let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
 
@@ -762,26 +899,13 @@ impl LlamaCppModel {
                         unsafe { ffi::llama_set_causal_attn(lctx, false) };
                     }
 
-                    // Inline image embedding decode: create embedding batch and call llama_decode.
                     let mut embd_offset = 0i32;
                     while embd_offset < n_tokens {
                         let batch_len = (n_tokens - embd_offset).min(n_batch);
-                        let embd_batch = ffi::llama_batch {
-                            n_tokens: batch_len,
-                            token: std::ptr::null_mut(),
-                            embd: embd
-                                .as_ptr()
-                                .wrapping_add((embd_offset as usize) * n_mmproj_embd)
-                                as *mut f32,
-                            pos: std::ptr::null_mut(),
-                            n_seq_id: std::ptr::null_mut(),
-                            seq_id: std::ptr::null_mut(),
-                            logits: std::ptr::null_mut(),
-                        };
 
-                        // Build position/seq arrays on the stack for this sub-batch.
-                        let mut pos_arr: Vec<i32> =
-                            (0..batch_len).map(|j| n_past + embd_offset + j).collect();
+                        let mut pos_arr: Vec<i32> = (0..batch_len)
+                            .map(|j| n_past[ri] + embd_offset + j)
+                            .collect();
                         let mut n_seq_arr: Vec<i32> = vec![1; batch_len as usize];
                         let mut seq_id_val: i32 = p.seq_id;
                         let mut seq_ptrs: Vec<*mut i32> =
@@ -800,7 +924,6 @@ impl LlamaCppModel {
                             seq_id: seq_ptrs.as_mut_ptr(),
                             logits: logits_arr.as_mut_ptr(),
                         };
-                        let _ = embd_batch; // suppress unused
 
                         let ret = unsafe { ffi::llama_decode(lctx, batch_with_meta) };
                         if ret != 0 {
@@ -818,34 +941,48 @@ impl LlamaCppModel {
                     if self.vision_use_non_causal {
                         unsafe { ffi::llama_set_causal_attn(lctx, true) };
                     }
-                    n_past += unsafe { mtmd_ffi::mtmd_input_chunk_get_n_pos(chunk) };
+                    n_past[ri] += unsafe { mtmd_ffi::mtmd_input_chunk_get_n_pos(chunk) };
+                    embd_decode_us += tc.elapsed().as_micros() as u64;
                 }
             }
-
-            let logits_ptr = unsafe { ffi::llama_get_logits_ith(lctx, -1) };
-            if logits_ptr.is_null() {
-                return Err(anyhow!("no logits after vision decode prefill"));
-            }
-            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
-
-            let sampled = sample_token(
-                logits_slice,
-                SamplerParams {
-                    temperature: p.temperature,
-                    top_p: p.top_p,
-                    top_k: p.top_k,
-                    min_p: 0.0,
-                    repetition_penalty: p.repetition_penalty,
-                    frequency_penalty: 0.0,
-                    presence_penalty: 0.0,
-                    generated_ids: &[],
-                    seed: p.seed,
-                    token_count: 0,
-                },
-            );
-            let values = logits_slice.to_vec();
-            results.push((n_past as usize, super::Logits::new(values, sampled)));
         }
+
+        let chunks_done_us = t0.elapsed().as_micros();
+
+        // Sample all requests.
+        let mut results = Vec::with_capacity(n_requests);
+        for (ri, p) in params.iter().enumerate() {
+            let sampled = unsafe {
+                ffi_sample(
+                    lctx,
+                    -1,
+                    &FfiSamplerParams {
+                        temperature: p.temperature,
+                        top_p: p.top_p,
+                        top_k: p.top_k,
+                        min_p: 0.0,
+                        repetition_penalty: p.repetition_penalty,
+                        frequency_penalty: 0.0,
+                        presence_penalty: 0.0,
+                        generated_ids: &[],
+                        seed: p.seed,
+                    },
+                )
+            };
+            results.push((n_past[ri] as usize, super::Logits::new(vec![], sampled)));
+        }
+
+        let total_us = t0.elapsed().as_micros();
+        tracing::info!(
+            n = n_requests,
+            lock_us,
+            text_decode_us,
+            embd_decode_us,
+            chunks_done_ms = chunks_done_us / 1000,
+            sample_us = total_us - chunks_done_us,
+            total_ms = total_us / 1000,
+            "vision_decode_prefill_batch timing"
+        );
 
         Ok(results)
     }
@@ -872,5 +1009,13 @@ impl LlamaCppModel {
             repetition_penalty,
             seed,
         )
+    }
+
+    pub(super) fn remove_sampler_chain(&self, req_id: u64) {
+        if let Ok(mut chains) = self.sampler_chains.lock() {
+            if let Some(chain) = chains.remove(&req_id) {
+                unsafe { ffi::llama_sampler_free(chain) };
+            }
+        }
     }
 }

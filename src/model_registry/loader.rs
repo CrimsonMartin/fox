@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::engine::InferenceEngine;
-use crate::kv_cache::KVCacheManager;
+use crate::kv_cache::{KVCacheManager, KvCacheConfig};
 use crate::scheduler::Scheduler;
 
 use super::config::kv_type;
@@ -201,13 +201,18 @@ pub(super) async fn load_model(
 
     let model_config = model.model_config();
     let model: Arc<dyn Model> = Arc::new(model);
+    let effective_context_len = model.context_len();
     let kv_cache = Arc::new(KVCacheManager::new(
         &model_config,
-        gpu_memory_bytes,
-        gpu_memory_fraction,
-        block_size,
-        effective_type_k,
-        effective_type_v,
+        &KvCacheConfig {
+            gpu_memory_bytes,
+            gpu_memory_fraction,
+            block_size,
+            type_k: effective_type_k,
+            type_v: effective_type_v,
+            context_len: effective_context_len,
+            max_batch_size,
+        },
     ));
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));

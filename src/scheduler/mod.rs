@@ -83,13 +83,18 @@ impl Scheduler {
     pub async fn wait_for_work(&self) {
         self.work_notify.notified().await;
     }
+
+    /// Wake the engine loop (e.g. after a background vision task transitions a request to Decoding).
+    pub fn notify_work(&self) {
+        self.work_notify.notify_one();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::model::ModelConfig;
-    use crate::kv_cache::{KVCacheManager, PageTable};
+    use crate::kv_cache::{KVCacheManager, KvCacheConfig, PageTable};
     use prefix_cache::hash_tokens;
     use std::sync::atomic::Ordering;
 
@@ -102,7 +107,18 @@ mod tests {
             head_dim: 128,
             vocab_size: 32000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1));
+        let kv = Arc::new(KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: 1_000_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        ));
         let sched = Scheduler::new(kv, 8);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -126,7 +142,18 @@ mod tests {
             head_dim: 64,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        let kv = Arc::new(KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: 500_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        ));
         let sched = Scheduler::new(kv, 8);
 
         // 18 tokens → 1 full block (16 tokens) + 2 leftover.
@@ -176,7 +203,18 @@ mod tests {
             head_dim: 64,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        let kv = Arc::new(KVCacheManager::new(
+            &config,
+            &KvCacheConfig {
+                gpu_memory_bytes: 500_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
+        ));
         let sched = Scheduler::new(kv, 8);
 
         // Shared prefix: tokens 1-16

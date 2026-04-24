@@ -221,6 +221,19 @@ impl Scheduler {
         }
     }
 
+    /// Collect IDs of all requests currently in Decoding state.
+    pub fn collect_decoding_ids(&self) -> Vec<u64> {
+        let running = match self.running_batch.lock() {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        running
+            .iter()
+            .filter(|r| r.state == batch::RequestState::Decoding)
+            .map(|r| r.id)
+            .collect()
+    }
+
     /// Replace the physical block at `logical_idx` in the request's page table with `new_block_id`.
     ///
     /// Called by the engine's CoW path after `KVCacheManager::copy_on_write` has allocated a

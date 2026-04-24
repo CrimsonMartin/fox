@@ -145,7 +145,7 @@ pub async fn chat_completions(
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(0.8).max(0.0),
         top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
-        top_k: req.top_k.unwrap_or(0),
+        top_k: req.top_k.unwrap_or(40),
         min_p: req.min_p.unwrap_or(0.0).clamp(0.0, 1.0),
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         frequency_penalty: req.frequency_penalty.unwrap_or(0.0).clamp(-2.0, 2.0),

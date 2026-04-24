@@ -233,6 +233,10 @@ pub trait Model: Send + Sync {
         anyhow::bail!("vision not supported by this model backend")
     }
 
+    /// Free per-request resources (e.g. persistent sampler chains).
+    /// Called when a request finishes or is cancelled.
+    fn cleanup_request(&self, _req_id: u64) {}
+
     /// Batch decode multiple preprocessed vision requests, acquiring locks once.
     fn vision_decode_prefill_batch_sync(
         &self,
@@ -273,6 +277,9 @@ pub struct PreprocessedVision {
 }
 
 unsafe impl Send for PreprocessedVision {}
+// Sync needed for DashMap storage; each value is only accessed by one thread
+// (insert → remove → use), never concurrently shared.
+unsafe impl Sync for PreprocessedVision {}
 
 impl Drop for PreprocessedVision {
     fn drop(&mut self) {

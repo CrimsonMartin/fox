@@ -83,6 +83,11 @@ impl Scheduler {
     pub async fn wait_for_work(&self) {
         self.work_notify.notified().await;
     }
+
+    /// Wake the engine loop (e.g. after a background vision task transitions a request to Decoding).
+    pub fn notify_work(&self) {
+        self.work_notify.notify_one();
+    }
 }
 
 #[cfg(test)]

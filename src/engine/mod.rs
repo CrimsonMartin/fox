@@ -9,7 +9,6 @@ mod run;
 
 use output_filter::PerRequestState;
 
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -19,7 +18,7 @@ use crate::kv_cache::KVCacheManager;
 use crate::metrics::Metrics;
 use crate::scheduler::InferenceRequest;
 
-use self::model::Model;
+use self::model::{Model, PreprocessedVision, VisionPreprocessParams};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries. Replace with space so words don't concatenate.
 const SPM_SPACE: char = '\u{2581}';
@@ -32,6 +31,10 @@ pub struct InferenceEngine {
     next_request_id: AtomicU64,
     /// Per-request mutable state for output filtering and stop sequence detection.
     per_request_state: Arc<DashMap<u64, PerRequestState>>,
+    /// Pre-computed CLIP results for vision requests. CLIP runs eagerly at
+    /// submission time; the request only enters the scheduler after CLIP
+    /// completes, so the engine loop never blocks on CLIP preprocessing.
+    vision_preprocess_results: Arc<DashMap<u64, PreprocessedVision>>,
     /// Human-readable model identifier (basename of the loaded model file).
     model_name: String,
     /// Prometheus metrics (optional — None disables recording).
@@ -41,9 +44,6 @@ pub struct InferenceEngine {
     supports_prefix_cache: bool,
     /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
     model_stop_tokens: Vec<String>,
-    /// LRU cache for CLIP embeddings, keyed by image content hash.
-    /// Avoids re-encoding identical images across requests.
-    clip_cache: std::sync::Mutex<lru::LruCache<u64, Arc<Vec<f32>>>>,
 }
 
 impl InferenceEngine {
@@ -72,11 +72,11 @@ impl InferenceEngine {
             kv_cache,
             next_request_id: AtomicU64::new(0),
             per_request_state: Arc::new(DashMap::new()),
+            vision_preprocess_results: Arc::new(DashMap::new()),
             model_name,
             metrics,
             supports_prefix_cache,
             model_stop_tokens,
-            clip_cache: std::sync::Mutex::new(lru::LruCache::new(NonZeroUsize::new(128).unwrap())),
         }
     }
 
@@ -101,7 +101,34 @@ impl InferenceEngine {
     }
 
     pub fn submit_request(&self, req: InferenceRequest) {
-        self.scheduler.submit(req);
+        if let (Some(image), Some(prompt)) = (&req.vision_image, &req.vision_prompt) {
+            let model = self.model.clone();
+            let pp = VisionPreprocessParams {
+                text_prompt: prompt.clone(),
+                image_bytes: Arc::clone(image),
+            };
+            let req_id = req.id;
+            let results = self.vision_preprocess_results.clone();
+            let scheduler = self.scheduler.clone();
+            tokio::task::spawn(async move {
+                match tokio::task::spawn_blocking(move || model.vision_preprocess_sync(&pp))
+                    .await
+                {
+                    Ok(Ok(preprocessed)) => {
+                        results.insert(req_id, preprocessed);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(request_id = req_id, "eager CLIP failed: {}", e);
+                    }
+                    Err(e) => {
+                        tracing::warn!(request_id = req_id, "eager CLIP spawn failed: {}", e);
+                    }
+                }
+                scheduler.submit(req);
+            });
+        } else {
+            self.scheduler.submit(req);
+        }
     }
 
     pub fn next_request_id(&self) -> u64 {
@@ -152,10 +179,4 @@ impl InferenceEngine {
         self.scheduler.prefix_misses.load(Ordering::Relaxed)
     }
 
-    fn hash_image_bytes(bytes: &[u8]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        hasher.finish()
-    }
 }

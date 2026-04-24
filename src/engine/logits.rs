@@ -113,6 +113,7 @@ impl InferenceEngine {
                 if req.kv_seq_id >= 0 {
                     self.model.clear_sequence(req.kv_seq_id);
                 }
+                self.model.cleanup_request(*req_id);
                 self.scheduler.mark_finished(*req_id, StopReason::Preempt);
                 self.per_request_state.remove(req_id);
                 continue;
@@ -162,6 +163,7 @@ impl InferenceEngine {
                     self.model.clear_sequence(req.kv_seq_id);
                 }
 
+                self.model.cleanup_request(*req_id);
                 self.scheduler.mark_finished(*req_id, stop_reason.unwrap());
 
                 self.per_request_state.remove(req_id);

@@ -242,16 +242,22 @@ pub struct LlamaCppModel {
     pub(super) vision_use_non_causal: bool,
     /// Input embedding dimension (from model), used for inline image chunk decode.
     pub(super) n_embd_inp: usize,
+    /// Per-request sampler chains keyed by request ID. Reused across decode steps
+    /// to avoid allocating llama.cpp's internal token_data buffer every call.
+    pub(super) sampler_chains: std::sync::Mutex<std::collections::HashMap<u64, *mut ffi::llama_sampler>>,
 }
 
 #[cfg(not(fox_stub))]
 impl Drop for LlamaCppModel {
     fn drop(&mut self) {
-        // Free mtmd pool contexts first (they reference the model internally).
+        if let Ok(chains) = self.sampler_chains.lock() {
+            for (_, chain) in chains.iter() {
+                unsafe { ffi::llama_sampler_free(*chain) };
+            }
+        }
         if let Some(ref pool) = self.mtmd_pool {
             pool.free_all();
         }
-        // Free the llama context (must happen before model is freed).
         if let Ok(ctx) = self._ctx.lock() {
             unsafe { ffi::llama_free(ctx.as_ptr()) };
         }
@@ -526,6 +532,7 @@ impl LlamaCppModel {
             vision_use_mrope,
             vision_use_non_causal,
             n_embd_inp,
+            sampler_chains: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -601,6 +608,7 @@ impl LlamaCppModel {
             vision_use_mrope: false,
             vision_use_non_causal: false,
             n_embd_inp: 0,
+            sampler_chains: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 }
@@ -678,6 +686,10 @@ impl Model for LlamaCppModel {
         } else {
             None
         }
+    }
+
+    fn cleanup_request(&self, req_id: u64) {
+        self.remove_sampler_chain(req_id);
     }
 
     fn clear_sequence(&self, seq_id: i32) {

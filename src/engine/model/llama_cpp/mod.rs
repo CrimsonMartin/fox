@@ -244,7 +244,8 @@ pub struct LlamaCppModel {
     pub(super) n_embd_inp: usize,
     /// Per-request sampler chains keyed by request ID. Reused across decode steps
     /// to avoid allocating llama.cpp's internal token_data buffer every call.
-    pub(super) sampler_chains: std::sync::Mutex<std::collections::HashMap<u64, *mut ffi::llama_sampler>>,
+    pub(super) sampler_chains:
+        std::sync::Mutex<std::collections::HashMap<u64, *mut ffi::llama_sampler>>,
 }
 
 #[cfg(not(fox_stub))]

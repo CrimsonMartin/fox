@@ -135,8 +135,8 @@ fn compute_total_blocks(
     let k_bytes = (elements * k_num).div_ceil(k_den);
     let v_bytes = (elements * v_num).div_ceil(v_den);
     let bytes_per_block = (k_bytes + v_bytes) as usize;
-    let vram_blocks = (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize
-        / bytes_per_block;
+    let vram_blocks =
+        (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize / bytes_per_block;
     let blocks_per_seq = (context_len as usize).div_ceil(block_size);
     let demand_blocks = blocks_per_seq * max_batch_size;
     let total = vram_blocks.min(demand_blocks).max(1);

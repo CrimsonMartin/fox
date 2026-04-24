@@ -101,9 +101,7 @@ impl InferenceEngine {
                             text_prefill_ids.len()
                         );
                         for req_id in &text_prefill_ids {
-                            engine
-                                .scheduler
-                                .mark_finished(*req_id, StopReason::Length);
+                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
                 }
@@ -144,9 +142,8 @@ impl InferenceEngine {
                             text_prompt: params.text_prompt.clone(),
                             image_bytes: Arc::clone(&params.image_bytes),
                         };
-                        let handle = tokio::task::spawn_blocking(move || {
-                            model.vision_preprocess_sync(&pp)
-                        });
+                        let handle =
+                            tokio::task::spawn_blocking(move || model.vision_preprocess_sync(&pp));
                         fallback_handles.push((req_id, kv_seq_id, params, handle));
                     }
                 }
@@ -206,25 +203,19 @@ impl InferenceEngine {
                             for (i, (n_past, logits)) in results.into_iter().enumerate() {
                                 let req_id = decode_req_ids[i];
                                 engine.scheduler.set_prefilled_tokens(req_id, n_past);
-                                engine
-                                    .handle_logits(&[(req_id, logits)], true)
-                                    .await?;
+                                engine.handle_logits(&[(req_id, logits)], true).await?;
                             }
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("vision batch decode failed: {}", e);
                             for req_id in &decode_req_ids {
-                                engine
-                                    .scheduler
-                                    .mark_finished(*req_id, StopReason::Length);
+                                engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             }
                         }
                         Err(e) => {
                             tracing::warn!("vision batch decode spawn failed: {}", e);
                             for req_id in &decode_req_ids {
-                                engine
-                                    .scheduler
-                                    .mark_finished(*req_id, StopReason::Length);
+                                engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             }
                         }
                     }
@@ -256,9 +247,7 @@ impl InferenceEngine {
                         );
                         for req_id in &decode_ids {
                             engine.model.cleanup_request(*req_id);
-                            engine
-                                .scheduler
-                                .mark_finished(*req_id, StopReason::Length);
+                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
                 }

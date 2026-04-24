@@ -24,9 +24,8 @@ unsafe fn create_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi::llama_samp
     let params = ffi::llama_sampler_chain_default_params();
     let chain = ffi::llama_sampler_chain_init(params);
 
-    let has_penalties = p.repetition_penalty != 1.0
-        || p.frequency_penalty != 0.0
-        || p.presence_penalty != 0.0;
+    let has_penalties =
+        p.repetition_penalty != 1.0 || p.frequency_penalty != 0.0 || p.presence_penalty != 0.0;
 
     if has_penalties {
         ffi::llama_sampler_chain_add(
@@ -221,11 +220,23 @@ impl LlamaCppModel {
                     )
                 }
             } else {
-                unsafe { ffi_sample(ctx, batch_idx, &FfiSamplerParams {
-                    temperature: 0.0, top_p: 1.0, top_k: 0, min_p: 0.0,
-                    repetition_penalty: 1.0, frequency_penalty: 0.0, presence_penalty: 0.0,
-                    generated_ids: &[], seed: None,
-                }) }
+                unsafe {
+                    ffi_sample(
+                        ctx,
+                        batch_idx,
+                        &FfiSamplerParams {
+                            temperature: 0.0,
+                            top_p: 1.0,
+                            top_k: 0,
+                            min_p: 0.0,
+                            repetition_penalty: 1.0,
+                            frequency_penalty: 0.0,
+                            presence_penalty: 0.0,
+                            generated_ids: &[],
+                            seed: None,
+                        },
+                    )
+                }
             };
             results.push((req_id, Logits::new(vec![], sampled), tokens_in_kv));
         }
@@ -831,8 +842,7 @@ impl LlamaCppModel {
                     }
 
                     let text_batch = unsafe { ffi::llama_batch_init(n_batch, 0, 1) };
-                    let tokens =
-                        unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
+                    let tokens = unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
 
                     let mut ti = 0usize;
                     while ti < n_tokens_out {
@@ -879,14 +889,11 @@ impl LlamaCppModel {
                 } else {
                     // Image embedding chunk
                     let tc = std::time::Instant::now();
-                    let embd = embd_maps[ri]
-                        .get(&chunk_idx)
-                        .ok_or_else(|| {
-                            anyhow!("missing pre-encoded embeddings for chunk {}", chunk_idx)
-                        })?;
+                    let embd = embd_maps[ri].get(&chunk_idx).ok_or_else(|| {
+                        anyhow!("missing pre-encoded embeddings for chunk {}", chunk_idx)
+                    })?;
 
-                    let n_tokens =
-                        unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
+                    let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
 
                     if self.vision_use_non_causal {
                         unsafe { ffi::llama_set_causal_attn(lctx, false) };
@@ -934,8 +941,7 @@ impl LlamaCppModel {
                     if self.vision_use_non_causal {
                         unsafe { ffi::llama_set_causal_attn(lctx, true) };
                     }
-                    n_past[ri] +=
-                        unsafe { mtmd_ffi::mtmd_input_chunk_get_n_pos(chunk) };
+                    n_past[ri] += unsafe { mtmd_ffi::mtmd_input_chunk_get_n_pos(chunk) };
                     embd_decode_us += tc.elapsed().as_micros() as u64;
                 }
             }

@@ -111,9 +111,7 @@ impl InferenceEngine {
             let results = self.vision_preprocess_results.clone();
             let scheduler = self.scheduler.clone();
             tokio::task::spawn(async move {
-                match tokio::task::spawn_blocking(move || model.vision_preprocess_sync(&pp))
-                    .await
-                {
+                match tokio::task::spawn_blocking(move || model.vision_preprocess_sync(&pp)).await {
                     Ok(Ok(preprocessed)) => {
                         results.insert(req_id, preprocessed);
                     }
@@ -178,5 +176,4 @@ impl InferenceEngine {
     pub fn prefix_cache_misses(&self) -> u64 {
         self.scheduler.prefix_misses.load(Ordering::Relaxed)
     }
-
 }

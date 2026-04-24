@@ -18,7 +18,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::cli::{get_gpu_memory_bytes, get_total_gpu_memory_bytes, resolve_model_path, theme};
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::engine::InferenceEngine;
-use crate::kv_cache::KVCacheManager;
+use crate::kv_cache::{KVCacheManager, KvCacheConfig};
 use crate::model_registry::kv_type;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
@@ -114,13 +114,15 @@ async fn run_one_type(
     let model_config = model.model_config();
     let kv_cache = Arc::new(KVCacheManager::new(
         &model_config,
-        gpu_memory_bytes,
-        GPU_FRACTION,
-        BLOCK_SIZE,
-        type_id,
-        type_id,
-        args.max_context_len.unwrap_or(u32::MAX),
-        1,
+        &KvCacheConfig {
+            gpu_memory_bytes,
+            gpu_memory_fraction: GPU_FRACTION,
+            block_size: BLOCK_SIZE,
+            type_k: type_id,
+            type_v: type_id,
+            context_len: args.max_context_len.unwrap_or(u32::MAX),
+            max_batch_size: 1,
+        },
     ));
 
     let kv_blocks = kv_cache.total_blocks();

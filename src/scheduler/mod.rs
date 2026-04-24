@@ -94,7 +94,7 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::engine::model::ModelConfig;
-    use crate::kv_cache::{KVCacheManager, PageTable};
+    use crate::kv_cache::{KVCacheManager, KvCacheConfig, PageTable};
     use prefix_cache::hash_tokens;
     use std::sync::atomic::Ordering;
 
@@ -109,13 +109,15 @@ mod tests {
         };
         let kv = Arc::new(KVCacheManager::new(
             &config,
-            1_000_000_000,
-            0.5,
-            16,
-            1,
-            1,
-            u32::MAX,
-            1024,
+            &KvCacheConfig {
+                gpu_memory_bytes: 1_000_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
         ));
         let sched = Scheduler::new(kv, 8);
 
@@ -142,13 +144,15 @@ mod tests {
         };
         let kv = Arc::new(KVCacheManager::new(
             &config,
-            500_000_000,
-            0.5,
-            16,
-            1,
-            1,
-            u32::MAX,
-            1024,
+            &KvCacheConfig {
+                gpu_memory_bytes: 500_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
         ));
         let sched = Scheduler::new(kv, 8);
 
@@ -201,13 +205,15 @@ mod tests {
         };
         let kv = Arc::new(KVCacheManager::new(
             &config,
-            500_000_000,
-            0.5,
-            16,
-            1,
-            1,
-            u32::MAX,
-            1024,
+            &KvCacheConfig {
+                gpu_memory_bytes: 500_000_000,
+                gpu_memory_fraction: 0.5,
+                block_size: 16,
+                type_k: 1,
+                type_v: 1,
+                context_len: u32::MAX,
+                max_batch_size: 1024,
+            },
         ));
         let sched = Scheduler::new(kv, 8);
 

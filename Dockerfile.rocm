@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # Uses the ROCm runtime base so HIP runtime libraries are available for the
 # ggml HIP backend. GPU access requires: docker run --device=/dev/kfd --device=/dev/dri
 # ──────────────────────────────────────────────────────────────────────────────
-FROM rocm/rocm-terminal:6.2.4 AS runtime
+FROM rocm/dev-ubuntu-22.04:6.2.4 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \

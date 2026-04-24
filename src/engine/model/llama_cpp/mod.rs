@@ -393,7 +393,7 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        let n_seq = (max_batch_size as u32).max(4);
+        let n_seq = max_batch_size as u32;
 
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
@@ -418,10 +418,10 @@ impl LlamaCppModel {
         let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
             (budget_bytes / bytes_per_token) as u32
         } else {
-            effective_max_ctx * n_seq
+            effective_max_ctx * n_seq.max(1)
         };
         // Honour the effective_max_ctx per sequence, but don't exceed memory budget.
-        let n_ctx = (effective_max_ctx * n_seq)
+        let n_ctx = (effective_max_ctx * n_seq.max(1))
             .min(max_tokens_by_mem)
             .max(effective_max_ctx);
         ctx_params.n_ctx = n_ctx;
@@ -549,7 +549,7 @@ impl LlamaCppModel {
         let model = self._model;
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
-        let n_seq = (max_batch_size as u32).max(4);
+        let n_seq = max_batch_size as u32;
 
         let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
         let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
@@ -569,9 +569,9 @@ impl LlamaCppModel {
         let max_tokens_by_mem = if bytes_per_token_u64 > 0 && budget_bytes > 0 {
             (budget_bytes as u64 / bytes_per_token_u64) as u32
         } else {
-            effective_max_ctx * n_seq
+            effective_max_ctx * n_seq.max(1)
         };
-        let n_ctx = (effective_max_ctx * n_seq)
+        let n_ctx = (effective_max_ctx * n_seq.max(1))
             .min(max_tokens_by_mem)
             .max(effective_max_ctx);
 

@@ -224,6 +224,8 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         args.block_size,
         1,
         1,
+        model.context_len(),
+        1,
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
 

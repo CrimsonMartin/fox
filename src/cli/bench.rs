@@ -137,6 +137,8 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         16,
         1,
         1,
+        u32::MAX,
+        1,
     ));
     let scheduler = Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
     let model = Arc::new(model);

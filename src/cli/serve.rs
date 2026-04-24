@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // Default values for ServeArgs — centralised so grep/docs find them in one place.
 const DEFAULT_GPU_MEMORY_FRACTION: &str = "0.85";
-const DEFAULT_MAX_BATCH_SIZE: &str = "32";
+const DEFAULT_MAX_BATCH_SIZE: &str = "1";
 const DEFAULT_BLOCK_SIZE: &str = "16";
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";

@@ -119,6 +119,8 @@ async fn run_one_type(
         BLOCK_SIZE,
         type_id,
         type_id,
+        args.max_context_len.unwrap_or(u32::MAX),
+        1,
     ));
 
     let kv_blocks = kv_cache.total_blocks();

@@ -136,6 +136,7 @@ async fn run_one_type(
         kv_cache,
         model_name.to_string(),
         None,
+        0,
     ));
 
     let messages = vec![

@@ -147,7 +147,7 @@ pub fn sampling_from_ollama(
         Some(o) => (
             o.temperature.unwrap_or(0.8),
             o.top_p.unwrap_or(0.9),
-            o.top_k.unwrap_or(40),
+            o.top_k.unwrap_or(0),
             o.min_p.unwrap_or(0.0),
             o.repeat_penalty.unwrap_or(1.1),
             o.frequency_penalty.unwrap_or(0.0),
@@ -160,7 +160,7 @@ pub fn sampling_from_ollama(
         None => (
             0.8,
             0.9,
-            40,
+            0,
             0.0,
             1.1,
             0.0,
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(max_tokens, 512);
         assert!((params.temperature - 0.8).abs() < f32::EPSILON);
         assert!((params.top_p - 0.9).abs() < f32::EPSILON);
-        assert_eq!(params.top_k, 40);
+        assert_eq!(params.top_k, 0);
     }
 
     #[test]

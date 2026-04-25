@@ -207,10 +207,16 @@ impl Scheduler {
             }
         }
 
-        // 4. Build decode list
+        // 4. Build decode and continuing-prefill lists
         for req in running.iter() {
-            if req.state == batch::RequestState::Decoding {
-                decode.push(req.id);
+            match req.state {
+                batch::RequestState::Decoding => decode.push(req.id),
+                batch::RequestState::Prefilling if !prefill.contains(&req.id) => {
+                    // Continuing chunked prefill — request was admitted in a prior step
+                    // but still has prompt tokens remaining.
+                    prefill.push(req.id);
+                }
+                _ => {}
             }
         }
 
@@ -264,6 +270,19 @@ impl Scheduler {
         }
     }
 
+    /// Advance a request's chunked prefill progress counter.
+    /// Called after each partial prefill chunk so the next iteration knows where to resume.
+    pub fn advance_prefill_chunk_progress(&self, req_id: u64, tokens_submitted: usize) {
+        if let Ok(mut running) = self.running_batch.lock() {
+            for req in running.iter_mut() {
+                if req.id == req_id {
+                    req.prefill_chunk_progress += tokens_submitted;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Update request state after a generated token.
     pub fn update_after_token(&self, req_id: u64, token_id: i32, from_prefill: bool) {
         let mut running = match self.running_batch.lock() {
@@ -279,6 +298,30 @@ impl Scheduler {
                     req.state = batch::RequestState::Decoding;
                 }
                 break;
+            }
+        }
+    }
+
+    /// Batch update: apply generated tokens to multiple requests in one lock acquisition.
+    pub fn batch_update_after_tokens(&self, updates: &[(u64, i32)], from_prefill: bool) {
+        if updates.is_empty() {
+            return;
+        }
+        let mut running = match self.running_batch.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        for &(req_id, token_id) in updates {
+            for req in running.iter_mut() {
+                if req.id == req_id {
+                    req.last_token = Some(token_id);
+                    req.generated_tokens += 1;
+                    req.generated_token_ids.push(token_id);
+                    if from_prefill && req.state == batch::RequestState::Prefilling {
+                        req.state = batch::RequestState::Decoding;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -320,20 +363,17 @@ impl Scheduler {
             Err(_) => return false,
         };
 
-        if pcache.len() >= self.prefix_cache_max {
-            return false;
-        }
-
-        // Do not cache if the inference seq_id pool is currently empty.
-        // The finished request's seq_id has not yet been returned to the pool;
-        // if we donate it to the prefix cache, the pool remains empty and the
-        // next request will be unable to start (pool.is_empty() → not admitted).
+        // Do not cache if the inference seq_id pool is currently empty AND the
+        // cache is full.  When the cache is full, `push` will evict the LRU
+        // entry and we reclaim its seq_id below, so that case is safe.  But if
+        // the cache has room, the new entry consumes a seq_id without evicting
+        // one; the pool must have a spare for future requests.
         {
             let pool = match self.seq_id_pool.lock() {
                 Ok(g) => g,
                 Err(_) => return false,
             };
-            if pool.is_empty() {
+            if pool.is_empty() && pcache.len() < self.prefix_cache_max {
                 return false;
             }
         }
@@ -382,13 +422,24 @@ impl Scheduler {
             // Zero out seq ownership so schedule_step won't double-free.
             req.kv_seq_id = -1;
 
-            pcache.put(
+            let evicted = pcache.push(
                 final_hash,
                 PrefixCacheEntry {
                     seq_id,
                     block_ids: cached_blocks,
                 },
             );
+            // Reclaim resources from the evicted LRU entry.
+            if let Some((_evicted_hash, evicted_entry)) = evicted {
+                self.kv_cache.free_blocks(&evicted_entry.block_ids);
+                if let Ok(mut pool) = self.seq_id_pool.lock() {
+                    pool.push(evicted_entry.seq_id);
+                }
+                debug!(
+                    evicted_seq_id = evicted_entry.seq_id,
+                    "prefix cache eviction: reclaimed seq_id and blocks"
+                );
+            }
             debug!(
                 request_id = req_id,
                 full_blocks,

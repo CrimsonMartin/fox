@@ -99,6 +99,7 @@ pub(super) async fn load_model(
     let mmproj_path = cfg.mmproj_path.clone().or_else(|| detect_mmproj(&path));
     let flash_attn = cfg.flash_attn;
     let vision_contexts = cfg.vision_contexts;
+    let chunked_prefill_tokens = cfg.chunked_prefill_tokens;
 
     if let Ok(meta) = std::fs::metadata(&path) {
         let estimated_bytes = (meta.len() as f64 * 1.8) as usize;
@@ -217,7 +218,7 @@ pub(super) async fn load_model(
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
     let engine = Arc::new(InferenceEngine::new(
-        model, scheduler, kv_cache, name, metrics,
+        model, scheduler, kv_cache, name, metrics, chunked_prefill_tokens,
     ));
 
     let loop_handle = {

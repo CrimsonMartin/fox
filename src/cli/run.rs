@@ -238,6 +238,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         kv_cache,
         model_name,
         None,
+        0,
     ));
 
     match args.prompt.clone() {

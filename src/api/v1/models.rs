@@ -172,6 +172,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(

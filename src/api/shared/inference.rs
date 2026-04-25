@@ -148,7 +148,7 @@ pub fn sampling_from_ollama(
             o.temperature.unwrap_or(0.8),
             o.top_p.unwrap_or(0.9),
             o.top_k.unwrap_or(0),
-            o.min_p.unwrap_or(0.0),
+            o.min_p.unwrap_or(0.05),
             o.repeat_penalty.unwrap_or(1.1),
             o.frequency_penalty.unwrap_or(0.0),
             o.presence_penalty.unwrap_or(0.0),

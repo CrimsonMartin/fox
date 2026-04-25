@@ -78,18 +78,18 @@ pub async fn load_model_or_respond(
     registry: &ModelRegistry,
     model: &str,
 ) -> Result<Arc<EngineEntry>, Response> {
-    // First check if the model exists on disk — gives a clean 404 when it doesn't.
-    if let Err(e) = registry.resolve_model_name(model) {
-        tracing::warn!(model = %model, error = %e, "model not found");
-        return Err(AppError::ModelNotFound(e.to_string()).into_response());
-    }
-
-    // Model exists — try to load it. Failures here are load errors (OOM, corrupt file…).
+    // Try to load (get_or_load checks the engine cache first, then resolves on disk).
     match registry.get_or_load(model).await {
         Ok(entry) => Ok(entry),
         Err(e) => {
-            tracing::error!(model = %model, error = %e, "failed to load model");
-            Err(AppError::ModelLoadFailed(e.to_string()).into_response())
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                tracing::warn!(model = %model, error = %e, "model not found");
+                Err(AppError::ModelNotFound(msg).into_response())
+            } else {
+                tracing::error!(model = %model, error = %e, "failed to load model");
+                Err(AppError::ModelLoadFailed(msg).into_response())
+            }
         }
     }
 }

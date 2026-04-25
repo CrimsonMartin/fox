@@ -79,6 +79,56 @@ unsafe fn ffi_sample(
     token
 }
 
+/// Create a sampler chain meant to persist across decode steps.
+/// Uses a fixed penalty window so the ring buffer doesn't grow unbounded.
+unsafe fn create_persistent_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi::llama_sampler {
+    let params = ffi::llama_sampler_chain_default_params();
+    let chain = ffi::llama_sampler_chain_init(params);
+
+    // Greedy: argmax only — skip all filtering/penalty samplers.
+    if p.temperature <= 0.0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_greedy());
+        return chain;
+    }
+
+    let has_penalties =
+        p.repetition_penalty != 1.0 || p.frequency_penalty != 0.0 || p.presence_penalty != 0.0;
+
+    if has_penalties {
+        ffi::llama_sampler_chain_add(
+            chain,
+            ffi::llama_sampler_init_penalties(
+                64,
+                p.repetition_penalty,
+                p.frequency_penalty,
+                p.presence_penalty,
+            ),
+        );
+    }
+
+    if p.top_k > 0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_top_k(p.top_k as i32));
+    }
+    if p.top_p < 1.0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_top_p(p.top_p, 1));
+    }
+    if p.min_p > 0.0 {
+        ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_min_p(p.min_p, 1));
+    }
+
+    ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_temp(p.temperature));
+    let seed_val = p.seed.unwrap_or(0xFFFFFFFF_u64) as u32;
+    ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_dist(seed_val));
+
+    if has_penalties {
+        for &tok in p.generated_ids {
+            ffi::llama_sampler_accept(chain, tok);
+        }
+    }
+
+    chain
+}
+
 impl LlamaCppModel {
     pub(super) fn do_prefill(
         &self,
@@ -180,8 +230,12 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
-        let n_seq_max = requests.len().max(1) as i32;
-        let mut batch = unsafe { ffi::llama_batch_init(total_tokens as i32, 0, n_seq_max) };
+        let mut batch_guard = self
+            .prefill_batch
+            .lock()
+            .map_err(|e| anyhow!("prefill_batch lock poisoned: {}", e))?;
+        let batch = &mut *batch_guard;
+        batch.n_tokens = 0;
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
 
         for (i, req) in requests.iter().enumerate() {
@@ -195,7 +249,6 @@ impl LlamaCppModel {
             for (local_pos, &token) in tokens_to_submit.iter().enumerate() {
                 let abs_pos = info.start_pos + local_pos;
                 let idx = batch.n_tokens as usize;
-                // Only request logits on the absolute last prompt token AND only if this is the final chunk.
                 let has_logits = info.is_final && abs_pos == req.prompt_tokens.len() - 1;
                 unsafe {
                     *batch.token.add(idx) = token;
@@ -221,9 +274,8 @@ impl LlamaCppModel {
             .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
 
-        let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        let ret = unsafe { ffi::llama_decode(ctx, *batch) };
         if ret != 0 {
-            unsafe { ffi::llama_batch_free(batch) };
             return Err(anyhow!("llama_decode failed: {}", ret));
         }
 
@@ -286,7 +338,7 @@ impl LlamaCppModel {
             results.push((req_id, Logits::new(vec![], sampled), tokens_in_kv));
         }
 
-        unsafe { ffi::llama_batch_free(batch) };
+        drop(batch_guard);
         Ok(results)
     }
 
@@ -299,9 +351,12 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
-        let t0 = std::time::Instant::now();
-        let n_tokens = requests.len() as i32;
-        let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
+        let mut batch_guard = self
+            .decode_batch
+            .lock()
+            .map_err(|e| anyhow!("decode_batch lock poisoned: {}", e))?;
+        let batch = &mut *batch_guard;
+        batch.n_tokens = 0;
 
         for (batch_slot, req) in requests.iter().enumerate() {
             let input_token = req
@@ -322,34 +377,28 @@ impl LlamaCppModel {
             batch.n_tokens += 1;
         }
 
-        let t_batch = t0.elapsed();
         let ctx_guard = self
             ._ctx
             .lock()
             .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
-        let t_lock = t0.elapsed();
 
-        let ret = unsafe { ffi::llama_decode(ctx, batch) };
-        let t_decode = t0.elapsed();
+        let ret = unsafe { ffi::llama_decode(ctx, *batch) };
         if ret != 0 {
-            unsafe { ffi::llama_batch_free(batch) };
             return Err(anyhow!("llama_decode failed: {}", ret));
         }
 
-        let mut results = Vec::with_capacity(requests.len());
+        let mut chains_guard = self
+            .sampler_chains
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
 
-        {
-            let mut chains = self
-                .sampler_chains
-                .lock()
-                .expect("sampler_chains lock poisoned");
-
-            for (out_idx, &req_id) in req_ids.iter().enumerate() {
-                let req = requests.get(out_idx);
-                let chain = chains.entry(req_id).or_insert_with(|| {
-                    let p = req
-                        .map(|r| FfiSamplerParams {
+        let mut results = Vec::with_capacity(req_ids.len());
+        for (out_idx, &req_id) in req_ids.iter().enumerate() {
+            let chain = *chains_guard.entry(req_id).or_insert_with(|| {
+                if let Some(r) = requests.get(out_idx) {
+                    unsafe {
+                        create_persistent_sampler_chain(&FfiSamplerParams {
                             temperature: r.temperature,
                             top_p: r.top_p,
                             top_k: r.top_k,
@@ -360,7 +409,10 @@ impl LlamaCppModel {
                             generated_ids: &r.generated_token_ids,
                             seed: r.seed,
                         })
-                        .unwrap_or(FfiSamplerParams {
+                    }
+                } else {
+                    unsafe {
+                        create_persistent_sampler_chain(&FfiSamplerParams {
                             temperature: 0.0,
                             top_p: 1.0,
                             top_k: 0,
@@ -370,34 +422,22 @@ impl LlamaCppModel {
                             presence_penalty: 0.0,
                             generated_ids: &[],
                             seed: None,
-                        });
-                    unsafe { create_sampler_chain(&p) }
-                });
+                        })
+                    }
+                }
+            });
 
-                let sampled = unsafe {
-                    let token = ffi::llama_sampler_sample(*chain, ctx, out_idx as i32);
-                    ffi::llama_sampler_accept(*chain, token);
-                    token
-                };
-                results.push((req_id, Logits::new(vec![], sampled)));
+            let sampled = unsafe {
+                ffi::llama_sampler_sample(chain, ctx, out_idx as i32)
+            };
+            unsafe {
+                ffi::llama_sampler_accept(chain, sampled);
             }
-        }
-        let t_sample = t0.elapsed();
 
-        unsafe { ffi::llama_batch_free(batch) };
-
-        if t_sample.as_millis() > 10 {
-            tracing::info!(
-                n = n_tokens,
-                batch_us = t_batch.as_micros() as u64,
-                lock_us = (t_lock - t_batch).as_micros() as u64,
-                decode_ms = (t_decode - t_lock).as_millis() as u64,
-                sample_us = (t_sample - t_decode).as_micros() as u64,
-                total_ms = t_sample.as_millis() as u64,
-                "do_decode breakdown"
-            );
+            results.push((req_id, Logits::new(vec![], sampled)));
         }
 
+        drop(batch_guard);
         Ok(results)
     }
 

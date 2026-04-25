@@ -246,6 +246,11 @@ pub struct LlamaCppModel {
     /// to avoid allocating llama.cpp's internal token_data buffer every call.
     pub(super) sampler_chains:
         std::sync::Mutex<std::collections::HashMap<u64, *mut ffi::llama_sampler>>,
+    /// Persistent decode batch — reused across decode steps so buffer addresses
+    /// remain stable, allowing CUDA graph capture to persist.
+    pub(super) decode_batch: std::sync::Mutex<ffi::llama_batch>,
+    /// Persistent prefill batch — same rationale as decode_batch.
+    pub(super) prefill_batch: std::sync::Mutex<ffi::llama_batch>,
 }
 
 #[cfg(not(fox_stub))]
@@ -255,6 +260,12 @@ impl Drop for LlamaCppModel {
             for (_, chain) in chains.iter() {
                 unsafe { ffi::llama_sampler_free(*chain) };
             }
+        }
+        if let Ok(batch) = self.decode_batch.lock() {
+            unsafe { ffi::llama_batch_free(*batch) };
+        }
+        if let Ok(batch) = self.prefill_batch.lock() {
+            unsafe { ffi::llama_batch_free(*batch) };
         }
         if let Some(ref pool) = self.mtmd_pool {
             pool.free_all();
@@ -399,8 +410,9 @@ impl LlamaCppModel {
         };
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
-        // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        let n_seq = max_batch_size as u32;
+        // Extra seq_ids for prefix cache (matches scheduler pool sizing).
+        let prefix_slots = (max_batch_size / 4).max(1);
+        let n_seq_max = (max_batch_size + prefix_slots) as u32;
 
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
@@ -425,20 +437,20 @@ impl LlamaCppModel {
         let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
             (budget_bytes / bytes_per_token) as u32
         } else {
-            effective_max_ctx * n_seq.max(1)
+            effective_max_ctx * max_batch_size as u32
         };
-        // Honour the effective_max_ctx per sequence, but don't exceed memory budget.
-        let n_ctx = (effective_max_ctx * n_seq.max(1))
+        // n_ctx covers active sequences only; prefix cache reuses existing KV blocks.
+        let n_ctx = (effective_max_ctx * max_batch_size as u32)
             .min(max_tokens_by_mem)
             .max(effective_max_ctx);
         ctx_params.n_ctx = n_ctx;
-        // n_batch must be at least as large as n_ctx to handle full prompts in one pass
-        ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
-        ctx_params.n_seq_max = n_seq;
+        ctx_params.n_batch = effective_max_ctx.min(2048).max(max_batch_size as u32);
+        ctx_params.n_seq_max = n_seq_max;
         ctx_params.flash_attn_type = if flash_attn { 1 } else { 0 };
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
+        ctx_params.kv_unified = true;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {
@@ -521,6 +533,13 @@ impl LlamaCppModel {
                 (false, false, 0)
             };
 
+        let decode_batch = unsafe {
+            ffi::llama_batch_init(max_batch_size as i32, 0, 1)
+        };
+        let prefill_batch = unsafe {
+            ffi::llama_batch_init(ctx_params.n_batch as i32, 0, 1)
+        };
+
         Ok(Self {
             _model: model,
             _ctx: ctx_arc,
@@ -534,6 +553,8 @@ impl LlamaCppModel {
             vision_use_non_causal,
             n_embd_inp,
             sampler_chains: std::sync::Mutex::new(std::collections::HashMap::new()),
+            decode_batch: std::sync::Mutex::new(decode_batch),
+            prefill_batch: std::sync::Mutex::new(prefill_batch),
         })
     }
 
@@ -557,7 +578,8 @@ impl LlamaCppModel {
         let model = self._model;
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
-        let n_seq = max_batch_size as u32;
+        let prefix_slots = (max_batch_size / 4).max(1);
+        let n_seq_max = (max_batch_size + prefix_slots) as u32;
 
         let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
         let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
@@ -568,7 +590,6 @@ impl LlamaCppModel {
         let n_head_kv = self.config.num_heads_kv;
         let head_dim = self.config.head_dim;
         let n_layer = self.config.num_layers;
-        // Use the actual KV type byte ratios rather than assuming F16.
         let (k_num, k_den) = crate::kv_cache::kv_type_bytes(type_k);
         let (v_num, v_den) = crate::kv_cache::kv_type_bytes(type_v);
         let elems_per_token = (n_head_kv * head_dim * n_layer) as u64;
@@ -577,19 +598,20 @@ impl LlamaCppModel {
         let max_tokens_by_mem = if bytes_per_token_u64 > 0 && budget_bytes > 0 {
             (budget_bytes as u64 / bytes_per_token_u64) as u32
         } else {
-            effective_max_ctx * n_seq.max(1)
+            effective_max_ctx * max_batch_size as u32
         };
-        let n_ctx = (effective_max_ctx * n_seq.max(1))
+        let n_ctx = (effective_max_ctx * max_batch_size as u32)
             .min(max_tokens_by_mem)
             .max(effective_max_ctx);
 
         ctx_params.n_ctx = n_ctx;
-        ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
-        ctx_params.n_seq_max = n_seq;
+        ctx_params.n_batch = effective_max_ctx.min(2048).max(max_batch_size as u32);
+        ctx_params.n_seq_max = n_seq_max;
         ctx_params.flash_attn_type = if flash_attn { 1 } else { 0 };
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
+        ctx_params.kv_unified = true;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx)
@@ -597,6 +619,13 @@ impl LlamaCppModel {
 
         #[allow(clippy::arc_with_non_send_sync)]
         let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
+        let decode_batch = unsafe {
+            ffi::llama_batch_init(max_batch_size as i32, 0, 1)
+        };
+        let prefill_batch = unsafe {
+            ffi::llama_batch_init(ctx_params.n_batch as i32, 0, 1)
+        };
+
         Ok(Self {
             _model: model,
             _ctx: ctx_arc,
@@ -610,6 +639,8 @@ impl LlamaCppModel {
             vision_use_non_causal: false,
             n_embd_inp: 0,
             sampler_chains: std::sync::Mutex::new(std::collections::HashMap::new()),
+            decode_batch: std::sync::Mutex::new(decode_batch),
+            prefill_batch: std::sync::Mutex::new(prefill_batch),
         })
     }
 }

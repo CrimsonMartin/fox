@@ -69,9 +69,19 @@ impl ModelRegistry {
     /// Resolve `name`, returning the cached engine if already loaded or loading
     /// it from disk otherwise. Evicts the LRU model if capacity is exceeded.
     pub async fn get_or_load(&self, name: &str) -> Result<Arc<EngineEntry>> {
+        // Fast path: check if already loaded by exact name before resolution.
+        // This handles models loaded via --model-path whose file may not be in models_dir.
+        if let Some(entry) = self.engines.get(name) {
+            if let Ok(mut lru) = self.lru.lock() {
+                lru.get(name);
+            }
+            self.last_used.insert(name.to_string(), Instant::now());
+            return Ok(entry.clone());
+        }
+
         let (stem, path) = self.resolve_model_name(name)?;
 
-        // Already loaded — promote to MRU and return.
+        // Already loaded under resolved stem — promote to MRU and return.
         if let Some(entry) = self.engines.get(&stem) {
             if let Ok(mut lru) = self.lru.lock() {
                 lru.get(&stem); // promotes

@@ -45,9 +45,9 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
-        let pool: Vec<i32> = (0..max_batch_size as i32).collect();
-        // Reserve up to 1/4 of the batch size for prefix cache entries (minimum 1).
         let prefix_cache_max = (max_batch_size / 4).max(1);
+        let total_seqs = max_batch_size + prefix_cache_max;
+        let pool: Vec<i32> = (0..total_seqs as i32).collect();
         Self {
             waiting_queue: std::sync::Mutex::new(VecDeque::new()),
             running_batch: std::sync::Mutex::new(Vec::new()),

@@ -162,13 +162,7 @@ impl LlamaCppModel {
                             if can_shift {
                                 let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
                                 if copy_end > 0 {
-                                    ffi::llama_memory_seq_cp(
-                                        mem,
-                                        src,
-                                        req.kv_seq_id,
-                                        0,
-                                        copy_end,
-                                    );
+                                    ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
                                 }
                             }
                         } else if req.skip_prefix_tokens > 0 {
@@ -176,8 +170,7 @@ impl LlamaCppModel {
                             // KV positions from the overlap token onwards so llama_decode
                             // doesn't collide with old entries. The overlap token
                             // (skip - 1) is re-submitted in the batch for logit alignment.
-                            let clear_from =
-                                req.skip_prefix_tokens.saturating_sub(1).max(0) as i32;
+                            let clear_from = req.skip_prefix_tokens.saturating_sub(1).max(0) as i32;
                             ffi::llama_memory_seq_rm(mem, req.kv_seq_id, clear_from, -1);
                         } else {
                             // No prefix at all — seq_id may carry stale KV from a
@@ -197,9 +190,9 @@ impl LlamaCppModel {
 
         // Per-request: compute the slice of tokens to submit this iteration.
         struct ChunkInfo {
-            start_pos: usize,  // absolute position in prompt_tokens
-            end_pos: usize,    // exclusive
-            is_final: bool,    // true if this chunk completes the prefill
+            start_pos: usize, // absolute position in prompt_tokens
+            end_pos: usize,   // exclusive
+            is_final: bool,   // true if this chunk completes the prefill
         }
         let mut chunk_infos: Vec<ChunkInfo> = Vec::with_capacity(requests.len());
         let mut total_tokens: usize = 0;
@@ -427,9 +420,7 @@ impl LlamaCppModel {
                 }
             });
 
-            let sampled = unsafe {
-                ffi::llama_sampler_sample(chain, ctx, out_idx as i32)
-            };
+            let sampled = unsafe { ffi::llama_sampler_sample(chain, ctx, out_idx as i32) };
             unsafe {
                 ffi::llama_sampler_accept(chain, sampled);
             }

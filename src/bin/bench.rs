@@ -196,7 +196,8 @@ impl SseDelta {
     /// producing tokens.
     fn has_content(&self) -> bool {
         self.content.as_deref().is_some_and(|c| !c.is_empty())
-            || self.reasoning_content
+            || self
+                .reasoning_content
                 .as_deref()
                 .is_some_and(|c| !c.is_empty())
     }
@@ -468,9 +469,7 @@ async fn run_request(
                             }
                         }
 
-                        let is_stop = choice
-                            .get("finish_reason")
-                            .is_some_and(|v| !v.is_null());
+                        let is_stop = choice.get("finish_reason").is_some_and(|v| !v.is_null());
                         if is_stop {
                             break;
                         }

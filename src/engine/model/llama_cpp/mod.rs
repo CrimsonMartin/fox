@@ -533,12 +533,8 @@ impl LlamaCppModel {
                 (false, false, 0)
             };
 
-        let decode_batch = unsafe {
-            ffi::llama_batch_init(max_batch_size as i32, 0, 1)
-        };
-        let prefill_batch = unsafe {
-            ffi::llama_batch_init(ctx_params.n_batch as i32, 0, 1)
-        };
+        let decode_batch = unsafe { ffi::llama_batch_init(max_batch_size as i32, 0, 1) };
+        let prefill_batch = unsafe { ffi::llama_batch_init(ctx_params.n_batch as i32, 0, 1) };
 
         Ok(Self {
             _model: model,
@@ -619,12 +615,8 @@ impl LlamaCppModel {
 
         #[allow(clippy::arc_with_non_send_sync)]
         let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
-        let decode_batch = unsafe {
-            ffi::llama_batch_init(max_batch_size as i32, 0, 1)
-        };
-        let prefill_batch = unsafe {
-            ffi::llama_batch_init(ctx_params.n_batch as i32, 0, 1)
-        };
+        let decode_batch = unsafe { ffi::llama_batch_init(max_batch_size as i32, 0, 1) };
+        let prefill_batch = unsafe { ffi::llama_batch_init(ctx_params.n_batch as i32, 0, 1) };
 
         Ok(Self {
             _model: model,

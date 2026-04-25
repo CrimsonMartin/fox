@@ -19,6 +19,8 @@ impl InferenceEngine {
         let running = self.scheduler.get_running(&req_ids);
         let eos_token_id = self.model.eos_token_id();
 
+        let mut token_updates: Vec<(u64, i32)> = Vec::new();
+
         for (req_id, logits) in results {
             let req = running.iter().find(|r| r.id == *req_id);
             let Some(req) = req else {
@@ -26,28 +28,17 @@ impl InferenceEngine {
             };
 
             let token_id = logits.sampled_token;
-            // Use is_eog_token() to catch ALL end-of-generation tokens, not just the
-            // primary EOS.  Models like Qwen3.5 have multiple EOG tokens
-            // (e.g. <|endoftext|>, <|im_end|>, <|fim_pad|>, …).
             let is_eos = self.model.is_eog_token(token_id);
-            let _ = eos_token_id; // kept for metrics / future use
+            let _ = eos_token_id;
             let reached_max = req.generated_tokens + 1 >= req.max_new_tokens;
 
-            // Detokenize to raw bytes (EOS tokens produce no bytes).
-            // Bytes may represent an incomplete UTF-8 sequence (e.g. the first two bytes
-            // of a 4-byte emoji split across BPE tokens).  They are accumulated in the
-            // per-request state buffer below and only decoded when complete.
             let token_bytes: Vec<u8> = if is_eos {
                 vec![]
             } else {
                 self.model.token_to_piece_bytes(token_id)
             };
 
-            // Apply output filtering AND stop sequence detection.
-            // DashMap gives us per-entry locking so concurrent requests don't block each other.
             let (text, is_stop_hit) = {
-                // Clone stop tokens only on first token for this request (inside or_insert_with),
-                // not on every subsequent token.
                 let mut state =
                     self.per_request_state
                         .entry(*req_id)
@@ -60,18 +51,9 @@ impl InferenceEngine {
                             ..Default::default()
                         });
 
-                // Accumulate raw token bytes and drain complete UTF-8 codepoints.
-                // This prevents "??" artifacts when multi-byte characters (e.g. emoji)
-                // are split across BPE tokens and passed through from_utf8_lossy.
                 state.utf8_buf.extend_from_slice(&token_bytes);
                 let raw_text = drain_valid_utf8(&mut state.utf8_buf).replace(SPM_SPACE, " ");
-
-                // Stage 1: thinking-block suppression + control-token holdback.
-                // Returns (filtered_text, control_stop) where control_stop is true when a
-                // complete control-token pattern was detected (e.g. multi-token <|im_end|>).
                 let (filtered, control_stop) = apply_output_filter(&mut state, &raw_text);
-
-                // Stage 2: user-supplied stop strings checked on the rolling buffer.
                 let (text, user_stop) =
                     check_stop_sequences(&mut state, filtered, &req.sampling.stop);
 
@@ -107,8 +89,6 @@ impl InferenceEngine {
                 token_id, is_stop_hit, "token generated"
             );
 
-            // Client disconnected: receiver was dropped. Cancel the request
-            // immediately to free KV cache and scheduler slot.
             if !send_ok {
                 if req.kv_seq_id >= 0 {
                     self.model.clear_sequence(req.kv_seq_id);
@@ -119,7 +99,6 @@ impl InferenceEngine {
                 continue;
             }
 
-            // Record per-token metrics.
             if let Some(m) = &self.metrics {
                 m.tokens_generated_total.inc();
                 if req.generated_tokens == 0 {
@@ -131,7 +110,6 @@ impl InferenceEngine {
             }
 
             if is_done {
-                // Record per-request metrics.
                 if let Some(m) = &self.metrics {
                     let reason_label = match &stop_reason {
                         Some(StopReason::Eos) => "stop",
@@ -145,8 +123,6 @@ impl InferenceEngine {
                     m.request_latency_seconds.observe(elapsed);
                 }
 
-                // Cache the KV state for potential prefix reuse on future identical prompts.
-                // Disabled for models that don't support llama_memory_seq_cp (e.g. Mamba/hybrid).
                 let should_clear = if self.supports_prefix_cache
                     && matches!(
                         stop_reason,
@@ -168,9 +144,13 @@ impl InferenceEngine {
 
                 self.per_request_state.remove(req_id);
             } else {
-                self.scheduler
-                    .update_after_token(*req_id, token_id, from_prefill);
+                token_updates.push((*req_id, token_id));
             }
+        }
+
+        if !token_updates.is_empty() {
+            self.scheduler
+                .batch_update_after_tokens(&token_updates, from_prefill);
         }
 
         Ok(())

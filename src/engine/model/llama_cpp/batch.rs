@@ -89,12 +89,8 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
-        // Copy cached prefix KV data into each request's sequence BEFORE building the batch.
-        //
-        // We copy positions 0..skip_prefix_tokens-1 (exclusive of the last "cached" position) so
-        // that the last prefix token is always re-submitted in the batch below.  This guarantees:
-        //   (a) the logits for the boundary position are freshly computed (not stale from seq_cp),
-        //   (b) total_tokens is always ≥ 1, avoiding an invalid pos=context_len decode call.
+        // Prepare llama.cpp KV for each request's sequence BEFORE building the batch.
+        // Only on the first chunk (prefill_chunk_progress == 0).
         {
             let ctx_guard = self
                 ._ctx
@@ -104,58 +100,103 @@ impl LlamaCppModel {
             unsafe {
                 let mem = ffi::llama_get_memory(ctx as *const _);
                 if !mem.is_null() {
-                    // Only attempt seq_cp if the memory backend supports it.
-                    let can_copy = ffi::llama_memory_can_shift(mem);
+                    let can_shift = ffi::llama_memory_can_shift(mem);
                     for req in requests.iter() {
+                        if req.prefill_chunk_progress > 0 {
+                            continue;
+                        }
                         if let Some(src) = req.prefix_seq_id {
-                            if !can_copy {
-                                // Recurrent/hybrid model — seq_cp not supported; skip.
-                                continue;
+                            // Fresh seq_id from pool with prefix copy: clear it first,
+                            // then copy the cached prefix from the source sequence.
+                            ffi::llama_memory_seq_rm(mem, req.kv_seq_id, 0, -1);
+                            if can_shift {
+                                let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
+                                if copy_end > 0 {
+                                    ffi::llama_memory_seq_cp(
+                                        mem,
+                                        src,
+                                        req.kv_seq_id,
+                                        0,
+                                        copy_end,
+                                    );
+                                }
                             }
-                            // copy 0..skip-1; skip-1 position will be re-submitted in the batch
-                            let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
-                            if copy_end > 0 {
-                                ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
-                            }
+                        } else if req.skip_prefix_tokens > 0 {
+                            // Prefix cache hit (same seq_id, no copy needed): clear stale
+                            // KV positions from the overlap token onwards so llama_decode
+                            // doesn't collide with old entries. The overlap token
+                            // (skip - 1) is re-submitted in the batch for logit alignment.
+                            let clear_from =
+                                req.skip_prefix_tokens.saturating_sub(1).max(0) as i32;
+                            ffi::llama_memory_seq_rm(mem, req.kv_seq_id, clear_from, -1);
+                        } else {
+                            // No prefix at all — seq_id may carry stale KV from a
+                            // previous request. Clear everything.
+                            ffi::llama_memory_seq_rm(mem, req.kv_seq_id, 0, -1);
                         }
                     }
                 }
             }
         }
 
-        // Effective start of submission: one token before skip_prefix_tokens so the boundary
-        // position is always freshly computed (see seq_cp comment above).
         let effective_skip = |r: &InferenceRequestForModel| {
             r.skip_prefix_tokens
                 .saturating_sub(1)
                 .min(r.prompt_tokens.len())
         };
 
-        let total_tokens: usize = requests
-            .iter()
-            .map(|r| r.prompt_tokens.len() - effective_skip(r))
-            .sum();
-
-        // total_tokens ≥ 1 because effective_skip < prompt_tokens.len() for any non-empty prompt.
-        let n_seq_max = requests.len().max(1) as i32;
-
-        let mut batch = unsafe { ffi::llama_batch_init(total_tokens as i32, 0, n_seq_max) };
-
-        let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
+        // Per-request: compute the slice of tokens to submit this iteration.
+        struct ChunkInfo {
+            start_pos: usize,  // absolute position in prompt_tokens
+            end_pos: usize,    // exclusive
+            is_final: bool,    // true if this chunk completes the prefill
+        }
+        let mut chunk_infos: Vec<ChunkInfo> = Vec::with_capacity(requests.len());
+        let mut total_tokens: usize = 0;
 
         for req in requests.iter() {
+            let skip = effective_skip(req);
+            let progress = req.prefill_chunk_progress;
+            let chunk_start = skip + progress;
+            let full_remaining = req.prompt_tokens.len().saturating_sub(chunk_start);
+
+            let to_submit = if req.prefill_chunk_limit > 0 {
+                full_remaining.min(req.prefill_chunk_limit)
+            } else {
+                full_remaining
+            };
+            let chunk_end = chunk_start + to_submit;
+            let is_final = chunk_end >= req.prompt_tokens.len();
+
+            chunk_infos.push(ChunkInfo {
+                start_pos: chunk_start,
+                end_pos: chunk_end,
+                is_final,
+            });
+            total_tokens += to_submit;
+        }
+
+        if total_tokens == 0 {
+            return Ok(vec![]);
+        }
+
+        let n_seq_max = requests.len().max(1) as i32;
+        let mut batch = unsafe { ffi::llama_batch_init(total_tokens as i32, 0, n_seq_max) };
+        let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
+
+        for (i, req) in requests.iter().enumerate() {
+            let info = &chunk_infos[i];
             let seq_id = req.kv_seq_id;
-            let start = effective_skip(req);
-            let tokens_to_submit = &req.prompt_tokens[start..];
+            let tokens_to_submit = &req.prompt_tokens[info.start_pos..info.end_pos];
             if tokens_to_submit.is_empty() {
-                // Should be handled by the total_tokens == 0 branch above, but be defensive.
                 batch_logits_indices.push(-1);
                 continue;
             }
             for (local_pos, &token) in tokens_to_submit.iter().enumerate() {
-                let abs_pos = start + local_pos;
+                let abs_pos = info.start_pos + local_pos;
                 let idx = batch.n_tokens as usize;
-                let has_logits = abs_pos == req.prompt_tokens.len() - 1;
+                // Only request logits on the absolute last prompt token AND only if this is the final chunk.
+                let has_logits = info.is_final && abs_pos == req.prompt_tokens.len() - 1;
                 unsafe {
                     *batch.token.add(idx) = token;
                     *batch.pos.add(idx) = abs_pos as i32;
@@ -168,6 +209,9 @@ impl LlamaCppModel {
                 if has_logits {
                     batch_logits_indices.push(idx as i32);
                 }
+            }
+            if !chunk_infos[i].is_final {
+                batch_logits_indices.push(-1);
             }
         }
 
@@ -187,16 +231,17 @@ impl LlamaCppModel {
 
         for (i, &req_id) in req_ids.iter().enumerate() {
             let req = requests.get(i);
-            // tokens_in_kv = tokens actually placed in the KV during this prefill call.
-            let tokens_in_kv = req
-                .map(|r| r.prompt_tokens.len() - effective_skip(r))
-                .unwrap_or(0);
+            let info = &chunk_infos[i];
+            let tokens_in_kv = info.end_pos;
             let batch_idx = batch_logits_indices.get(i).copied().unwrap_or(-1);
-            let logits_ptr = if batch_idx >= 0 {
-                unsafe { ffi::llama_get_logits_ith(ctx, batch_idx) }
-            } else {
-                std::ptr::null_mut()
-            };
+
+            if !info.is_final || batch_idx < 0 {
+                // Partial chunk — no logits, return a dummy token; the engine won't sample.
+                results.push((req_id, Logits::new(vec![], self.eos_token), tokens_in_kv));
+                continue;
+            }
+
+            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, batch_idx) };
             if logits_ptr.is_null() {
                 results.push((req_id, Logits::new(vec![], self.eos_token), tokens_in_kv));
                 continue;

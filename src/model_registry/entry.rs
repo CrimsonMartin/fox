@@ -57,6 +57,7 @@ impl EngineEntry {
             kv,
             name.to_string(),
             None,
+            0,
         ));
         let loop_handle = {
             let e = engine.clone();

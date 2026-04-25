@@ -163,6 +163,13 @@ pub struct ServeArgs {
     #[arg(long, default_value = "true", env = "FOX_FLASH_ATTN", action = clap::ArgAction::Set)]
     pub flash_attn: bool,
 
+    /// Maximum prompt tokens per prefill iteration (chunked prefill).
+    /// Long prompts are split into chunks and interleaved with decode
+    /// steps so ongoing generations are not stalled by a single large prompt.
+    /// 0 = disabled (entire prompt processed in one pass).
+    #[arg(long, default_value = "512", env = "FOX_CHUNKED_PREFILL_TOKENS")]
+    pub chunked_prefill_tokens: usize,
+
     /// Allowed CORS origins (comma-separated). Default: "*" (allow all).
     /// Set to specific origins to restrict access, e.g. "https://example.com,http://localhost:3000".
     #[arg(long, default_value = "*", env = "FOX_CORS_ORIGINS")]
@@ -302,6 +309,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         vision_contexts: args.vision_contexts,
         discovered_models: discovered,
         flash_attn: args.flash_attn,
+        chunked_prefill_tokens: args.chunked_prefill_tokens,
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

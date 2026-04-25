@@ -172,6 +172,7 @@ struct ImprovementStats {
 
 #[derive(Debug, Deserialize)]
 struct SseChunk {
+    #[serde(default)]
     choices: Vec<SseChoice>,
     usage: Option<SseUsage>,
 }
@@ -185,6 +186,20 @@ struct SseChoice {
 #[derive(Debug, Deserialize)]
 struct SseDelta {
     content: Option<String>,
+    /// llama-server emits reasoning tokens via this field for some models.
+    reasoning_content: Option<String>,
+}
+
+impl SseDelta {
+    /// Returns true when this delta carries any generated content — either
+    /// regular text or reasoning output — indicating the model has begun
+    /// producing tokens.
+    fn has_content(&self) -> bool {
+        self.content.as_deref().is_some_and(|c| !c.is_empty())
+            || self.reasoning_content
+                .as_deref()
+                .is_some_and(|c| !c.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,6 +371,7 @@ async fn run_request(
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 1.0,
+        "top_p": 1.0,
         "stream": true,
         "stream_options": {"include_usage": true}
     });
@@ -383,7 +399,9 @@ async fn run_request(
         let bytes = chunk.context("stream error")?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
 
-        // Process all complete SSE lines in the buffer
+        // Process all complete SSE lines in the buffer.
+        // SSE events are terminated by a blank line (\n\n), so we split on
+        // single newlines and skip non-"data:" lines (including blank ones).
         while let Some(newline) = buf.find('\n') {
             let line = buf[..newline].trim().to_string();
             buf.drain(..=newline);
@@ -395,20 +413,20 @@ async fn run_request(
             if data == "[DONE]" {
                 break;
             }
+
+            // Try typed deserialization first; fall back to dynamic JSON so
+            // we can still detect TTFT from servers whose chunk layout does
+            // not exactly match the struct (e.g. extra/missing fields that
+            // trip serde).
             if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
                 // Capture real token count from usage field (final chunk).
                 if let Some(ref u) = chunk.usage {
                     actual_tokens = Some(u.completion_tokens);
                 }
                 for choice in &chunk.choices {
-                    // Set TTFT on first chunk with non-empty content.
-                    if choice
-                        .delta
-                        .content
-                        .as_deref()
-                        .is_some_and(|c| !c.is_empty())
-                        && ttft.is_none()
-                    {
+                    // Set TTFT on first chunk with any generated content
+                    // (regular text or reasoning output).
+                    if choice.delta.has_content() && ttft.is_none() {
                         ttft = Some(start.elapsed());
                     }
                     if choice.finish_reason.is_some() {
@@ -418,6 +436,46 @@ async fn run_request(
                     // Count every intermediate chunk as one token (content may
                     // be empty for some backends but the inference step happened).
                     chunk_count += 1;
+                }
+            } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                // Fallback: handle servers whose JSON layout differs slightly
+                // from the typed structs above (e.g. llama-server when using
+                // unusual chat templates).
+
+                // Usage
+                if let Some(ct) = v
+                    .pointer("/usage/completion_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    actual_tokens = Some(ct as usize);
+                }
+
+                if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
+                    for choice in choices {
+                        // TTFT: any non-empty delta content field.
+                        if ttft.is_none() {
+                            let delta = choice.get("delta");
+                            let has_text = delta
+                                .and_then(|d| d.get("content"))
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|s| !s.is_empty());
+                            let has_reasoning = delta
+                                .and_then(|d| d.get("reasoning_content"))
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|s| !s.is_empty());
+                            if has_text || has_reasoning {
+                                ttft = Some(start.elapsed());
+                            }
+                        }
+
+                        let is_stop = choice
+                            .get("finish_reason")
+                            .is_some_and(|v| !v.is_null());
+                        if is_stop {
+                            break;
+                        }
+                        chunk_count += 1;
+                    }
                 }
             }
         }

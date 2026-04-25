@@ -704,6 +704,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -740,6 +741,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -774,6 +776,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -815,6 +818,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -855,6 +859,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -888,6 +893,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -920,6 +926,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -952,6 +959,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());
@@ -985,6 +993,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         };
         let registry = Arc::new(ModelRegistry::new(cfg, std::collections::HashMap::new()));
         let server = McpServer::new(registry, dir.path().to_path_buf());

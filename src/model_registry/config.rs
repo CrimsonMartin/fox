@@ -46,4 +46,9 @@ pub struct RegistryConfig {
     pub discovered_models: Vec<DiscoveredModel>,
     /// Enable Flash Attention for faster inference and lower memory usage.
     pub flash_attn: bool,
+    /// Maximum prompt tokens to submit per prefill iteration (chunked prefill).
+    /// 0 = disabled (submit entire prompt in one pass). When enabled, long prefills
+    /// are split into chunks and interleaved with decode steps so ongoing generations
+    /// are not stalled by a single large prompt.
+    pub chunked_prefill_tokens: usize,
 }

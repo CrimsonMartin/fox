@@ -146,6 +146,11 @@ pub struct InferenceRequest {
     /// boundary re-submission).  The decode position is based on this value, not
     /// `prompt_tokens.len()`, to avoid position gaps in recurrent/hybrid models.
     pub prefilled_tokens: usize,
+    /// Chunked prefill progress: number of prompt tokens (after skip) already submitted
+    /// in previous chunked prefill iterations.  When chunked prefill is enabled, each
+    /// scheduling iteration submits at most `chunk_size` tokens; this counter tracks
+    /// cumulative progress so the next iteration continues from the right position.
+    pub prefill_chunk_progress: usize,
     /// Raw image bytes for vision requests. When set, prefill uses mtmd
     /// (CLIP encode + eval) instead of the normal batched text prefill.
     pub vision_image: Option<Arc<Vec<u8>>>,
@@ -179,6 +184,7 @@ impl InferenceRequest {
             prefix_seq_id: None,
             submitted_at: std::time::Instant::now(),
             prefilled_tokens: 0,
+            prefill_chunk_progress: 0,
             vision_image: None,
             vision_prompt: None,
         }

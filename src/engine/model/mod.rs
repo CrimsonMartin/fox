@@ -94,6 +94,11 @@ pub struct InferenceRequestForModel {
     /// `llama_memory_seq_cp` to transfer positions 0..skip_prefix_tokens before adding
     /// the remaining tokens to the batch.
     pub prefix_seq_id: Option<i32>,
+    /// Chunked prefill: number of tokens (after skip) already submitted in prior chunks.
+    /// 0 on the first (or only) prefill iteration.
+    pub prefill_chunk_progress: usize,
+    /// Maximum tokens to submit in this prefill call (0 = no limit, submit all remaining).
+    pub prefill_chunk_limit: usize,
 }
 
 // ---------------------------------------------------------------------------

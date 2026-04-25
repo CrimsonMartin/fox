@@ -86,13 +86,33 @@ impl InferenceEngine {
                 }
             }
 
-            let decode_ids = batch.decode.clone();
+            let mut decode_ids = batch.decode.clone();
 
             // 1. Text prefill (batched, one mutex acquisition).
+            //    Chunked prefill: only completed requests get logits/sampling;
+            //    partial requests stay in Prefilling state for the next iteration.
             if !text_prefill_ids.is_empty() {
                 match engine.run_prefill(&text_prefill_ids).await {
-                    Ok(prefill_results) => {
-                        engine.handle_logits(&prefill_results, true).await?;
+                    Ok((completed_results, partial_ids)) => {
+                        if !partial_ids.is_empty() {
+                            tracing::debug!(
+                                partial = partial_ids.len(),
+                                completed = completed_results.len(),
+                                "chunked prefill: {} request(s) need more chunks",
+                                partial_ids.len()
+                            );
+                        }
+                        if !completed_results.is_empty() {
+                            engine.handle_logits(&completed_results, true).await?;
+                            // Requests that just completed prefill are now in Decoding
+                            // state with their first token generated. Include them in
+                            // this iteration's decode batch so the GPU processes all
+                            // active sequences together instead of waiting for the next
+                            // schedule_step.
+                            for (req_id, _) in &completed_results {
+                                decode_ids.push(*req_id);
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -100,6 +120,12 @@ impl InferenceEngine {
                             e,
                             text_prefill_ids.len()
                         );
+                        let failed_reqs = engine.scheduler.get_running(&text_prefill_ids);
+                        for req in &failed_reqs {
+                            if req.kv_seq_id >= 0 {
+                                engine.model.clear_sequence(req.kv_seq_id);
+                            }
+                        }
                         for req_id in &text_prefill_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
@@ -255,9 +281,15 @@ impl InferenceEngine {
         }
     }
 
-    /// Text-only prefill.
-    pub(super) async fn run_prefill(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
+    /// Text-only prefill. Returns `(completed_results, partial_req_ids)`.
+    /// `completed_results` contains logits for requests that finished their final chunk.
+    /// `partial_req_ids` contains IDs of requests that still have tokens remaining (chunked prefill).
+    pub(super) async fn run_prefill(
+        &self,
+        req_ids: &[u64],
+    ) -> Result<(Vec<(u64, Logits)>, Vec<u64>)> {
         let requests = self.scheduler.get_running(req_ids);
+        let chunk_limit = self.chunked_prefill_tokens;
 
         let model_requests: Vec<InferenceRequestForModel> = requests
             .iter()
@@ -280,6 +312,8 @@ impl InferenceEngine {
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: r.skip_prefix_tokens,
                 prefix_seq_id: r.prefix_seq_id,
+                prefill_chunk_progress: r.prefill_chunk_progress,
+                prefill_chunk_limit: chunk_limit,
             })
             .collect();
 
@@ -299,42 +333,65 @@ impl InferenceEngine {
             self.scheduler.return_prefix_seq_id(prefix_seq_id);
         }
 
-        let mut results = Vec::new();
+        let mut completed = Vec::new();
+        let mut partial_ids = Vec::new();
         for (id, logits, tokens_in_kv) in raw {
             if tokens_in_kv > 0 {
                 self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
             }
-            results.push((id, logits));
+            // Check if this request has more tokens to prefill.
+            if let Some(req) = requests.iter().find(|r| r.id == id) {
+                let effective_skip = req
+                    .skip_prefix_tokens
+                    .saturating_sub(1)
+                    .min(req.prompt_tokens.len());
+                let total_to_submit = req.prompt_tokens.len() - effective_skip;
+                let progress = req.prefill_chunk_progress;
+                let submitted_this_chunk = if chunk_limit > 0 {
+                    (total_to_submit - progress).min(chunk_limit)
+                } else {
+                    total_to_submit - progress
+                };
+                let new_progress = progress + submitted_this_chunk;
+
+                if chunk_limit > 0 && new_progress < total_to_submit {
+                    self.scheduler
+                        .advance_prefill_chunk_progress(id, submitted_this_chunk);
+                    partial_ids.push(id);
+                } else {
+                    completed.push((id, logits));
+                }
+            } else {
+                completed.push((id, logits));
+            }
         }
 
-        Ok(results)
+        Ok((completed, partial_ids))
     }
 
     pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
+        let requests = self.scheduler.get_running(req_ids);
+
         // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
         // allocate a new exclusive copy before llama.cpp writes to it.
-        {
-            let cow_requests = self.scheduler.get_running(req_ids);
-            for req in &cow_requests {
-                for (logical_idx, &block_id) in req.page_table.entries.iter().enumerate() {
-                    if self.kv_cache.is_shared(block_id) {
-                        if let Some(new_block_id) = self.kv_cache.copy_on_write(block_id) {
-                            self.scheduler
-                                .cow_update_page_table(req.id, logical_idx, new_block_id);
-                            tracing::debug!(
-                                request_id = req.id,
-                                logical_idx,
-                                old_block = block_id,
-                                new_block = new_block_id,
-                                "CoW: privatised shared KV block before decode"
-                            );
-                        }
+        for req in &requests {
+            for (logical_idx, &block_id) in req.page_table.entries.iter().enumerate() {
+                if self.kv_cache.is_shared(block_id) {
+                    if let Some(new_block_id) = self.kv_cache.copy_on_write(block_id) {
+                        self.scheduler
+                            .cow_update_page_table(req.id, logical_idx, new_block_id);
+                        tracing::debug!(
+                            request_id = req.id,
+                            logical_idx,
+                            old_block = block_id,
+                            new_block = new_block_id,
+                            "CoW: privatised shared KV block before decode"
+                        );
                     }
                 }
             }
         }
 
-        let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests
             .iter()
             .map(|r| InferenceRequestForModel {
@@ -356,6 +413,8 @@ impl InferenceEngine {
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: 0,
                 prefix_seq_id: None,
+                prefill_chunk_progress: 0,
+                prefill_chunk_limit: 0,
             })
             .collect();
         let model = self.model.clone();

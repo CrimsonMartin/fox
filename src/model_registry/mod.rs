@@ -303,6 +303,7 @@ mod tests {
             vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
+            chunked_prefill_tokens: 0,
         }
     }
 

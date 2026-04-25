@@ -43,6 +43,7 @@ pub fn make_test_registry(
         vision_contexts: 1,
         discovered_models: vec![],
         flash_attn: true,
+        chunked_prefill_tokens: 0,
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test(name);
@@ -91,6 +92,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         vision_contexts: 1,
         discovered_models: vec![],
         flash_attn: true,
+        chunked_prefill_tokens: 0,
     };
     let registry = Arc::new(crate::model_registry::ModelRegistry::new(
         cfg,

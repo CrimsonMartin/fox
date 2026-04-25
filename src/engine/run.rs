@@ -210,10 +210,11 @@ impl InferenceEngine {
 
                 if !decode_params.is_empty() {
                     let n_vision = decode_req_ids.len();
-                    let model = &engine.model;
-                    let decode_result = tokio::task::block_in_place(|| {
+                    let model = engine.model.clone();
+                    let decode_result = tokio::task::spawn_blocking(move || {
                         model.vision_decode_prefill_batch_sync(decode_params)
-                    });
+                    })
+                    .await;
                     let total_ms = t0.elapsed().as_millis() as u64;
                     tracing::info!(
                         n = n_vision,
@@ -224,15 +225,21 @@ impl InferenceEngine {
                     );
 
                     match decode_result {
-                        Ok(results) => {
+                        Ok(Ok(results)) => {
                             for (i, (n_past, logits)) in results.into_iter().enumerate() {
                                 let req_id = decode_req_ids[i];
                                 engine.scheduler.set_prefilled_tokens(req_id, n_past);
                                 engine.handle_logits(&[(req_id, logits)], true).await?;
                             }
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::warn!("vision batch decode failed: {}", e);
+                            for req_id in &decode_req_ids {
+                                engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("vision batch decode spawn failed: {}", e);
                             for req_id in &decode_req_ids {
                                 engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             }
@@ -315,9 +322,11 @@ impl InferenceEngine {
             .filter_map(|r| r.prefix_seq_id)
             .collect();
 
+        let model = self.model.clone();
         let ids = req_ids.to_vec();
-        let model = &self.model;
-        let raw = tokio::task::block_in_place(|| model.prefill_sync(&ids, &model_requests))?;
+        let raw = tokio::task::spawn_blocking(move || model.prefill_sync(&ids, &model_requests))
+            .await
+            .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
 
         for prefix_seq_id in prefix_cleanup {
             self.model.clear_sequence(prefix_seq_id);
@@ -408,8 +417,10 @@ impl InferenceEngine {
                 prefill_chunk_limit: 0,
             })
             .collect();
+        let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
-        let model = &self.model;
-        tokio::task::block_in_place(|| model.decode_sync(&req_ids_vec, &model_requests))
+        tokio::task::spawn_blocking(move || model.decode_sync(&req_ids_vec, &model_requests))
+            .await
+            .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))?
     }
 }

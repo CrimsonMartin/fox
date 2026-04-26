@@ -122,6 +122,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         None,
         true,
         1,
+        -1,
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
@@ -202,6 +203,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             show_thinking: false,
             initial_in_thinking: false,
             max_thinking_chars: 8192,
+            grammar: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

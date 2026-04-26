@@ -415,6 +415,22 @@ fn main() {
 
     mtmd_build.compile("mtmd");
 
+    // ── fox C++ helpers (exception-safe wrappers) ────────────────────────────
+    let csrc_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("csrc");
+    if csrc_dir.exists() {
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .file(csrc_dir.join("grammar_safe.cpp"))
+            .include(&llama_include)
+            .include(&ggml_include)
+            .define("LLAMA_SHARED", None)
+            .define("LLAMA_BUILD", None)
+            .warnings(false)
+            .pic(true)
+            .compile("fox_helpers");
+    }
+
     // ── mtmd bindgen ─────────────────────────────────────────────────────────
     let mut mtmd_clang_args = clang_args.clone();
     mtmd_clang_args.push("-I".to_string());

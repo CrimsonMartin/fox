@@ -18,6 +18,246 @@ struct FfiSamplerParams<'a> {
     presence_penalty: f32,
     generated_ids: &'a [i32],
     seed: Option<u64>,
+    grammar: Option<&'a str>,
+    vocab: *const ffi::llama_vocab,
+}
+
+unsafe extern "C" {
+    fn fox_sampler_init_grammar_safe(
+        vocab: *const ffi::llama_vocab,
+        grammar_str: *const std::os::raw::c_char,
+        grammar_root: *const std::os::raw::c_char,
+    ) -> *mut ffi::llama_sampler;
+    fn fox_sampler_sample_safe(
+        smpl: *mut ffi::llama_sampler,
+        ctx: *mut ffi::llama_context,
+        idx: i32,
+    ) -> i32;
+    fn fox_sampler_accept_safe(smpl: *mut ffi::llama_sampler, token: i32) -> i32;
+}
+
+unsafe fn add_grammar_sampler(chain: *mut ffi::llama_sampler, p: &FfiSamplerParams<'_>) {
+    if let Some(grammar_str) = p.grammar {
+        if !grammar_str.is_empty() && !p.vocab.is_null() {
+            let c_grammar = std::ffi::CString::new(grammar_str).unwrap_or_default();
+            let c_root = std::ffi::CString::new("root").unwrap_or_default();
+            let sampler = fox_sampler_init_grammar_safe(
+                p.vocab,
+                c_grammar.as_ptr(),
+                c_root.as_ptr(),
+            );
+            if !sampler.is_null() {
+                ffi::llama_sampler_chain_add(chain, sampler);
+            }
+        }
+    }
+}
+
+fn prumerge_keep_ratio() -> f32 {
+    static RATIO: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *RATIO.get_or_init(|| {
+        std::env::var("FOX_PRUMERGE_KEEP")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(1.0)
+    })
+}
+
+fn kv_prune_keep_ratio() -> f32 {
+    static RATIO: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *RATIO.get_or_init(|| {
+        std::env::var("FOX_KV_PRUNE_KEEP")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(1.0)
+    })
+}
+
+/// Remove low-importance vision token positions from KV cache after prefill.
+/// Scores tokens by cosine distance from mean embedding, removes the least important.
+/// Position gaps are left in place (attention skips empty KV cells).
+unsafe fn kv_prune_vision_positions(
+    lctx: *mut ffi::llama_context,
+    seq_id: i32,
+    vis_pos_start: i32,
+    vis_n_tokens: i32,
+    embeddings: &[f32],
+    n_embd: usize,
+) {
+    let keep_ratio = kv_prune_keep_ratio();
+    if keep_ratio >= 1.0 || vis_n_tokens <= 1 {
+        return;
+    }
+
+    let n_tok = vis_n_tokens as usize;
+    let n_keep = ((n_tok as f32 * keep_ratio).ceil() as usize).max(1);
+    if n_keep >= n_tok {
+        return;
+    }
+
+    // Score each token by cosine distance from mean
+    let mut mean = vec![0.0f32; n_embd];
+    for t in 0..n_tok {
+        let off = t * n_embd;
+        for d in 0..n_embd {
+            mean[d] += embeddings[off + d];
+        }
+    }
+    let inv_n = 1.0 / n_tok as f32;
+    for v in &mut mean {
+        *v *= inv_n;
+    }
+    let mean_norm: f32 = mean.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+
+    let mut scores: Vec<(usize, f32)> = (0..n_tok)
+        .map(|t| {
+            let off = t * n_embd;
+            let emb = &embeddings[off..off + n_embd];
+            let dot: f32 = emb.iter().zip(mean.iter()).map(|(a, b)| a * b).sum();
+            let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            (t, 1.0 - dot / (norm * mean_norm))
+        })
+        .collect();
+
+    // Sort ascending — bottom entries are least important
+    scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mem = ffi::llama_get_memory(lctx as *const _);
+    let n_remove = n_tok - n_keep;
+
+    // Collect positions to remove, sorted for contiguous-range grouping
+    let mut remove_positions: Vec<i32> = scores[..n_remove]
+        .iter()
+        .map(|&(t, _)| vis_pos_start + t as i32)
+        .collect();
+    remove_positions.sort();
+
+    // Group contiguous positions into ranges and remove each range in one call
+    let mut i = 0;
+    while i < remove_positions.len() {
+        let start = remove_positions[i];
+        let mut end = start + 1;
+        while i + 1 < remove_positions.len() && remove_positions[i + 1] == end {
+            i += 1;
+            end += 1;
+        }
+        ffi::llama_memory_seq_rm(mem, seq_id, start, end);
+        i += 1;
+    }
+
+    tracing::debug!(
+        vis_start = vis_pos_start,
+        original = n_tok,
+        kept = n_keep,
+        removed = n_remove,
+        "kv_prune: removed vision positions from KV cache"
+    );
+}
+
+/// PruMerge: prune vision tokens by importance, merge pruned into nearest kept neighbor.
+/// Scores tokens by cosine distance from mean embedding (higher = more unique = keep).
+/// Returns the (possibly smaller) embedding vec.
+fn prumerge_vision_tokens(embeddings: &[f32], n_tokens: usize, n_embd: usize) -> Vec<f32> {
+    let keep_ratio = prumerge_keep_ratio();
+    if keep_ratio >= 1.0 || n_tokens <= 1 {
+        return embeddings.to_vec();
+    }
+
+    let n_keep = ((n_tokens as f32 * keep_ratio).ceil() as usize).max(1);
+    if n_keep >= n_tokens {
+        return embeddings.to_vec();
+    }
+
+    // Mean embedding across all tokens
+    let mut mean = vec![0.0f32; n_embd];
+    for t in 0..n_tokens {
+        let off = t * n_embd;
+        for d in 0..n_embd {
+            mean[d] += embeddings[off + d];
+        }
+    }
+    let inv_n = 1.0 / n_tokens as f32;
+    for v in &mut mean {
+        *v *= inv_n;
+    }
+
+    let mean_norm: f32 = mean.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+
+    // Score each token: cosine distance from mean (higher = more unique = more important)
+    let mut scores: Vec<(usize, f32)> = (0..n_tokens)
+        .map(|t| {
+            let off = t * n_embd;
+            let emb = &embeddings[off..off + n_embd];
+            let dot: f32 = emb.iter().zip(mean.iter()).map(|(a, b)| a * b).sum();
+            let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            (t, 1.0 - dot / (norm * mean_norm))
+        })
+        .collect();
+
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Partition into keep (important) and prune sets
+    let mut keep_sorted: Vec<usize> = scores[..n_keep].iter().map(|s| s.0).collect();
+    keep_sorted.sort();
+    let prune_set: Vec<usize> = scores[n_keep..].iter().map(|s| s.0).collect();
+
+    // Start with kept embeddings; will accumulate merged tokens (simple average)
+    let mut output: Vec<Vec<f32>> = keep_sorted
+        .iter()
+        .map(|&t| {
+            let off = t * n_embd;
+            embeddings[off..off + n_embd].to_vec()
+        })
+        .collect();
+    let mut counts: Vec<u32> = vec![1; n_keep];
+
+    // Merge each pruned token into its spatially nearest kept token (O(n_prune) via binary search).
+    // Spatial merging preserves patch locality while avoiding the O(n_prune × n_keep × n_embd)
+    // cosine-similarity search that dominates runtime on small models.
+    for &pt in &prune_set {
+        let k = match keep_sorted.binary_search(&pt) {
+            Ok(i) => i, // exact match (shouldn't happen since pruned ∉ kept)
+            Err(i) => {
+                // pick the closer neighbor
+                if i == 0 {
+                    0
+                } else if i >= n_keep {
+                    n_keep - 1
+                } else {
+                    let dist_left = pt - keep_sorted[i - 1];
+                    let dist_right = keep_sorted[i] - pt;
+                    if dist_left <= dist_right {
+                        i - 1
+                    } else {
+                        i
+                    }
+                }
+            }
+        };
+        let p_off = pt * n_embd;
+        for d in 0..n_embd {
+            output[k][d] += embeddings[p_off + d];
+        }
+        counts[k] += 1;
+    }
+
+    // Normalize by merge count
+    let mut result = Vec::with_capacity(n_keep * n_embd);
+    for k in 0..n_keep {
+        let inv_c = 1.0 / counts[k] as f32;
+        for d in 0..n_embd {
+            result.push(output[k][d] * inv_c);
+        }
+    }
+
+    tracing::debug!(
+        original = n_tokens,
+        kept = n_keep,
+        pruned = n_tokens - n_keep,
+        "prumerge: pruned vision tokens"
+    );
+
+    result
 }
 
 unsafe fn create_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi::llama_sampler {
@@ -49,6 +289,8 @@ unsafe fn create_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi::llama_samp
         ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_min_p(p.min_p, 1));
     }
 
+    add_grammar_sampler(chain, p);
+
     if p.temperature <= 0.0 {
         ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_greedy());
     } else {
@@ -59,7 +301,7 @@ unsafe fn create_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi::llama_samp
 
     if has_penalties {
         for &tok in p.generated_ids {
-            ffi::llama_sampler_accept(chain, tok);
+            fox_sampler_accept_safe(chain, tok);
         }
     }
 
@@ -74,7 +316,7 @@ unsafe fn ffi_sample(
     p: &FfiSamplerParams<'_>,
 ) -> i32 {
     let chain = create_sampler_chain(p);
-    let token = ffi::llama_sampler_sample(chain, ctx, batch_idx);
+    let token = fox_sampler_sample_safe(chain, ctx, batch_idx);
     ffi::llama_sampler_free(chain);
     token
 }
@@ -87,6 +329,7 @@ unsafe fn create_persistent_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi:
 
     // Greedy: argmax only — skip all filtering/penalty samplers.
     if p.temperature <= 0.0 {
+        add_grammar_sampler(chain, p);
         ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_greedy());
         return chain;
     }
@@ -116,13 +359,15 @@ unsafe fn create_persistent_sampler_chain(p: &FfiSamplerParams<'_>) -> *mut ffi:
         ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_min_p(p.min_p, 1));
     }
 
+    add_grammar_sampler(chain, p);
+
     ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_temp(p.temperature));
     let seed_val = p.seed.unwrap_or(0xFFFFFFFF_u64) as u32;
     ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_dist(seed_val));
 
     if has_penalties {
         for &tok in p.generated_ids {
-            ffi::llama_sampler_accept(chain, tok);
+            fox_sampler_accept_safe(chain, tok);
         }
     }
 
@@ -306,6 +551,8 @@ impl LlamaCppModel {
                             presence_penalty: r.presence_penalty,
                             generated_ids: &r.generated_token_ids,
                             seed: r.seed,
+                            grammar: None,
+                            vocab: self.vocab,
                         },
                     )
                 }
@@ -324,6 +571,8 @@ impl LlamaCppModel {
                             presence_penalty: 0.0,
                             generated_ids: &[],
                             seed: None,
+                            grammar: None,
+                            vocab: self.vocab,
                         },
                     )
                 }
@@ -401,6 +650,8 @@ impl LlamaCppModel {
                             presence_penalty: r.presence_penalty,
                             generated_ids: &r.generated_token_ids,
                             seed: r.seed,
+                            grammar: r.grammar.as_deref(),
+                            vocab: self.vocab,
                         })
                     }
                 } else {
@@ -415,15 +666,15 @@ impl LlamaCppModel {
                             presence_penalty: 0.0,
                             generated_ids: &[],
                             seed: None,
+                            grammar: None,
+                            vocab: self.vocab,
                         })
                     }
                 }
             });
 
-            let sampled = unsafe { ffi::llama_sampler_sample(chain, ctx, out_idx as i32) };
-            unsafe {
-                ffi::llama_sampler_accept(chain, sampled);
-            }
+            // llama_sampler_sample already calls accept internally
+            let sampled = unsafe { fox_sampler_sample_safe(chain, ctx, out_idx as i32) };
 
             results.push((req_id, Logits::new(vec![], sampled)));
         }
@@ -578,7 +829,8 @@ impl LlamaCppModel {
 
                 let embd_len = n_embd_inp * n_tokens;
                 let embd_slice = unsafe { std::slice::from_raw_parts(embd_ptr, embd_len) };
-                image_embeddings.push((i, std::sync::Arc::new(embd_slice.to_vec())));
+                let embd_vec = prumerge_vision_tokens(embd_slice, n_tokens, n_embd_inp);
+                image_embeddings.push((i, std::sync::Arc::new(embd_vec)));
             }
 
             Ok(PreprocessedVision {
@@ -621,6 +873,9 @@ impl LlamaCppModel {
         for (idx, embd) in &preprocessed.image_embeddings {
             embd_map.insert(*idx, embd.as_ref());
         }
+
+        // Track vision chunk positions for post-prefill KV pruning
+        let mut vision_ranges: Vec<(i32, i32, usize)> = Vec::new(); // (pos_start, n_tokens, chunk_idx)
 
         for i in 0..n_chunks {
             let chunk = unsafe { mtmd_ffi::mtmd_input_chunks_get(chunks, i) };
@@ -670,10 +925,11 @@ impl LlamaCppModel {
                 }
                 unsafe { ffi::llama_batch_free(text_batch) };
             } else {
+                let vis_pos_start = n_past;
                 let embd = embd_map
                     .get(&i)
                     .ok_or_else(|| anyhow!("missing pre-encoded embeddings for chunk {}", i))?;
-                let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
+                let n_tokens = (embd.len() / n_mmproj_embd) as i32;
 
                 if self.vision_use_non_causal {
                     unsafe { ffi::llama_set_causal_attn(lctx, false) };
@@ -712,7 +968,24 @@ impl LlamaCppModel {
                 if self.vision_use_non_causal {
                     unsafe { ffi::llama_set_causal_attn(lctx, true) };
                 }
-                n_past += unsafe { mtmd_ffi::mtmd_input_chunk_get_n_pos(chunk) };
+                n_past += n_tokens;
+                vision_ranges.push((vis_pos_start, n_tokens, i));
+            }
+        }
+
+        // Post-prefill KV pruning: remove low-importance vision positions
+        for &(vis_start, vis_n_tokens, chunk_idx) in &vision_ranges {
+            if let Some(embd) = embd_map.get(&chunk_idx) {
+                unsafe {
+                    kv_prune_vision_positions(
+                        lctx,
+                        seq_id,
+                        vis_start,
+                        vis_n_tokens,
+                        embd,
+                        n_mmproj_embd,
+                    );
+                }
             }
         }
 
@@ -730,6 +1003,8 @@ impl LlamaCppModel {
                     presence_penalty: 0.0,
                     generated_ids: &[],
                     seed,
+                    grammar: None,
+                    vocab: self.vocab,
                 },
             )
         };
@@ -829,7 +1104,8 @@ impl LlamaCppModel {
 
                     let embd_len = n_embd_inp * n_tokens;
                     let embd_slice = unsafe { std::slice::from_raw_parts(embd_ptr, embd_len) };
-                    image_embeddings.push((i, std::sync::Arc::new(embd_slice.to_vec())));
+                    let embd_vec = prumerge_vision_tokens(embd_slice, n_tokens, n_embd_inp);
+                    image_embeddings.push((i, std::sync::Arc::new(embd_vec)));
                 }
             }
 
@@ -893,6 +1169,9 @@ impl LlamaCppModel {
 
         let mut text_decode_us: u64 = 0;
         let mut embd_decode_us: u64 = 0;
+
+        // Per-request vision position tracking for post-prefill KV pruning
+        let mut vision_ranges: Vec<Vec<(i32, i32, usize)>> = vec![Vec::new(); n_requests];
 
         // Process chunks by index across all requests (enables future cross-request batching).
         for chunk_idx in 0..max_chunks {
@@ -965,11 +1244,12 @@ impl LlamaCppModel {
                 } else {
                     // Image embedding chunk
                     let tc = std::time::Instant::now();
+                    let vis_pos_start = n_past[ri];
                     let embd = embd_maps[ri].get(&chunk_idx).ok_or_else(|| {
                         anyhow!("missing pre-encoded embeddings for chunk {}", chunk_idx)
                     })?;
 
-                    let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
+                    let n_tokens = (embd.len() / n_mmproj_embd) as i32;
 
                     if self.vision_use_non_causal {
                         unsafe { ffi::llama_set_causal_attn(lctx, false) };
@@ -1017,8 +1297,27 @@ impl LlamaCppModel {
                     if self.vision_use_non_causal {
                         unsafe { ffi::llama_set_causal_attn(lctx, true) };
                     }
-                    n_past[ri] += unsafe { mtmd_ffi::mtmd_input_chunk_get_n_pos(chunk) };
+                    n_past[ri] += n_tokens;
+                    vision_ranges[ri].push((vis_pos_start, n_tokens, chunk_idx));
                     embd_decode_us += tc.elapsed().as_micros() as u64;
+                }
+            }
+        }
+
+        // Post-prefill KV pruning for all requests
+        for (ri, p) in params.iter().enumerate() {
+            for &(vis_start, vis_n_tokens, chunk_idx) in &vision_ranges[ri] {
+                if let Some(embd) = embd_maps[ri].get(&chunk_idx) {
+                    unsafe {
+                        kv_prune_vision_positions(
+                            lctx,
+                            p.seq_id,
+                            vis_start,
+                            vis_n_tokens,
+                            embd,
+                            n_mmproj_embd,
+                        );
+                    }
                 }
             }
         }
@@ -1042,6 +1341,8 @@ impl LlamaCppModel {
                         presence_penalty: 0.0,
                         generated_ids: &[],
                         seed: p.seed,
+                        grammar: None,
+                        vocab: self.vocab,
                     },
                 )
             };

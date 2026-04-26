@@ -42,6 +42,8 @@ pub struct RegistryConfig {
     pub mmproj_path: Option<PathBuf>,
     /// Number of mtmd contexts for parallel CLIP encoding (default 1).
     pub vision_contexts: usize,
+    /// Maximum vision tokens per image (-1 = model default).
+    pub image_max_tokens: i32,
     /// Models discovered from well-known directories (HuggingFace, Ollama, LM Studio, etc.).
     pub discovered_models: Vec<DiscoveredModel>,
     /// Enable Flash Attention for faster inference and lower memory usage.

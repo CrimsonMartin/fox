@@ -38,6 +38,8 @@ pub async fn completions(
         frequency_penalty: None,
         presence_penalty: None,
         user: None,
+        grammar: None,
+        include_thinking: None,
     };
     chat_completions(State(state), Json(chat_req)).await
 }

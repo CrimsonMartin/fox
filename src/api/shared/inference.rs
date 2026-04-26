@@ -184,6 +184,7 @@ pub fn sampling_from_ollama(
             show_thinking,
             initial_in_thinking: show_thinking,
             max_thinking_chars: 8192,
+            grammar: None,
         },
         max_tokens,
     )

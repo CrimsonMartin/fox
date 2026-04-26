@@ -314,6 +314,7 @@ impl InferenceEngine {
                 prefix_seq_id: r.prefix_seq_id,
                 prefill_chunk_progress: r.prefill_chunk_progress,
                 prefill_chunk_limit: chunk_limit,
+                grammar: r.sampling.grammar.clone(),
             })
             .collect();
 
@@ -415,6 +416,7 @@ impl InferenceEngine {
                 prefix_seq_id: None,
                 prefill_chunk_progress: 0,
                 prefill_chunk_limit: 0,
+                grammar: r.sampling.grammar.clone(),
             })
             .collect();
         let model = self.model.clone();

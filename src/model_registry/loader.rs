@@ -99,6 +99,7 @@ pub(super) async fn load_model(
     let mmproj_path = cfg.mmproj_path.clone().or_else(|| detect_mmproj(&path));
     let flash_attn = cfg.flash_attn;
     let vision_contexts = cfg.vision_contexts;
+    let image_max_tokens = cfg.image_max_tokens;
     let chunked_prefill_tokens = cfg.chunked_prefill_tokens;
 
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -146,6 +147,7 @@ pub(super) async fn load_model(
                 mmproj.as_deref(),
                 flash_attn,
                 vision_contexts,
+                image_max_tokens,
             ) {
                 Ok(model) => return Ok((model, None, type_k, type_v)),
                 Err(e) if is_retryable_oom(&e) => {
@@ -177,6 +179,7 @@ pub(super) async fn load_model(
                     mmproj.as_deref(),
                     flash_attn,
                     vision_contexts,
+                    image_max_tokens,
                 ) {
                     Ok(model) => {
                         tracing::warn!(

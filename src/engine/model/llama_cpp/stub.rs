@@ -30,6 +30,7 @@ impl LlamaCppModel {
         mmproj_path: Option<&std::path::Path>,
         flash_attn: bool,
         vision_contexts: usize,
+        image_max_tokens: i32,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -46,6 +47,7 @@ impl LlamaCppModel {
             mmproj_path,
             flash_attn,
             vision_contexts,
+            image_max_tokens,
         );
         let config = ModelConfig {
             num_layers: 32,

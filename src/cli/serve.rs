@@ -148,6 +148,12 @@ pub struct ServeArgs {
     #[arg(long, default_value = "1", env = "FOX_VISION_CONTEXTS")]
     pub vision_contexts: usize,
 
+    /// Maximum vision tokens per image. Controls CLIP output token budget.
+    /// Lower values speed up vision prefill at the cost of detail.
+    /// -1 = use model default (typically 576 for 384x384 with 14px patches).
+    #[arg(long, default_value = "-1", env = "FOX_IMAGE_MAX_TOKENS")]
+    pub image_max_tokens: i32,
+
     /// Directory containing .gguf model files for on-demand loading.
     /// Defaults to ~/.cache/ferrumox/models (platform-appropriate).
     #[arg(long, env = "FOX_MODELS_DIR")]
@@ -307,6 +313,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         moe_offload_cpu: args.moe_cpu,
         mmproj_path: args.mmproj.clone(),
         vision_contexts: args.vision_contexts,
+        image_max_tokens: args.image_max_tokens,
         discovered_models: discovered,
         flash_attn: args.flash_attn,
         chunked_prefill_tokens: args.chunked_prefill_tokens,

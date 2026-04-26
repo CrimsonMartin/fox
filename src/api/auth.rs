@@ -74,6 +74,7 @@ mod tests {
                     moe_offload_cpu: false,
                     mmproj_path: None,
                     vision_contexts: 1,
+                    image_max_tokens: -1,
                     discovered_models: vec![],
                     flash_attn: true,
                     chunked_prefill_tokens: 0,

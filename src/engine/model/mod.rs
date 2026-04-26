@@ -15,7 +15,7 @@ pub(crate) mod stub;
 
 pub use llama_cpp::LlamaCppModel;
 #[cfg(any(test, feature = "test-helpers"))]
-pub use stub::{StubModel, ThinkingStubModel};
+pub use stub::{GemmaThinkingStubModel, StubModel, ThinkingStubModel};
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -99,6 +99,8 @@ pub struct InferenceRequestForModel {
     pub prefill_chunk_progress: usize,
     /// Maximum tokens to submit in this prefill call (0 = no limit, submit all remaining).
     pub prefill_chunk_limit: usize,
+    /// GBNF grammar string for constrained generation.
+    pub grammar: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

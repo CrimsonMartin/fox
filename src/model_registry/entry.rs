@@ -33,6 +33,11 @@ impl EngineEntry {
         Self::for_test_with_model(name, Arc::new(ThinkingStubModel::new()))
     }
 
+    pub fn for_test_gemma_thinking(name: &str) -> Arc<Self> {
+        use crate::engine::model::GemmaThinkingStubModel;
+        Self::for_test_with_model(name, Arc::new(GemmaThinkingStubModel::new()))
+    }
+
     fn for_test_with_model(name: &str, model: Arc<dyn crate::engine::model::Model>) -> Arc<Self> {
         use crate::kv_cache::{KVCacheManager, KvCacheConfig};
         use crate::scheduler::Scheduler;

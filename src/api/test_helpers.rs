@@ -41,6 +41,7 @@ pub fn make_test_registry(
         moe_offload_cpu: false,
         mmproj_path: None,
         vision_contexts: 1,
+        image_max_tokens: -1,
         discovered_models: vec![],
         flash_attn: true,
         chunked_prefill_tokens: 0,
@@ -90,6 +91,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         moe_offload_cpu: false,
         mmproj_path: None,
         vision_contexts: 1,
+        image_max_tokens: -1,
         discovered_models: vec![],
         flash_attn: true,
         chunked_prefill_tokens: 0,
@@ -99,6 +101,53 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         HashMap::new(),
     ));
     let entry = EngineEntry::for_test_thinking(name);
+    registry.preload_for_test(name, entry.clone());
+    let state = AppState {
+        registry,
+        primary_model: name.to_string(),
+        system_prompt: None,
+        started_at: 0,
+        models_dir: dir.to_path_buf(),
+        digest_cache: Arc::new(Mutex::new(HashMap::new())),
+        hf_token: None,
+        api_key: None,
+    };
+    (state, entry)
+}
+
+/// Build a test `AppState` backed by `GemmaThinkingStubModel`.
+/// The model does NOT report `supports_thinking()` — it emits Gemma-style
+/// channel tokens: `<|channel>` → `thought` → `<channel|>` → `answer` → EOS.
+pub fn make_test_state_gemma_thinking(name: &str, dir: &std::path::Path) -> (AppState, Arc<EngineEntry>) {
+    std::fs::write(dir.join(format!("{name}.gguf")), b"").unwrap();
+    let cfg = crate::model_registry::RegistryConfig {
+        models_dir: dir.to_path_buf(),
+        max_models: 4,
+        max_batch_size: 4,
+        max_context_len: Some(512),
+        block_size: 16,
+        gpu_memory_bytes: 4 * 1024 * 1024,
+        gpu_memory_fraction: 0.9,
+        metrics: None,
+        keep_alive_secs: 0,
+        type_k: 1,
+        type_v: 1,
+        main_gpu: 0,
+        split_mode: 1,
+        tensor_split: vec![],
+        moe_offload_cpu: false,
+        mmproj_path: None,
+        vision_contexts: 1,
+        image_max_tokens: -1,
+        discovered_models: vec![],
+        flash_attn: true,
+        chunked_prefill_tokens: 0,
+    };
+    let registry = Arc::new(crate::model_registry::ModelRegistry::new(
+        cfg,
+        HashMap::new(),
+    ));
+    let entry = EngineEntry::for_test_gemma_thinking(name);
     registry.preload_for_test(name, entry.clone());
     let state = AppState {
         registry,

@@ -152,9 +152,10 @@ pub async fn chat_completions(
         presence_penalty: req.presence_penalty.unwrap_or(0.0).clamp(-2.0, 2.0),
         seed: req.seed,
         stop: req.stop.clone(),
-        show_thinking: false,
+        show_thinking: req.include_thinking.unwrap_or(false),
         initial_in_thinking: supports_thinking,
         max_thinking_chars: 8192,
+        grammar: req.grammar.clone(),
     };
 
     let req_id = entry.engine.next_request_id();

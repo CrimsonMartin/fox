@@ -210,6 +210,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         None,
         true,
         1,
+        -1,
     )?;
     let model_config = model.model_config();
 
@@ -601,5 +602,6 @@ fn build_sampling_params(
         show_thinking: args.show_thinking,
         initial_in_thinking: false,
         max_thinking_chars: 8192,
+        grammar: None,
     }
 }

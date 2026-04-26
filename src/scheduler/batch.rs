@@ -41,6 +41,9 @@ pub struct SamplingParams {
     /// loops where the model never generates `</think>`.
     /// 0 = no limit.  Default: 8192 (roughly 2 000–3 000 tokens).
     pub max_thinking_chars: usize,
+    /// GBNF grammar string for constrained generation. When set, the sampler
+    /// chain includes a grammar sampler that restricts output to valid productions.
+    pub grammar: Option<String>,
 }
 
 impl Default for SamplingParams {
@@ -58,6 +61,7 @@ impl Default for SamplingParams {
             show_thinking: false,
             initial_in_thinking: false,
             max_thinking_chars: 8192,
+            grammar: None,
         }
     }
 }

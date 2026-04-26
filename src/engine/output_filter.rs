@@ -96,28 +96,32 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
     // avoid a borrow-checker conflict with `state.pending_output`.
     let patterns = all_control_patterns(&state.model_control_patterns);
 
-    // 1. Enter <think> block (usually a single special token like 248068 for Qwen3.5).
-    if raw.contains("<think>") {
+    // 1. Enter thinking block.
+    //    - Qwen/DeepSeek: `<think>`
+    //    - Gemma 4: `<|channel>` (followed by "thought", "synthesis", etc.)
+    if let Some(open_tag) = detect_thinking_open(raw) {
         state.in_thinking = true;
-        state.thinking_chars = 0; // reset budget counter for each new block
+        state.thinking_chars = 0;
         if state.show_thinking {
-            // Emit the <think> tag so the user can see when reasoning starts.
             return (raw.to_string(), false);
         }
-        return (String::new(), false);
+        // Emit any text before the tag, discard the rest.
+        let before = &raw[..raw.find(open_tag).unwrap_or(0)];
+        if before.is_empty() {
+            return (String::new(), false);
+        }
+        state.pending_output.push_str(before);
+        return flush_pending_output(&mut state.pending_output, &patterns);
     }
 
-    // 2. Exit <think> block; text *after* the closing tag goes to the pending buffer.
-    if raw.contains("</think>") {
+    // 2. Exit thinking block; text *after* the closing tag goes to the pending buffer.
+    //    - Qwen/DeepSeek: `</think>`
+    //    - Gemma 4: `<channel|>`
+    if let Some((close_tag, close_idx)) = detect_thinking_close(raw) {
         state.in_thinking = false;
+        let after_tag = close_idx + close_tag.len();
         if state.show_thinking {
-            // Emit the closing tag, then flush whatever was pending.
-            let after_tag = raw
-                .find("</think>")
-                .map(|i| i + "</think>".len())
-                .unwrap_or(raw.len());
             let mut out = raw[..after_tag].to_string();
-            // Any text after </think> in the same token also needs to be flushed.
             if after_tag < raw.len() {
                 state.pending_output.push_str(&raw[after_tag..]);
                 let (rest, stop) = flush_pending_output(&mut state.pending_output, &patterns);
@@ -128,12 +132,8 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
             }
             return (out, false);
         }
-        // Normal mode: discard the tag, keep text after it.
-        if let Some(idx) = raw.find("</think>") {
-            let after = idx + "</think>".len();
-            if after < raw.len() {
-                state.pending_output.push_str(&raw[after..]);
-            }
+        if after_tag < raw.len() {
+            state.pending_output.push_str(&raw[after_tag..]);
         }
         return flush_pending_output(&mut state.pending_output, &patterns);
     }
@@ -166,6 +166,32 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
     //    control-token prefix (e.g. `<` that could be the start of `<|im_end|>`).
     state.pending_output.push_str(raw);
     flush_pending_output(&mut state.pending_output, &patterns)
+}
+
+/// Detect a thinking-open tag in `raw`. Returns the tag string if found.
+///   - Qwen / DeepSeek: `<think>`
+///   - Gemma 4: `<|channel>` (covers thought, synthesis, and other channel types)
+fn detect_thinking_open(raw: &str) -> Option<&'static str> {
+    if raw.contains("<think>") {
+        Some("<think>")
+    } else if raw.contains("<|channel>") {
+        Some("<|channel>")
+    } else {
+        None
+    }
+}
+
+/// Detect a thinking-close tag in `raw`. Returns (tag, byte_index) if found.
+///   - Qwen / DeepSeek: `</think>`
+///   - Gemma 4: `<channel|>`
+fn detect_thinking_close(raw: &str) -> Option<(&'static str, usize)> {
+    if let Some(idx) = raw.find("</think>") {
+        Some(("</think>", idx))
+    } else if let Some(idx) = raw.find("<channel|>") {
+        Some(("<channel|>", idx))
+    } else {
+        None
+    }
 }
 
 /// Flush as much of `pending` as is safe.
@@ -351,6 +377,38 @@ mod tests {
         assert_eq!(aof(&mut s, "</think> hello"), " hello");
         assert!(!s.in_thinking);
         assert_eq!(aof(&mut s, " world"), " world");
+    }
+
+    #[test]
+    fn test_filter_gemma_channel_block() {
+        let mut s = PerRequestState::default();
+        assert_eq!(aof(&mut s, "<|channel>"), "");
+        assert!(s.in_thinking);
+        assert_eq!(aof(&mut s, "thought"), "");
+        assert_eq!(aof(&mut s, "internal reasoning"), "");
+        assert_eq!(aof(&mut s, "<channel|>The answer"), "The answer");
+        assert!(!s.in_thinking);
+        assert_eq!(aof(&mut s, " continues"), " continues");
+    }
+
+    #[test]
+    fn test_filter_gemma_channel_show_thinking() {
+        let mut s = PerRequestState::default();
+        s.show_thinking = true;
+        assert_eq!(aof(&mut s, "<|channel>"), "<|channel>");
+        assert!(s.in_thinking);
+        assert_eq!(aof(&mut s, "thought"), "thought");
+        assert_eq!(aof(&mut s, "<channel|>The answer"), "<channel|>The answer");
+        assert!(!s.in_thinking);
+    }
+
+    #[test]
+    fn test_filter_gemma_synthesis_channel() {
+        let mut s = PerRequestState::default();
+        assert_eq!(aof(&mut s, "<|channel>"), "");
+        assert_eq!(aof(&mut s, "synthesis"), "");
+        assert_eq!(aof(&mut s, "<channel|>Result here"), "Result here");
+        assert!(!s.in_thinking);
     }
 
     #[test]

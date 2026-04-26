@@ -152,6 +152,13 @@ pub struct ChatCompletionRequest {
     /// Caller identifier — accepted for API compatibility, not used.
     #[serde(default)]
     pub user: Option<String>,
+    /// GBNF grammar string for constrained generation.
+    #[serde(default)]
+    pub grammar: Option<String>,
+    /// When true, include model thinking/reasoning tokens in the response
+    /// (e.g. Qwen `<think>…</think>`, Gemma `<|channel>…<channel|>`).
+    #[serde(default)]
+    pub include_thinking: Option<bool>,
 }
 
 impl ChatCompletionRequest {

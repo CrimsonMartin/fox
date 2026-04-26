@@ -298,6 +298,7 @@ impl LlamaCppModel {
         mmproj_path: Option<&std::path::Path>,
         flash_attn: bool,
         vision_contexts: usize,
+        image_max_tokens: i32,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -473,6 +474,10 @@ impl LlamaCppModel {
             )?;
             let mut mtmd_params = unsafe { mtmd_ffi::mtmd_context_params_default() };
             mtmd_params.use_gpu = true;
+            mtmd_params.flash_attn_type = if flash_attn { 1 } else { -1 };
+            if image_max_tokens > 0 {
+                mtmd_params.image_max_tokens = image_max_tokens;
+            }
             unsafe {
                 mtmd_ffi::mtmd_log_set(Some(noop_log), std::ptr::null_mut());
             }

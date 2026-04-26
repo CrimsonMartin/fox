@@ -1069,3 +1069,186 @@ async fn thinking_ollama_generate_streaming_no_tags_in_response() {
         "stream response must not contain thinking text"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gemma channel thinking suppression — GemmaThinkingStubModel produces:
+//   prefill → "<|channel>"
+//   decode  → "thought" → "<channel|>" → "answer" → EOS
+//
+// Expected behaviour:
+//   Default / include_thinking=false : content = "answer" (no channel tags)
+//   include_thinking=true            : content = "<|channel>thought<channel|>answer"
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn gemma_thinking_stripped_by_default_non_streaming() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_gemma_thinking("gemma", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gemma",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 16,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+    assert_eq!(
+        content, "answer",
+        "Gemma channel tags must be stripped by default"
+    );
+    assert!(
+        !content.contains("<|channel>"),
+        "content must not contain <|channel>"
+    );
+    assert!(
+        !content.contains("<channel|>"),
+        "content must not contain <channel|>"
+    );
+    assert!(
+        !content.contains("thought"),
+        "content must not contain thinking text"
+    );
+}
+
+#[tokio::test]
+async fn gemma_thinking_stripped_by_default_streaming() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_gemma_thinking("gemma", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gemma",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "max_tokens": 16,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let bytes = body_bytes(resp).await;
+    let content = sse_content(&bytes);
+    assert_eq!(
+        content, "answer",
+        "Gemma streaming: channel tags must be stripped"
+    );
+    assert!(!content.contains("<|channel>"));
+    assert!(!content.contains("<channel|>"));
+    assert!(!content.contains("thought"));
+}
+
+#[tokio::test]
+async fn gemma_thinking_included_when_requested_non_streaming() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_gemma_thinking("gemma", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gemma",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 16,
+            "include_thinking": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+    assert!(
+        content.contains("<|channel>"),
+        "include_thinking=true must preserve <|channel>"
+    );
+    assert!(
+        content.contains("<channel|>"),
+        "include_thinking=true must preserve <channel|>"
+    );
+    assert!(
+        content.contains("thought"),
+        "include_thinking=true must preserve thinking text"
+    );
+    assert!(
+        content.contains("answer"),
+        "include_thinking=true must also include the answer"
+    );
+}
+
+#[tokio::test]
+async fn gemma_thinking_included_when_requested_streaming() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_gemma_thinking("gemma", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gemma",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "max_tokens": 16,
+            "include_thinking": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let bytes = body_bytes(resp).await;
+    let content = sse_content(&bytes);
+    assert!(
+        content.contains("<|channel>"),
+        "streaming include_thinking=true must preserve <|channel>"
+    );
+    assert!(
+        content.contains("<channel|>"),
+        "streaming include_thinking=true must preserve <channel|>"
+    );
+    assert!(
+        content.contains("answer"),
+        "streaming include_thinking=true must include the answer"
+    );
+}
+
+#[tokio::test]
+async fn gemma_thinking_explicit_false_strips_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_gemma_thinking("gemma", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gemma",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 16,
+            "include_thinking": false,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+    assert_eq!(
+        content, "answer",
+        "include_thinking=false must strip Gemma channel tags"
+    );
+}

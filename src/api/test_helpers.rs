@@ -118,7 +118,10 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
 /// Build a test `AppState` backed by `GemmaThinkingStubModel`.
 /// The model does NOT report `supports_thinking()` — it emits Gemma-style
 /// channel tokens: `<|channel>` → `thought` → `<channel|>` → `answer` → EOS.
-pub fn make_test_state_gemma_thinking(name: &str, dir: &std::path::Path) -> (AppState, Arc<EngineEntry>) {
+pub fn make_test_state_gemma_thinking(
+    name: &str,
+    dir: &std::path::Path,
+) -> (AppState, Arc<EngineEntry>) {
     std::fs::write(dir.join(format!("{name}.gguf")), b"").unwrap();
     let cfg = crate::model_registry::RegistryConfig {
         models_dir: dir.to_path_buf(),

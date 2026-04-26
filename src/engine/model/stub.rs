@@ -256,9 +256,15 @@ impl Model for GemmaThinkingStubModel {
             .collect())
     }
 
-    fn model_config(&self) -> ModelConfig { StubModel.model_config() }
-    fn eos_token_id(&self) -> i32 { 2 }
-    fn is_eog_token(&self, token_id: i32) -> bool { token_id == 2 }
+    fn model_config(&self) -> ModelConfig {
+        StubModel.model_config()
+    }
+    fn eos_token_id(&self) -> i32 {
+        2
+    }
+    fn is_eog_token(&self, token_id: i32) -> bool {
+        token_id == 2
+    }
 
     fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
         Ok(text.bytes().map(|b| b as i32).collect())
@@ -281,8 +287,16 @@ impl Model for GemmaThinkingStubModel {
 
     fn clear_sequence(&self, _seq_id: i32) {}
     fn copy_sequence_range(&self, _src: i32, _dst: i32, _count: i32) {}
-    fn supports_seq_copy(&self) -> bool { true }
-    fn embedding_dim(&self) -> usize { 4 }
-    fn get_embeddings(&self, _tokens: &[i32]) -> Result<Vec<f32>> { Ok(vec![0.1, 0.2, 0.3, 0.4]) }
-    fn stop_tokens(&self) -> Vec<String> { vec![] }
+    fn supports_seq_copy(&self) -> bool {
+        true
+    }
+    fn embedding_dim(&self) -> usize {
+        4
+    }
+    fn get_embeddings(&self, _tokens: &[i32]) -> Result<Vec<f32>> {
+        Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+    fn stop_tokens(&self) -> Vec<String> {
+        vec![]
+    }
 }

@@ -41,11 +41,8 @@ unsafe fn add_grammar_sampler(chain: *mut ffi::llama_sampler, p: &FfiSamplerPara
         if !grammar_str.is_empty() && !p.vocab.is_null() {
             let c_grammar = std::ffi::CString::new(grammar_str).unwrap_or_default();
             let c_root = std::ffi::CString::new("root").unwrap_or_default();
-            let sampler = fox_sampler_init_grammar_safe(
-                p.vocab,
-                c_grammar.as_ptr(),
-                c_root.as_ptr(),
-            );
+            let sampler =
+                fox_sampler_init_grammar_safe(p.vocab, c_grammar.as_ptr(), c_root.as_ptr());
             if !sampler.is_null() {
                 ffi::llama_sampler_chain_add(chain, sampler);
             }

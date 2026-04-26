@@ -393,8 +393,10 @@ mod tests {
 
     #[test]
     fn test_filter_gemma_channel_show_thinking() {
-        let mut s = PerRequestState::default();
-        s.show_thinking = true;
+        let mut s = PerRequestState {
+            show_thinking: true,
+            ..Default::default()
+        };
         assert_eq!(aof(&mut s, "<|channel>"), "<|channel>");
         assert!(s.in_thinking);
         assert_eq!(aof(&mut s, "thought"), "thought");

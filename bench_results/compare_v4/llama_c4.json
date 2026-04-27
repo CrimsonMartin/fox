@@ -1,0 +1,25 @@
+  request error: failed to connect to server
+  request error: failed to connect to server
+{
+  "primary": {
+    "label": "ferrumox",
+    "url": "http://localhost:8082",
+    "requests_ok": 58,
+    "requests_err": 2,
+    "ttft_p50_ms": 140,
+    "ttft_p95_ms": 375,
+    "latency_p50_ms": 1894,
+    "latency_p95_ms": 2141,
+    "latency_p99_ms": 2142,
+    "throughput_tokens_per_sec": 263.0466514266312,
+    "total_time_secs": 28.223130611,
+    "total_tokens": 7424,
+    "sys_metrics": {
+      "cpu_avg": 7.52445820760404,
+      "cpu_peak": 13.168724279835386,
+      "mem_mb_peak": 20282.1015625,
+      "gpu_util_avg": 82.14285714285714,
+      "gpu_mem_mb_peak": 19937.0
+    }
+  }
+}

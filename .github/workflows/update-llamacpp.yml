@@ -67,6 +67,7 @@ jobs:
           gh pr list --label "llama.cpp-update" --state open --json number --jq '.[].number' \
             | xargs -I{} gh pr close {} --comment "Superseded by newer update" 2>/dev/null || true
 
+          git push origin --delete "$BRANCH" 2>/dev/null || true
           git checkout -b "$BRANCH"
           git add "${{ env.SUBMODULE_PATH }}"
           git commit -m "$(cat <<EOF

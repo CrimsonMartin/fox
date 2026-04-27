@@ -1,0 +1,23 @@
+{
+  "primary": {
+    "label": "ferrumox",
+    "url": "http://localhost:8080",
+    "requests_ok": 8,
+    "requests_err": 0,
+    "ttft_p50_ms": 46,
+    "ttft_p95_ms": 195,
+    "latency_p50_ms": 991,
+    "latency_p95_ms": 1177,
+    "latency_p99_ms": 1177,
+    "throughput_tokens_per_sec": 126.18112880699357,
+    "total_time_secs": 8.115318112,
+    "total_tokens": 1024,
+    "sys_metrics": {
+      "cpu_avg": 6.869896244203923,
+      "cpu_peak": 11.378737541528238,
+      "mem_mb_peak": 19821.05859375,
+      "gpu_util_avg": 80.875,
+      "gpu_mem_mb_peak": 22783.0
+    }
+  }
+}

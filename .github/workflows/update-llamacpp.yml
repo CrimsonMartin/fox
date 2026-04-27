@@ -20,6 +20,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          token: ${{ secrets.PAT_TOKEN }}
           submodules: recursive
           fetch-depth: 0
 
@@ -94,4 +95,4 @@ jobs:
           EOF
           )"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}

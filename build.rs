@@ -77,16 +77,26 @@ fn main() {
     }
 
     // ── cmake configuration ───────────────────────────────────────────────────
+    // FOX_STATIC=1: link everything statically (matches llama-server's build).
+    // Default: dynamic backend loading (zero GPU dependency in the binary).
+    let static_build = env::var("FOX_STATIC").is_ok();
     let mut cmake_config = cmake::Config::new(&llama_root);
+
+    if static_build {
+        println!("cargo:warning=Static build: backends linked directly (no dlopen)");
+        cmake_config
+            .define("BUILD_SHARED_LIBS", "OFF")
+            .define("GGML_BACKEND_DL", "OFF")
+            .define("GGML_NATIVE", "ON")
+            .define("GGML_CUDA_NCCL", "OFF");
+    } else {
+        cmake_config
+            .define("BUILD_SHARED_LIBS", "ON")
+            .define("GGML_BACKEND_DL", "ON")
+            .define("GGML_NATIVE", "OFF");
+    }
+
     cmake_config
-        // Backends become shared libraries; core (ggml-base, llama) stays static.
-        .define("BUILD_SHARED_LIBS", "ON")
-        // Each backend (.so) is dlopen-ed at runtime — zero CUDA dep in the binary.
-        .define("GGML_BACKEND_DL", "ON")
-        // GGML_NATIVE (CPU arch-specific optimizations) is incompatible with GGML_BACKEND_DL.
-        // The CPU backend is selected generically; GGML_CPU_ALL_VARIANTS would build
-        // arch-specific variants as separate .so files (optional future improvement).
-        .define("GGML_NATIVE", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_TOOLS", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
@@ -220,80 +230,90 @@ fn main() {
     let dst = cmake_config.build();
     let build_dir = dst.join("build");
 
-    // Core libraries: llama (static) + ggml-base (shared, contains backend registry).
-    // With GGML_BACKEND_DL + BUILD_SHARED_LIBS=ON, the backend-registry symbols
-    // (ggml_backend_load_all_from_path etc.) live in libggml-base.so only.
     let llama_lib = build_dir.join("src");
     let ggml_src = build_dir.join("ggml").join("src");
     let bin_out = build_dir.join("bin");
 
-    // bin_out must come FIRST so the linker finds libggml.so / libggml-base.so
-    // before it encounters libggml.a in ggml/src/. With GGML_BACKEND_DL=ON the
-    // static archives reference ggml_backend_cpu_reg directly, causing link
-    // errors if the .a is resolved instead of the .so.
-    println!("cargo:rustc-link-search=native={}", bin_out.display());
-    println!("cargo:rustc-link-search=native={}", llama_lib.display());
-    println!("cargo:rustc-link-search=native={}", ggml_src.display());
+    if static_build {
+        // Static build: link .a archives directly. Order matters for static linking:
+        // most-dependent first → llama → ggml → backends → ggml-base → system libs
+        println!("cargo:rustc-link-search=native={}", llama_lib.display());
+        println!("cargo:rustc-link-search=native={}", ggml_src.display());
+        println!("cargo:rustc-link-search=native={}", bin_out.display());
 
-    // llama.cpp's add_library(llama) has no explicit STATIC/SHARED, so with
-    // BUILD_SHARED_LIBS=ON it becomes a shared library on all platforms.
-    println!("cargo:rustc-link-lib=dylib=llama");
-    println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: core ggml types
-    println!("cargo:rustc-link-lib=dylib=ggml"); // shared: backend dlopen registry
-                                                 // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
-                                                 // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
-                                                 // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
+        println!("cargo:rustc-link-lib=static=llama");
+        println!("cargo:rustc-link-lib=static=ggml");
+        if cuda_enabled {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                ggml_src.join("ggml-cuda").display()
+            );
+            println!("cargo:rustc-link-lib=static=ggml-cuda");
+            // CUDA runtime libraries (shared — they ship with the driver)
+            for cuda_search in &["/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu"] {
+                let p = std::path::Path::new(cuda_search);
+                if p.exists() {
+                    println!("cargo:rustc-link-search=native={cuda_search}");
+                }
+            }
+            println!("cargo:rustc-link-lib=dylib=cuda");
+            println!("cargo:rustc-link-lib=dylib=cudart");
+            println!("cargo:rustc-link-lib=dylib=cublas");
+            println!("cargo:rustc-link-lib=dylib=cublasLt");
+        }
+        // CPU backend is always built with static linking
+        println!(
+            "cargo:rustc-link-search=native={}",
+            ggml_src.join("ggml-cpu").display()
+        );
+        println!("cargo:rustc-link-lib=static=ggml-cpu");
+        println!("cargo:rustc-link-lib=static=ggml-base");
+    } else {
+        // Dynamic build: backends loaded via dlopen at runtime.
+        // bin_out first so linker finds .so before .a
+        println!("cargo:rustc-link-search=native={}", bin_out.display());
+        println!("cargo:rustc-link-search=native={}", llama_lib.display());
+        println!("cargo:rustc-link-search=native={}", ggml_src.display());
 
-    // ── Copy backend .so/.dylib files next to the fox binary ─────────────────
-    // OUT_DIR is target/{profile}/build/ferrumox-<hash>/out — three levels up
-    // gives target/{profile}/, which is where the fox binary lands.
-    // This ensures both `cargo build` (debug) and `cargo build --release` have
-    // the backend shared libraries in the same directory as the binary.
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let bin_dest = out_dir
-        .parent() // ferrumox-<hash>
-        .and_then(|p| p.parent()) // build/
-        .and_then(|p| p.parent()) // target/{profile}/
-        .map(|p| p.to_path_buf());
+        println!("cargo:rustc-link-lib=dylib=llama");
+        println!("cargo:rustc-link-lib=dylib=ggml-base");
+        println!("cargo:rustc-link-lib=dylib=ggml");
 
-    if let Some(ref dest) = bin_dest {
-        // On macOS, SHARED libs (.dylib) and MODULE libs (.so) coexist:
-        //   .dylib → llama, ggml-base, ggml (linked at compile time)
-        //   .so    → ggml-cpu, ggml-metal, ... (MODULE, dlopen-ed at runtime)
-        // Both must be copied next to the binary.
-        let _exts: &[&str] = if target_os == "macos" {
-            &["dylib", "so"]
-        } else {
-            &["so"]
-        };
-        for search_dir in &[&llama_lib, &ggml_src, &bin_out] {
-            if let Ok(entries) = std::fs::read_dir(search_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let p = entry.path();
-                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    // Match both plain .so and versioned soname files like
-                    // libllama.so.0 / libllama.so.0.9.7 (p.extension() returns
-                    // the last component, not "so", for versioned names).
-                    let so_ext = if target_os == "macos" { "dylib" } else { "so" };
-                    let is_backend = fname.contains(&format!(".{so_ext}"))
-                        && (fname.starts_with("libggml")
-                            || fname.starts_with("libllama.")
-                            || fname == format!("llama.{so_ext}"));
-                    if is_backend {
-                        let dst = dest.join(p.file_name().unwrap());
-                        let _ = std::fs::copy(&p, &dst);
+        // Copy backend .so/.dylib files next to the fox binary
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let bin_dest = out_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+
+        if let Some(ref dest) = bin_dest {
+            for search_dir in &[&llama_lib, &ggml_src, &bin_out] {
+                if let Ok(entries) = std::fs::read_dir(search_dir) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let p = entry.path();
+                        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let so_ext = if target_os == "macos" { "dylib" } else { "so" };
+                        let is_backend = fname.contains(&format!(".{so_ext}"))
+                            && (fname.starts_with("libggml")
+                                || fname.starts_with("libllama.")
+                                || fname == format!("llama.{so_ext}"));
+                        if is_backend {
+                            let dst = dest.join(p.file_name().unwrap());
+                            let _ = std::fs::copy(&p, &dst);
+                        }
                     }
                 }
             }
         }
     }
 
-    // ── RPATH: find backend .so files next to the fox binary ($ORIGIN) ────────
-    // This lets users copy fox + libggml-cuda.so to any directory and have it
-    // just work without LD_LIBRARY_PATH.
+    // System libraries
     match target_os.as_str() {
         "linux" => {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+            if !static_build {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+            }
             println!("cargo:rustc-link-lib=dylib=stdc++");
             println!("cargo:rustc-link-lib=dylib=pthread");
             println!("cargo:rustc-link-lib=dylib=dl");
@@ -301,19 +321,18 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=m");
         }
         "macos" => {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+            if !static_build {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+            }
             println!("cargo:rustc-link-lib=dylib=c++");
-            if nvcc.is_none() {
-                // Metal backend shared lib (built by cmake above).
+            if nvcc.is_none() && !static_build {
                 println!(
                     "cargo:rustc-link-search=native={}",
                     ggml_src.join("ggml-metal").display()
                 );
             }
         }
-        _ => {
-            // Windows MSVC: the C++ runtime is linked automatically by the toolchain.
-        }
+        _ => {}
     }
 
     // ── bindgen ───────────────────────────────────────────────────────────────

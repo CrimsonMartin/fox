@@ -218,7 +218,12 @@ pub(super) async fn load_model(
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
     let engine = Arc::new(InferenceEngine::new(
-        model, scheduler, kv_cache, name, metrics, chunked_prefill_tokens,
+        model,
+        scheduler,
+        kv_cache,
+        name,
+        metrics,
+        chunked_prefill_tokens,
     ));
 
     let loop_handle = {

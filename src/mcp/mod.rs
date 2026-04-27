@@ -542,7 +542,7 @@ async fn run_inference(
         temperature,
         top_p: 0.9,
         top_k: 0,
-        min_p: 0.0,
+        min_p: 0.05,
         repetition_penalty: 1.0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,

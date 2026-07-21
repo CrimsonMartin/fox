@@ -8,6 +8,23 @@ use crate::engine::model::{InferenceRequestForModel, Logits, Model, PrefillStep}
 
 use super::LlamaCppModel;
 
+/// Whether a `llama_decode` return code of `ret` on a batch of `len` requests should
+/// be retried by bisecting the batch, and if so, the split point (left-half length).
+///
+/// Per `llama.h`: 0 = success, 1 = "could not find a KV slot for the batch (try
+/// reducing the size of the batch or increase the context)", 2 = aborted, -1 =
+/// invalid input, < -1 = fatal. Only `1` is retryable this way — 2/-1/<-1 stay
+/// immediately fatal. A batch already at `len <= 1` that still returns `1` is a
+/// genuine failure, not a "reduce batch size" situation, so it also returns `None`
+/// and the caller falls through to its normal error path.
+fn bisection_split(ret: i32, len: usize) -> Option<usize> {
+    if ret == 1 && len > 1 {
+        Some(len / 2)
+    } else {
+        None
+    }
+}
+
 impl LlamaCppModel {
     pub(super) fn do_prefill(
         &self,
@@ -142,7 +159,31 @@ impl LlamaCppModel {
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
         if ret != 0 {
             unsafe { ffi::llama_batch_free(batch) };
-            return Err(anyhow!("llama_decode failed: {}", ret));
+            if let Some(split) = bisection_split(ret, requests.len()) {
+                // Release the mutex before recursing — it isn't reentrant, and each
+                // recursive call re-acquires its own guard. Each half re-runs the
+                // prefix-donation seq_cp above; safe/idempotent (same source range,
+                // prefill_pos hasn't advanced since this failed call never returned),
+                // just a small redundant cost on the rare retry path.
+                drop(ctx_guard);
+                self.decode_bisection_retries
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    batch_len = requests.len(),
+                    split,
+                    "llama_decode (prefill): no KV slot for batch (ret=1) — retrying as two smaller batches"
+                );
+                let (ids_a, ids_b) = req_ids.split_at(split);
+                let (req_a, req_b) = requests.split_at(split);
+                let mut results = self.do_prefill(ids_a, req_a, max_prefill_chunk)?;
+                results.extend(self.do_prefill(ids_b, req_b, max_prefill_chunk)?);
+                return Ok(results);
+            }
+            return Err(anyhow!(
+                "llama_decode failed: {} (batch size {})",
+                ret,
+                requests.len()
+            ));
         }
 
         let n_vocab = self.config.vocab_size as i32;
@@ -244,7 +285,28 @@ impl LlamaCppModel {
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
         if ret != 0 {
             unsafe { ffi::llama_batch_free(batch) };
-            return Err(anyhow!("llama_decode failed: {}", ret));
+            if let Some(split) = bisection_split(ret, requests.len()) {
+                // Release the mutex before recursing — it isn't reentrant, and each
+                // recursive call re-acquires its own guard.
+                drop(ctx_guard);
+                self.decode_bisection_retries
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    batch_len = requests.len(),
+                    split,
+                    "llama_decode: no KV slot for batch (ret=1) — retrying as two smaller batches"
+                );
+                let (ids_a, ids_b) = req_ids.split_at(split);
+                let (req_a, req_b) = requests.split_at(split);
+                let mut results = self.do_decode(ids_a, req_a)?;
+                results.extend(self.do_decode(ids_b, req_b)?);
+                return Ok(results);
+            }
+            return Err(anyhow!(
+                "llama_decode failed: {} (batch size {})",
+                ret,
+                requests.len()
+            ));
         }
 
         let n_vocab = self.config.vocab_size as i32;
@@ -704,5 +766,50 @@ impl LlamaCppModel {
         }
 
         Ok(embeddings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bisection_split;
+
+    #[test]
+    fn ret_one_splits_a_batch_in_half() {
+        assert_eq!(bisection_split(1, 4), Some(2));
+    }
+
+    #[test]
+    fn ret_one_splits_an_odd_batch_favoring_the_left_half() {
+        assert_eq!(bisection_split(1, 3), Some(1));
+    }
+
+    #[test]
+    fn ret_one_on_a_single_request_is_not_retryable() {
+        // Already the smallest possible batch — "reduce batch size" doesn't apply.
+        assert_eq!(bisection_split(1, 1), None);
+    }
+
+    #[test]
+    fn ret_one_on_an_empty_batch_is_not_retryable() {
+        // Defensive: both do_prefill/do_decode already early-return before decoding
+        // an empty request list, so this should never occur in practice.
+        assert_eq!(bisection_split(1, 0), None);
+    }
+
+    #[test]
+    fn success_is_never_retried() {
+        assert_eq!(bisection_split(0, 4), None);
+    }
+
+    #[test]
+    fn other_return_codes_are_never_retried() {
+        // 2 = aborted, -1 = invalid input, < -1 = fatal — none are "reduce batch size".
+        for ret in [2, -1, -5] {
+            assert_eq!(
+                bisection_split(ret, 4),
+                None,
+                "ret={ret} must not be retried"
+            );
+        }
     }
 }

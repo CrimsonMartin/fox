@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::scheduler::StopReason;
+use crate::scheduler::{StopReason, Token};
 
 use super::model::{InferenceRequestForModel, Logits};
 use super::InferenceEngine;
@@ -85,19 +85,34 @@ impl InferenceEngine {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "prefill failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            "prefill failed (KV cache full?): {} — stopping {} request(s) with EngineError",
                             e,
                             prefill_ids.len()
                         );
-                        // Clear KV before the seq_id returns to the pool — a failed
-                        // llama_decode leaves partial cells that poison the next occupant.
-                        for req in engine.scheduler.get_running(&prefill_ids) {
+                        // Send an explicit terminal token before the sequence is cleared and
+                        // the request is marked finished — otherwise `response_tx` is only
+                        // dropped later, which closes the channel with no message and the
+                        // HTTP handler reports a fake empty 200 instead of an error.
+                        let failed = engine.scheduler.get_running(&prefill_ids);
+                        for req in &failed {
+                            let _ = req.response_tx.send(Token {
+                                id: req.id,
+                                token_id: -1,
+                                text: String::new(),
+                                is_eos: true,
+                                stop_reason: Some(StopReason::EngineError),
+                                logprob: None,
+                            });
+                            // Clear KV before the seq_id returns to the pool — a failed
+                            // llama_decode leaves partial cells that poison the next occupant.
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
                             }
                         }
                         for req_id in &prefill_ids {
-                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            engine
+                                .scheduler
+                                .mark_finished(*req_id, StopReason::EngineError);
                             engine.model.free_grammar(*req_id);
                         }
                     }
@@ -116,18 +131,30 @@ impl InferenceEngine {
                         // KV cache exhausted or llama_decode failure — stop all affected
                         // requests gracefully instead of crashing the engine loop.
                         tracing::warn!(
-                            "decode failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            "decode failed (KV cache full?): {} — stopping {} request(s) with EngineError",
                             e,
                             decode_ids.len()
                         );
-                        // Same poisoned-sequence guard as the prefill error path.
-                        for req in engine.scheduler.get_running(&decode_ids) {
+                        // Same explicit-terminal-token + poisoned-sequence guard as the
+                        // prefill error path (see comment there).
+                        let failed = engine.scheduler.get_running(&decode_ids);
+                        for req in &failed {
+                            let _ = req.response_tx.send(Token {
+                                id: req.id,
+                                token_id: -1,
+                                text: String::new(),
+                                is_eos: true,
+                                stop_reason: Some(StopReason::EngineError),
+                                logprob: None,
+                            });
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
                             }
                         }
                         for req_id in &decode_ids {
-                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            engine
+                                .scheduler
+                                .mark_finished(*req_id, StopReason::EngineError);
                             engine.model.free_grammar(*req_id);
                         }
                     }

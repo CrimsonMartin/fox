@@ -208,18 +208,32 @@ pub trait Model: Send + Sync {
     /// Build the final prompt token ids for a chat request. Backends with a real
     /// Jinja template (`LlamaCppModel`) execute it — threading `enable_thinking`,
     /// emitting the model's real control tokens, and tokenizing them AS special
-    /// tokens (not literal text). The default applies `apply_chat_template`, adds a
-    /// `<think>` prefill when `enable_thinking`, and tokenizes generically.
+    /// tokens (not literal text). `tools` (OpenAI-shaped tool definitions, as JSON)
+    /// is threaded into the template context so a model whose real template has
+    /// native tool-formatting macros (e.g. Hermes/Qwen tool-use templates) renders
+    /// its own tool listing; the default implementation ignores it. The default
+    /// applies `apply_chat_template`, adds a `<think>` prefill when
+    /// `enable_thinking`, and tokenizes generically.
     fn build_prompt_tokens(
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> Result<Vec<i32>> {
+        let _ = tools;
         let mut prompt = self.apply_chat_template(messages)?;
         if enable_thinking {
             prompt.push_str("<think>\n");
         }
         self.tokenize(&prompt)
+    }
+
+    /// Whether the model's own chat template natively formats tool calls (e.g. a
+    /// Hermes/Qwen tool-use template that emits `<tool_call>{...}</tool_call>`),
+    /// as opposed to relying on fox's generic prompt-injected tool listing.
+    /// Default `false` — only `LlamaCppModel` can inspect a real template.
+    fn supports_native_tool_format(&self) -> bool {
+        false
     }
 
     /// Effective per-sequence context length (tokens) this model was configured with.

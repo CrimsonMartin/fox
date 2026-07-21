@@ -686,8 +686,19 @@ impl Model for LlamaCppModel {
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> Result<Vec<i32>> {
-        self.build_prompt_tokens_impl(messages, enable_thinking)
+        self.build_prompt_tokens_impl(messages, enable_thinking, tools)
+    }
+
+    fn supports_native_tool_format(&self) -> bool {
+        // Detected from the model's OWN chat template, never its name — same
+        // principle as `reasoning_delimiters`/`supports_thinking` above. Hermes and
+        // Qwen tool-use templates instruct the model to wrap tool calls in
+        // `<tool_call>...</tool_call>`; a model without that marker in its template
+        // gets fox's generic prompt-injected tool listing instead.
+        self.raw_chat_template()
+            .is_some_and(|t| t.contains("<tool_call>"))
     }
 
     fn reasoning_delimiters(&self) -> Option<(String, String)> {

@@ -457,22 +457,31 @@ pub fn prepare_prompt(
         }
     }
 
-    // Append tool descriptions.
+    // Whether the model's own chat template natively formats tool calls (Hermes/Qwen
+    // tool-use templates). When it does, `tools` is threaded straight into the Jinja
+    // render below and the template renders its own tool listing — injecting fox's
+    // generic system-message listing too would duplicate it in the prompt.
+    let model_native_tools = tools.is_some() && entry.engine.supports_native_tool_format();
+
+    // Append tool descriptions — only for models without a native tool-formatting
+    // template; see `model_native_tools` above.
     if let Some(tools) = tools {
-        let tool_msg = tools_system_message(tools, tool_required, specific_tool);
-        if messages.first().map(|m| m.role.as_str()) == Some("system") {
-            let sys = messages[0].content.get_or_insert_with(String::new);
-            sys.push_str(&format!("\n\n{tool_msg}"));
-        } else {
-            messages.insert(
-                0,
-                MessageForTemplate {
-                    role: "system".to_string(),
-                    content: Some(tool_msg),
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-            );
+        if !model_native_tools {
+            let tool_msg = tools_system_message(tools, tool_required, specific_tool);
+            if messages.first().map(|m| m.role.as_str()) == Some("system") {
+                let sys = messages[0].content.get_or_insert_with(String::new);
+                sys.push_str(&format!("\n\n{tool_msg}"));
+            } else {
+                messages.insert(
+                    0,
+                    MessageForTemplate {
+                        role: "system".to_string(),
+                        content: Some(tool_msg),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    },
+                );
+            }
         }
     }
 
@@ -496,11 +505,16 @@ pub fn prepare_prompt(
 
     let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
 
+    // Serialize tools once for the Jinja context (OpenAI-shaped `Tool` already
+    // matches what native tool-use templates expect — no transform needed).
+    let tools_json = tools.map(|t| serde_json::to_value(t).unwrap_or_default());
+
     // Build the prompt tokens via the model's chat template (real Jinja when the
-    // model has one, threading `enable_thinking`; built-in format otherwise).
+    // model has one, threading `enable_thinking` and `tools`; built-in format
+    // otherwise).
     let tokens: Vec<i32> = entry
         .engine
-        .build_prompt_tokens(&flat, show_thinking)
+        .build_prompt_tokens(&flat, show_thinking, tools_json.as_ref())
         .unwrap_or_else(|_| {
             // Last-ditch fallback: plain "role: content" text, byte-tokenized.
             let prompt = flat

@@ -128,7 +128,7 @@ fn golden_chat_template_renders() {
     ];
 
     let first = m
-        .build_prompt_tokens(&messages, false)
+        .build_prompt_tokens(&messages, false, None)
         .expect("build_prompt_tokens should succeed");
     assert!(
         !first.is_empty(),
@@ -137,7 +137,7 @@ fn golden_chat_template_renders() {
 
     // Second call hits the cached environment — output must be identical.
     let second = m
-        .build_prompt_tokens(&messages, false)
+        .build_prompt_tokens(&messages, false, None)
         .expect("second build_prompt_tokens should succeed");
     assert_eq!(
         first, second,

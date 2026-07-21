@@ -126,8 +126,17 @@ impl InferenceEngine {
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> anyhow::Result<Vec<i32>> {
-        self.model.build_prompt_tokens(messages, enable_thinking)
+        self.model
+            .build_prompt_tokens(messages, enable_thinking, tools)
+    }
+
+    /// Whether the loaded model's own chat template natively formats tool calls
+    /// (e.g. Hermes/Qwen tool-use templates), as opposed to needing fox's generic
+    /// prompt-injected tool listing.
+    pub fn supports_native_tool_format(&self) -> bool {
+        self.model.supports_native_tool_format()
     }
 
     /// The model's reasoning (open, close) delimiters, resolved to the default

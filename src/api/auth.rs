@@ -89,6 +89,7 @@ mod tests {
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             hf_token: None,
             api_key: api_key.map(str::to_string),
+            tool_call_parser: "auto".to_string(),
         }
     }
 

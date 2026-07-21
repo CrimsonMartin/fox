@@ -65,6 +65,7 @@ pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<Engi
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
+        tool_call_parser: "auto".to_string(),
     };
     (state, entry)
 }
@@ -117,6 +118,7 @@ pub fn make_test_state_with_queue_depth(
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
+        tool_call_parser: "auto".to_string(),
     };
     (state, entry)
 }
@@ -164,6 +166,7 @@ pub fn make_test_state_speculative(
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
+        tool_call_parser: "auto".to_string(),
     };
     (state, entry)
 }
@@ -212,6 +215,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
+        tool_call_parser: "auto".to_string(),
     };
     (state, entry)
 }
@@ -226,6 +230,7 @@ pub fn make_router(state: &AppState) -> Router {
         state.models_dir.clone(),
         state.hf_token.clone(),
         state.api_key.clone(),
+        state.tool_call_parser.clone(),
     )
 }
 

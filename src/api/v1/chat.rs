@@ -14,7 +14,8 @@ use uuid::Uuid;
 use crate::api::error::{load_model_or_respond, AppError};
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    prepare_prompt, resolve_tool_choice, try_parse_tool_call, MessageForTemplate,
+    parse_tool_call, prepare_prompt, resolve_tool_call_parser, resolve_tool_choice,
+    MessageForTemplate,
 };
 use crate::api::shared::sampling_defaults as defaults;
 use crate::api::shared::streaming::finish_reason_str;
@@ -175,6 +176,10 @@ pub async fn chat_completions(
 
     let has_tools = eff_tools.is_some();
     let allow_parallel = req.parallel_tool_calls.unwrap_or(true);
+    let tool_parser = resolve_tool_call_parser(
+        &state.tool_call_parser,
+        entry.engine.supports_native_tool_format(),
+    );
 
     tracing::info!(
         model = %req.model,
@@ -191,7 +196,7 @@ pub async fn chat_completions(
             // (logprobs are not surfaced for tool-call responses.)
             let (full_content, completion_tokens, stop_reason, _lp) = buffer_tokens(&mut rx).await;
 
-            let (content, mut tool_calls) = try_parse_tool_call(&full_content, eff_tools);
+            let (content, mut tool_calls) = parse_tool_call(&full_content, eff_tools, tool_parser);
 
             // Enforce parallel_tool_calls: false
             if !allow_parallel {
@@ -396,7 +401,7 @@ pub async fn chat_completions(
             .to_string();
 
         let (content, mut tool_calls) = if has_tools {
-            try_parse_tool_call(&full_content, eff_tools)
+            parse_tool_call(&full_content, eff_tools, tool_parser)
         } else {
             (full_content, None)
         };
@@ -583,6 +588,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             None,
+            "auto".to_string(),
         );
         let body = serde_json::json!({
             "model": "stub",

@@ -16,6 +16,7 @@ const DEFAULT_SWAP_FRACTION: &str = "0.0";
 const DEFAULT_MAX_MODELS: &str = "1";
 const DEFAULT_KEEP_ALIVE_SECS: &str = "300";
 const DEFAULT_TYPE_KV: &str = "f16";
+const DEFAULT_TOOL_CALL_PARSER: &str = "auto";
 
 use anyhow::Result;
 use clap::Parser;
@@ -106,6 +107,13 @@ pub struct ServeArgs {
         env = "FOX_SYSTEM_PROMPT"
     )]
     pub system_prompt: String,
+
+    /// Which format to parse tool calls from the model's raw output: `auto`
+    /// (default — picks Hermes when the loaded model's own chat template natively
+    /// formats tool calls via `<tool_call>` tags, generic prompt-based JSON
+    /// otherwise), `generic`, or `hermes`.
+    #[arg(long, default_value = DEFAULT_TOOL_CALL_PARSER, env = "FOX_TOOL_CALL_PARSER")]
+    pub tool_call_parser: String,
 
     /// [reserved — not yet implemented] Fraction of GPU memory for CPU↔GPU KV-cache
     /// swap space (0.0-1.0). Accepted for forward compatibility; currently a no-op.
@@ -381,6 +389,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         models_dir,
         args.hf_token,
         args.api_key,
+        args.tool_call_parser,
     )
     .layer(tower_http::cors::CorsLayer::permissive());
 

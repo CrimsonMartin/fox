@@ -185,6 +185,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             None,
+            "auto".to_string(),
         );
         let resp = get_req(app, "/v1/models").await;
         assert_eq!(resp.status(), 200);

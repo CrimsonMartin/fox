@@ -102,7 +102,7 @@ Datacenter-scale features, outside fox's single-node niche.
 
 | Capability | vLLM | fox | Kind |
 |---|---|---|---|
-| OOM recovery (retry, degrade context) | ✅ | ❌ | achievable — 0.16 added fail-fast (queue-depth cap → 429) but not retry/degrade |
+| OOM recovery (retry, degrade context) | ✅ | ✅ (0.16, batch-size-bisection retry) | fail-fast (queue-depth cap → 429) + retry a recoverable `llama_decode` failure by shrinking the batch; no reactive context-rolling beyond that |
 | Backpressure / rate-limit / max-queue | ✅ | ✅ (0.16) | — |
 | Request priority (priority preemption) | ✅ | ⚠️ LIFO preemption only, no priority | achievable |
 | KV offload / swap to CPU | ✅ | ⚠️ `--swap-fraction` placeholder, unimplemented | achievable |
@@ -130,8 +130,16 @@ Shipped since this analysis was written:
 - ✅ **Backpressure / max-queue + fail-fast** (0.16) — `--max-queue-depth` rejects new
   requests with HTTP 429 once the scheduler queue is full; a real engine failure
   (`StopReason::EngineError`) is now reported as an error instead of silently closing
-  the response channel (which used to read as a fake empty 200). Automatic
-  retry/context-degradation is still open — see the OOM recovery row above.
+  the response channel (which used to read as a fake empty 200).
+- ✅ **OOM recovery — batch-size bisection retry** (0.16) — `llama_decode`'s return
+  code was previously collapsed into a single fatal branch; `do_prefill`/`do_decode`
+  now distinguish `1` ("no KV slot for the batch", per `llama.h`) from genuinely fatal
+  codes and retry by splitting the batch in half and decoding each half
+  independently — llama.cpp's own documented mitigation for that code — recursing
+  down to a single request before falling back to the existing `EngineError` path.
+  Observable via `ferrumox_decode_bisection_retries_total` + a per-event
+  `tracing::warn!`. Reactive context-rolling as a further mitigation (once already
+  down to a single request) is still open.
 - ✅ **Hermes native tool-call parser** (0.16) — `tools` threaded into the Jinja render
   context, auto-detected from the model's own template (`--tool-call-parser
   auto\|generic\|hermes`); models without a native tool-use template keep the original
@@ -144,11 +152,11 @@ Shipped since this analysis was written:
 
 Still open, in priority order:
 
-1. **OOM recovery — automatic retry / context degradation** — 0.16 only added the
-   fail-fast half (reject cleanly); actually recovering a request after a real
-   engine failure is still open.
-2. **Mistral / Llama3 tool-call parsers** — generalizes the 0.16 Hermes parser to more
+1. **Mistral / Llama3 tool-call parsers** — generalizes the 0.16 Hermes parser to more
    model families.
+2. **Reactive context-rolling as a further OOM mitigation** — 0.16's bisection retry
+   shrinks the batch on a recoverable failure; it doesn't roll a request's context
+   once already down to a single request that still can't decode.
 
 ## What NOT to chase (outside the niche)
 

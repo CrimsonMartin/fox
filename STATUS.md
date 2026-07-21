@@ -110,7 +110,8 @@ to confirm are marked ❓.
 | ✅ | Multi-GPU (layer/row split, manual or auto tensor-split) | |
 | ✅ | MoE CPU offload (`--moe-cpu`) via expert-tensor regex | |
 | 🚧 | `--swap-fraction` | parsed but unused (placeholder) |
-| ✅ | Backpressure / fail-fast (0.16) | `--max-queue-depth` rejects a full queue with HTTP 429 instead of queueing forever; a real engine failure gets a distinct `StopReason::EngineError` and an explicit terminal token instead of silently closing the response channel. No automatic retry/context-degradation — see known issue #8 |
+| ✅ | Backpressure / fail-fast (0.16) | `--max-queue-depth` rejects a full queue with HTTP 429 instead of queueing forever; a real engine failure gets a distinct `StopReason::EngineError` and an explicit terminal token instead of silently closing the response channel |
+| ✅ | OOM recovery — batch-size bisection retry (0.16) | `do_prefill`/`do_decode` distinguish `llama_decode`'s return codes (per `llama.h`) instead of treating any non-zero as fatal: `1` ("no KV slot for the batch") now retries by splitting the batch in half and decoding each half independently — llama.cpp's own documented mitigation — recursing down to a single request before giving up. `2`/`-1`/`< -1` stay immediately fatal (unchanged `EngineError` path). Observable via `ferrumox_decode_bisection_retries_total` + a `tracing::warn!` per retry. No reactive context-rolling on top of this — see known issue #8 |
 
 ## Model management / CLI
 
@@ -224,7 +225,7 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | 5 | ⚠️ Partial | Footguns: `max_models=1`, silent multimodal drop, ignored `frequency/presence_penalty`, dead `swap_fraction` | Phase P4 — multimodal drop now warns (0.11), `frequency/presence_penalty` now applied (0.11); `max_models=1` default and dead `swap_fraction` are **still open** |
 | 6 | ✅ Resolved | Prefix-cache eviction cleanup | **0.12** — stress test (`stress_prefix_cache_no_leak`) proved no leak; three *other* prefix-cache correctness bugs (unrelated to leak) were later found and fixed in 0.15.1 via real end-to-end testing |
 | 7 | ✅ Resolved | Chat templates not executed (no Jinja) → thinking + native tool-calling lost (Gemma 4, Qwen3, …) | **0.11 (`cc12851`)** — real Jinja via `minijinja`, `enable_thinking` threaded, per-model reasoning-marker detection. `tools` threading (needed for native tool-*calling* specifically) landed separately in **0.16**, tracked as item 9 below |
-| 8 | ✅ Resolved (simple scope) | No backpressure/OOM recovery — an admission-rejected or engine-crashed request silently closes its response channel, which the HTTP layer used to report as a fake **200 empty success** instead of an error | **0.16** — `--max-queue-depth` limit + explicit error signaling + a distinct `StopReason::EngineError`. No automatic retry/context-degradation, see `docs/design/vllm-gap-analysis.md` |
+| 8 | ✅ Resolved (simple scope) | No backpressure/OOM recovery — an admission-rejected or engine-crashed request silently closes its response channel (fake 200), and a real `llama_decode` failure always killed every request in the batch even when llama.cpp itself reports it as recoverable | **0.16** — `--max-queue-depth` limit + explicit error signaling + a distinct `StopReason::EngineError`, plus batch-size-bisection retry on `llama_decode` ret==1 ("no KV slot for batch"). Reactive context-rolling on top of bisection (further "degrade" beyond retrying with a smaller batch) is still open, see `docs/design/vllm-gap-analysis.md` |
 | 9 | ✅ Resolved (Hermes) | Tool calling was generic prompt-based only; native per-model formats were never exercised even though real Jinja rendering exists | **0.16** — Hermes parser + `tools` threaded into the Jinja context. Mistral/Llama3 parsers still open |
 | 10 | ✅ Resolved (simple scope) | Draft-model speculative decoding (generalizes 0.15's n-gram win beyond repetitive/context-echoing output) | **0.16** — `Proposer` trait + `--draft-model`. Deliberately no eviction pairing/VRAM budgeting (operator sizes both models to fit) — see `docs/design/speculative-roadmap.md` Level 2 |
 
@@ -257,12 +258,13 @@ parallel are explicit non-goals — see that doc's "What NOT to chase").
 via GBNF (0.14), logprobs/top_logprobs (0.14), min_p/logit_bias/min_tokens (0.14),
 speculative decoding — n-gram (0.15) and draft-model (0.16), chunked prefill (0.13),
 context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes native
-tool-call parser (0.16).
+tool-call parser (0.16), OOM recovery via batch-size-bisection retry (0.16).
 
 **Still open, in priority order** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
 
-1. OOM recovery — automatic retry/context degradation (0.16 only added the fail-fast
-   half: reject cleanly, don't recover).
-2. Mistral/Llama3 tool-call parsers (0.16 added Hermes only).
+1. Mistral/Llama3 tool-call parsers (0.16 added Hermes only).
+2. Reactive context-rolling as a further OOM mitigation once a batch is already
+   bisected to a single request and still fails (0.16 only retries by shrinking the
+   batch, not by rolling context).
 3. Vision/multimodal, MLA/recurrent correct KV sizing, LoRA — real gaps, no work
    scheduled yet.

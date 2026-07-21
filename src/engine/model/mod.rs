@@ -160,20 +160,49 @@ pub trait Model: Send + Sync {
         requests: &[InferenceRequestForModel],
     ) -> Result<Vec<(u64, Logits)>>;
 
-    /// Speculative decode for a single request: propose draft tokens via n-gram lookup
-    /// over the request's own history, verify them in one pass, and return the committed
-    /// tokens' logits (always ≥ 1) plus how many drafts were proposed (for acceptance
-    /// metrics; accepted = committed - 1). The default performs an ordinary single-token
-    /// decode (no speculation), so the stub and non-speculative backends still work.
+    /// Speculative decode for a single request: verify the given `drafts` (already
+    /// proposed by an `engine::speculative::Proposer` — n-gram lookup or a draft
+    /// model) in one pass, and return the committed tokens' logits (always ≥ 1).
+    /// Exactness holds regardless of where `drafts` came from: every committed token
+    /// is still sampled from THIS model's own logits; a wrong draft is simply
+    /// rejected. The default performs an ordinary single-token decode (ignoring
+    /// `drafts`), so the stub and non-speculative backends still work.
     fn speculative_decode_sync(
         &self,
         req_id: u64,
         request: &InferenceRequestForModel,
-        _ngram: usize,
-        _draft_len: usize,
-    ) -> Result<(Vec<Logits>, usize)> {
+        drafts: Vec<i32>,
+    ) -> Result<Vec<Logits>> {
+        let _ = drafts;
         let out = self.decode_sync(&[req_id], std::slice::from_ref(request))?;
-        Ok((out.into_iter().map(|(_, l)| l).collect(), 0))
+        Ok(out.into_iter().map(|(_, l)| l).collect())
+    }
+
+    /// Feed `new_tokens` into this model's own KV at `seq_id` (starting at `base_pos`),
+    /// then greedily (no penalty context — a draft proposer only needs to be
+    /// plausible, not calibrated) decode up to `draft_len` further tokens, extending
+    /// the same KV sequence for the next call. Stops early on an end-of-generation
+    /// token. Used only by `engine::speculative::DraftModelProposer` (0.16
+    /// draft-model speculation) — a model not loaded as a draft never calls this.
+    /// Default: empty (stubs and models not acting as a draft don't implement it).
+    fn draft_propose(
+        &self,
+        seq_id: i32,
+        new_tokens: &[i32],
+        base_pos: i32,
+        draft_len: usize,
+    ) -> Vec<i32> {
+        let _ = (seq_id, new_tokens, base_pos, draft_len);
+        Vec::new()
+    }
+
+    /// A hash identifying this model's tokenizer (vocab size, BOS/EOS, every token's
+    /// piece text). Two models with the same fingerprint share a tokenizer — the
+    /// precondition draft-model speculation requires (a draft token id is meaningless
+    /// input to the target's verify batch if the tokenizers differ). Default: `0`,
+    /// meaning "unknown/unchecked" (stubs never load two real tokenizers to compare).
+    fn vocab_fingerprint(&self) -> u64 {
+        0
     }
 
     fn model_config(&self) -> ModelConfig;

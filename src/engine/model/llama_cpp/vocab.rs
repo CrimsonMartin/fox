@@ -382,6 +382,27 @@ impl LlamaCppModel {
 
         Err(anyhow!("no chat template could be applied"))
     }
+
+    /// A hash identifying this model's tokenizer: vocab size, BOS/EOS token ids, and
+    /// every token's piece text. Two models with the same fingerprint share a
+    /// tokenizer — the precondition draft-model speculation requires, since a draft
+    /// token id from a mismatched tokenizer is meaningless input to the target's
+    /// verify batch (silently wrong, not just low-acceptance). One-time cost at load,
+    /// not a hot path, so a plain `DefaultHasher` (no new dependency) is fine.
+    pub(super) fn compute_vocab_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let vocab = self.vocab;
+        let n_vocab = self.config.vocab_size;
+        n_vocab.hash(&mut hasher);
+        self.eos_token.hash(&mut hasher);
+        let bos = unsafe { ffi::llama_vocab_bos(vocab) };
+        bos.hash(&mut hasher);
+        for id in 0..n_vocab as i32 {
+            self.token_to_piece_bytes_impl(id).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
 }
 
 #[cfg(test)]

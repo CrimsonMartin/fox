@@ -860,10 +860,23 @@ impl Model for LlamaCppModel {
         &self,
         _req_id: u64,
         request: &InferenceRequestForModel,
-        ngram: usize,
+        drafts: Vec<i32>,
+    ) -> Result<Vec<Logits>> {
+        self.do_speculative_decode(request, drafts)
+    }
+
+    fn draft_propose(
+        &self,
+        seq_id: i32,
+        new_tokens: &[i32],
+        base_pos: i32,
         draft_len: usize,
-    ) -> Result<(Vec<Logits>, usize)> {
-        self.do_speculative_decode(request, ngram, draft_len)
+    ) -> Vec<i32> {
+        self.do_draft_propose(seq_id, new_tokens, base_pos, draft_len)
+    }
+
+    fn vocab_fingerprint(&self) -> u64 {
+        self.compute_vocab_fingerprint()
     }
 
     fn embedding_dim(&self) -> usize {

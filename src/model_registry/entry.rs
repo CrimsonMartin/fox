@@ -41,7 +41,15 @@ impl EngineEntry {
     /// tokens per speculative step, exercising the engine's multi-token commit path).
     pub fn for_test_speculative(name: &str) -> Arc<Self> {
         use crate::engine::model::StubModel;
-        Self::for_test_with_model(name, Arc::new(StubModel), Some((2, 4)), 0)
+        Self::for_test_with_model(
+            name,
+            Arc::new(StubModel),
+            Some(crate::engine::SpeculativeConfig::Ngram {
+                ngram: 2,
+                draft_len: 4,
+            }),
+            0,
+        )
     }
 
     /// Build a test `EngineEntry` backed by `ThinkingStubModel` (no FFI).
@@ -55,7 +63,7 @@ impl EngineEntry {
     fn for_test_with_model(
         name: &str,
         model: Arc<dyn crate::engine::model::Model>,
-        speculative: Option<(usize, usize)>,
+        speculative: Option<crate::engine::SpeculativeConfig>,
         max_queue_depth: usize,
     ) -> Arc<Self> {
         use crate::kv_cache::KVCacheManager;
@@ -79,6 +87,7 @@ impl EngineEntry {
                 speculative,
                 ..Default::default()
             },
+            None,
         ));
         let loop_handle = {
             let e = engine.clone();

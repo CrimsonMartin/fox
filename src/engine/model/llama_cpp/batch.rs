@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
 use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
-use crate::engine::model::{InferenceRequestForModel, Logits, PrefillStep};
+use crate::engine::model::{InferenceRequestForModel, Logits, Model, PrefillStep};
 
 use super::LlamaCppModel;
 
@@ -402,23 +402,24 @@ impl LlamaCppModel {
         }
     }
 
-    /// One speculative-decoding step (0.15, S1): propose draft tokens from an n-gram
-    /// match over the request's own token history, verify them all in a single
-    /// `llama_decode`, and commit the longest prefix the model would itself have produced.
-    /// Returns the committed tokens — always ≥ 1 (the ordinary next token), plus any
-    /// accepted drafts and one bonus token.
+    /// One speculative-decoding step: verify the given `drafts` (already proposed by
+    /// an `engine::speculative::Proposer` — n-gram lookup or a draft model) all in a
+    /// single `llama_decode`, and commit the longest prefix the model would itself
+    /// have produced. Returns the committed tokens — always ≥ 1 (the ordinary next
+    /// token), plus any accepted drafts and one bonus token.
     ///
-    /// Exact: each committed token is a genuine target sample conditioned on the accepted
-    /// prefix, so with a fixed seed the output is byte-identical to non-speculative
-    /// decoding. Grammar is not applied here — the engine only speculates when no grammar
-    /// is active.
+    /// Exact regardless of proposer: each committed token is a genuine target sample
+    /// conditioned on the accepted prefix, so with a fixed seed the output is
+    /// byte-identical to non-speculative decoding — a wrong draft is simply rejected.
+    /// Grammar is not applied here — the engine only speculates when no grammar is
+    /// active.
     pub(super) fn do_speculative_decode(
         &self,
         req: &InferenceRequestForModel,
-        ngram: usize,
-        draft_len: usize,
-    ) -> Result<(Vec<Logits>, usize)> {
-        // Full logical sequence so far (prompt + generated) for the n-gram lookup.
+        drafts: Vec<i32>,
+    ) -> Result<Vec<Logits>> {
+        // Full logical sequence so far (prompt + generated) — used below only to
+        // find the true last token; the drafts themselves are supplied by the caller.
         let mut seq: Vec<i32> =
             Vec::with_capacity(req.prompt_tokens.len() + req.generated_token_ids.len());
         seq.extend_from_slice(&req.prompt_tokens);
@@ -431,7 +432,6 @@ impl LlamaCppModel {
         let base_pos = req.context_len as i32 - 1;
         let seq_id = req.kv_seq_id;
 
-        let drafts = crate::engine::speculative::propose_ngram(&seq, ngram, draft_len);
         let n = 1 + drafts.len(); // last_token + drafts
 
         // Verify batch: last_token then each draft at consecutive positions, all with logits.
@@ -501,7 +501,105 @@ impl LlamaCppModel {
         if committed.is_empty() {
             return Err(anyhow!("speculative decode produced no token"));
         }
-        Ok((committed, drafts.len()))
+        Ok(committed)
+    }
+
+    /// Draft-model proposal step (0.16): feed `new_tokens` into this model's own KV
+    /// at `seq_id` (starting at `base_pos`), then greedily decode up to `draft_len`
+    /// further tokens, extending the same KV sequence. No penalty context and no
+    /// grammar — a draft only needs to be a plausible proposer, the target's verify
+    /// step is what determines correctness. Stops early on an end-of-generation token.
+    /// Caller (`engine::speculative::DraftModelProposer`) owns `seq_id` exclusively
+    /// and is responsible for trimming/clearing it between requests.
+    pub(super) fn do_draft_propose(
+        &self,
+        seq_id: i32,
+        new_tokens: &[i32],
+        base_pos: i32,
+        draft_len: usize,
+    ) -> Vec<i32> {
+        // Nothing new to feed means nothing to base a proposal on — this call doesn't
+        // persist logits across calls. The caller always has ≥ 1 new token in
+        // practice (each decode step commits at least one real token).
+        if draft_len == 0 || new_tokens.is_empty() {
+            return Vec::new();
+        }
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let ctx = ctx_guard.as_ptr();
+        let n_vocab = self.config.vocab_size as usize;
+
+        // Feed `new_tokens`, requesting logits only at the last position — that's
+        // all that's needed to pick the first draft token.
+        let n = new_tokens.len();
+        let mut batch = unsafe { ffi::llama_batch_init(n as i32, 0, 1) };
+        for (i, &tok) in new_tokens.iter().enumerate() {
+            unsafe {
+                *batch.token.add(i) = tok;
+                *batch.pos.add(i) = base_pos + i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                let arr = *batch.seq_id.add(i);
+                *arr.add(0) = seq_id;
+                *batch.logits.add(i) = i8::from(i == n - 1);
+            }
+        }
+        batch.n_tokens = n as i32;
+        let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        if ret != 0 {
+            unsafe { ffi::llama_batch_free(batch) };
+            return Vec::new();
+        }
+        let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, (n - 1) as i32) };
+        if logits_ptr.is_null() {
+            unsafe { ffi::llama_batch_free(batch) };
+            return Vec::new();
+        }
+        let mut logits = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) }.to_vec();
+        unsafe { ffi::llama_batch_free(batch) };
+        let mut next_pos = base_pos + n as i32;
+
+        let mut drafts = Vec::with_capacity(draft_len);
+        loop {
+            let tok = sample_greedy(&logits);
+            if self.is_eog_token(tok) {
+                break;
+            }
+            drafts.push(tok);
+            if drafts.len() >= draft_len {
+                // Reached the cap — skip decoding one more token purely to prep
+                // logits for a position we'll never use.
+                break;
+            }
+
+            // Decode this one new draft token to get logits for the next position.
+            let mut batch = unsafe { ffi::llama_batch_init(1, 0, 1) };
+            unsafe {
+                *batch.token.add(0) = tok;
+                *batch.pos.add(0) = next_pos;
+                *batch.n_seq_id.add(0) = 1;
+                let arr = *batch.seq_id.add(0);
+                *arr.add(0) = seq_id;
+                *batch.logits.add(0) = 1;
+            }
+            batch.n_tokens = 1;
+            let ret = unsafe { ffi::llama_decode(ctx, batch) };
+            next_pos += 1;
+            if ret != 0 {
+                unsafe { ffi::llama_batch_free(batch) };
+                break;
+            }
+            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, 0) };
+            if logits_ptr.is_null() {
+                unsafe { ffi::llama_batch_free(batch) };
+                break;
+            }
+            logits = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) }.to_vec();
+            unsafe { ffi::llama_batch_free(batch) };
+        }
+
+        drafts
     }
 
     /// Sample the target at one verify position, mirroring `sample_constrained` minus the

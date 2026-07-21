@@ -187,7 +187,7 @@ impl InferenceEngine {
         // Roll with headroom for the largest possible next step (a speculative verify
         // batch writes up to draft_len + 1 cells): triggering exactly AT n_ctx is too
         // late — the boundary-crossing step fails before the roll can fire.
-        let reserve = self.speculative.map(|(_, d)| d + 1).unwrap_or(1);
+        let reserve = self.speculative.as_ref().map(|(_, d)| d + 1).unwrap_or(1);
         let threshold = n_ctx.saturating_sub(reserve);
         for req in self.scheduler.get_running(decode_ids) {
             let ctx_len = req.context_len();
@@ -360,16 +360,29 @@ impl InferenceEngine {
 
         // Speculative fast path: a single decoding request with no grammar, when enabled.
         // Speculation helps most at low concurrency; multi-request batches decode normally.
-        if let (Some((ngram, draft_len)), [only_id]) = (self.speculative, req_ids) {
+        if let (Some((proposer, draft_len)), [only_id]) = (&self.speculative, req_ids) {
             let no_grammar = model_requests
                 .first()
                 .map(|r| r.grammar.is_none())
                 .unwrap_or(false);
             if no_grammar {
                 let only_id = *only_id;
+                let draft_len = *draft_len;
+                let proposer = proposer.clone();
                 let request = model_requests.into_iter().next().unwrap();
+                // Proposing and verifying both run inside spawn_blocking: n-gram
+                // proposing is cheap CPU work, but a draft-model proposer makes its
+                // own llama.cpp FFI call, which must never run on the async executor.
                 let (committed, proposed) = tokio::task::spawn_blocking(move || {
-                    model.speculative_decode_sync(only_id, &request, ngram, draft_len)
+                    let mut seq = Vec::with_capacity(
+                        request.prompt_tokens.len() + request.generated_token_ids.len(),
+                    );
+                    seq.extend_from_slice(&request.prompt_tokens);
+                    seq.extend_from_slice(&request.generated_token_ids);
+                    let drafts = proposer.propose(only_id, &seq, draft_len);
+                    let proposed = drafts.len();
+                    let committed = model.speculative_decode_sync(only_id, &request, drafts)?;
+                    anyhow::Ok((committed, proposed))
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("speculative decode spawn_blocking: {}", e))??;

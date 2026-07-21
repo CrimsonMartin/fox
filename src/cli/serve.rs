@@ -82,6 +82,17 @@ pub struct ServeArgs {
     #[arg(long, default_value = "4", env = "FOX_SPEC_DRAFT_LEN")]
     pub spec_draft_len: usize,
 
+    /// Model name/path for a smaller "draft" model used to propose tokens for
+    /// verification by the main model (classic draft-model speculative decoding),
+    /// instead of n-gram lookup. Requires --speculative true (a value set without it
+    /// is ignored, with a startup warning). The draft and target must share the same
+    /// tokenizer — checked at load time, fails loudly on mismatch. Loaded once
+    /// alongside the target and kept resident for the process lifetime; NOT subject
+    /// to LRU eviction or VRAM budgeting in this release — size both models to fit.
+    /// `--spec-ngram` is ignored in this mode.
+    #[arg(long, env = "FOX_DRAFT_MODEL")]
+    pub draft_model: Option<String>,
+
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
@@ -294,6 +305,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         speculative: args.speculative,
         spec_ngram: args.spec_ngram,
         spec_draft_len: args.spec_draft_len,
+        draft_model: args.draft_model,
         max_context_len: args.max_context_len,
         block_size: args.block_size,
         gpu_memory_bytes,

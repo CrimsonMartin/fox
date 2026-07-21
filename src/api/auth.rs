@@ -67,6 +67,7 @@ mod tests {
                     speculative: false,
                     spec_ngram: 2,
                     spec_draft_len: 4,
+                    draft_model: None,
                     max_context_len: Some(512),
                     block_size: 16,
                     gpu_memory_bytes: 0,

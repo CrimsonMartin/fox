@@ -32,6 +32,14 @@ pub struct RegistryConfig {
     pub spec_ngram: usize,
     /// Maximum draft tokens proposed per speculative step.
     pub spec_draft_len: usize,
+    /// Name/path of a second, smaller model to use as the speculative-decoding draft
+    /// proposer instead of n-gram lookup. Only takes effect when `speculative` is
+    /// also true; ignored (with a startup warning) otherwise. The draft and target
+    /// must share the same tokenizer — checked at load time, fails loudly on
+    /// mismatch. Loaded once alongside the target, for the process lifetime — not
+    /// subject to LRU eviction/VRAM budgeting in 0.16 (see
+    /// `docs/design/speculative-roadmap.md`).
+    pub draft_model: Option<String>,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,

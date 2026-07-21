@@ -163,11 +163,11 @@ impl InferenceEngine {
             .build_prompt_tokens(messages, enable_thinking, tools)
     }
 
-    /// Whether the loaded model's own chat template natively formats tool calls
-    /// (e.g. Hermes/Qwen tool-use templates), as opposed to needing fox's generic
-    /// prompt-injected tool listing.
-    pub fn supports_native_tool_format(&self) -> bool {
-        self.model.supports_native_tool_format()
+    /// Which tool-call wire format the loaded model's own chat template natively
+    /// speaks, if any (see [`crate::engine::model::NativeToolFormat`]), as opposed to
+    /// needing fox's generic prompt-injected tool listing.
+    pub fn native_tool_call_format(&self) -> Option<crate::engine::model::NativeToolFormat> {
+        self.model.native_tool_call_format()
     }
 
     /// The model's reasoning (open, close) delimiters, resolved to the default

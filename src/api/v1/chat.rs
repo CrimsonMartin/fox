@@ -178,7 +178,7 @@ pub async fn chat_completions(
     let allow_parallel = req.parallel_tool_calls.unwrap_or(true);
     let tool_parser = resolve_tool_call_parser(
         &state.tool_call_parser,
-        entry.engine.supports_native_tool_format(),
+        entry.engine.native_tool_call_format(),
     );
 
     tracing::info!(

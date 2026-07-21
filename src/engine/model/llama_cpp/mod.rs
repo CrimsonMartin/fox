@@ -36,7 +36,7 @@ use anyhow::anyhow;
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
 use crate::engine::model::{
-    InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, PrefillStep,
+    InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, NativeToolFormat, PrefillStep,
 };
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
@@ -698,14 +698,22 @@ impl Model for LlamaCppModel {
         self.build_prompt_tokens_impl(messages, enable_thinking, tools)
     }
 
-    fn supports_native_tool_format(&self) -> bool {
+    fn native_tool_call_format(&self) -> Option<NativeToolFormat> {
         // Detected from the model's OWN chat template, never its name — same
         // principle as `reasoning_delimiters`/`supports_thinking` above. Hermes and
         // Qwen tool-use templates instruct the model to wrap tool calls in
-        // `<tool_call>...</tool_call>`; a model without that marker in its template
-        // gets fox's generic prompt-injected tool listing instead.
-        self.raw_chat_template()
-            .is_some_and(|t| t.contains("<tool_call>"))
+        // `<tool_call>...</tool_call>`; Mistral's instructs the `[TOOL_CALLS]`
+        // marker. A model without either marker in its template gets fox's generic
+        // prompt-injected tool listing instead. Llama3 is deliberately not detected
+        // here — see `NativeToolFormat`'s doc comment.
+        let t = self.raw_chat_template()?;
+        if t.contains("<tool_call>") {
+            Some(NativeToolFormat::Hermes)
+        } else if t.contains("[TOOL_CALLS]") {
+            Some(NativeToolFormat::Mistral)
+        } else {
+            None
+        }
     }
 
     fn reasoning_delimiters(&self) -> Option<(String, String)> {

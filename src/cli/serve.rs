@@ -119,10 +119,12 @@ pub struct ServeArgs {
     )]
     pub system_prompt: String,
 
-    /// Which format to parse tool calls from the model's raw output: `auto`
-    /// (default — picks Hermes when the loaded model's own chat template natively
-    /// formats tool calls via `<tool_call>` tags, generic prompt-based JSON
-    /// otherwise), `generic`, or `hermes`.
+    /// Which format to parse tool calls from the model's raw output: `auto` (default
+    /// — picks `hermes` when the loaded model's own chat template natively formats
+    /// tool calls via `<tool_call>` tags, `mistral` via a `[TOOL_CALLS]` marker,
+    /// generic prompt-based JSON otherwise), `generic`, `hermes`, `mistral`, or
+    /// `llama3` (explicit-opt-in only — never auto-selected, since most GGUF chat
+    /// templates for Llama3 models don't retain a detectable tool-call convention).
     #[arg(long, default_value = DEFAULT_TOOL_CALL_PARSER, env = "FOX_TOOL_CALL_PARSER")]
     pub tool_call_parser: String,
 

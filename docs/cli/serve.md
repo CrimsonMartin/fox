@@ -73,7 +73,7 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | Flag | Env variable | Default | Description |
 |------|---|---|---|
 | `--system-prompt <TEXT>` | `FOX_SYSTEM_PROMPT` | `"You are a helpful assistant."` | Default system prompt injected at the start of every conversation that does not already include one. Pass an empty string (`""`) to disable injection. |
-| `--tool-call-parser <auto\|generic\|hermes>` | `FOX_TOOL_CALL_PARSER` | `auto` | Which format to parse tool calls from the model's raw output. `auto` picks `hermes` when the loaded model's own chat template natively formats tool calls (`<tool_call>` tags — Hermes/Qwen tool-use templates), `generic` (fox's original prompt-injected JSON) otherwise. |
+| `--tool-call-parser <auto\|generic\|hermes\|mistral\|llama3>` | `FOX_TOOL_CALL_PARSER` | `auto` | Which format to parse tool calls from the model's raw output. `auto` picks `hermes` when the loaded model's own chat template natively formats tool calls (`<tool_call>` tags — Hermes/Qwen tool-use templates), `mistral` via a `[TOOL_CALLS]` marker (handles both the classic JSON-array wire format and the newer per-call `name[ARGS]{...}` format), `generic` (fox's original prompt-injected JSON) otherwise. `llama3` (`{"name":..,"parameters":..}`, optionally `<|python_tag|>`-prefixed) is explicit-opt-in only — most GGUF chat templates for Llama3 models don't retain a detectable tool-call convention, so `auto` never selects it. |
 
 ### Multi-GPU
 

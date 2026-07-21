@@ -206,7 +206,7 @@ pub async fn ollama_chat(
         let (content, ollama_tool_calls) = if has_tools {
             let tool_parser = resolve_tool_call_parser(
                 &state.tool_call_parser,
-                entry.engine.supports_native_tool_format(),
+                entry.engine.native_tool_call_format(),
             );
             let (text, oa_calls) = parse_tool_call(&visible, eff_tools, tool_parser);
             let ollama_calls = oa_calls.map(|calls| {

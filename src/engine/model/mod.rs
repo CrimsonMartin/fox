@@ -23,6 +23,20 @@ pub use stub::{StubModel, ThinkingStubModel};
 // Shared types
 // ---------------------------------------------------------------------------
 
+/// Which tool-call wire format the model's OWN chat template natively speaks, if any.
+/// `Hermes`/Qwen tool-use templates instruct `<tool_call>...</tool_call>`; Mistral's
+/// template instructs the `[TOOL_CALLS]` marker. Llama3 is deliberately absent here:
+/// real-world GGUF chat templates for Llama3 models routinely strip the tool-calling
+/// block entirely (verified against a cached `llama-3.2-1b-instruct` GGUF, whose
+/// baked-in template has no tool-call convention at all), so there is no reliable
+/// template signal to detect it by — it is explicit-opt-in only via
+/// `--tool-call-parser llama3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeToolFormat {
+    Hermes,
+    Mistral,
+}
+
 /// Sampling parameters recommended by the model's GGUF metadata.
 /// Fields are `None` when the model doesn't specify a recommendation for that parameter.
 #[derive(Debug, Clone)]
@@ -264,12 +278,11 @@ pub trait Model: Send + Sync {
         self.tokenize(&prompt)
     }
 
-    /// Whether the model's own chat template natively formats tool calls (e.g. a
-    /// Hermes/Qwen tool-use template that emits `<tool_call>{...}</tool_call>`),
-    /// as opposed to relying on fox's generic prompt-injected tool listing.
-    /// Default `false` — only `LlamaCppModel` can inspect a real template.
-    fn supports_native_tool_format(&self) -> bool {
-        false
+    /// Which tool-call wire format the model's own chat template natively speaks (see
+    /// [`NativeToolFormat`]), as opposed to relying on fox's generic prompt-injected
+    /// tool listing. Default `None` — only `LlamaCppModel` can inspect a real template.
+    fn native_tool_call_format(&self) -> Option<NativeToolFormat> {
+        None
     }
 
     /// Effective per-sequence context length (tokens) this model was configured with.

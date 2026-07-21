@@ -17,6 +17,7 @@
 // cache another tiny GGUF in that job and pass it through, per the support matrix.
 
 use crate::engine::model::{InferenceRequestForModel, LlamaCppModel, Logits, Model};
+use crate::engine::speculative::Proposer;
 use crate::model_registry::kv_type;
 
 /// Load the model named by FOX_GOLDEN_MODEL, or `None` (→ the test skips).

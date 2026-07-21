@@ -17,6 +17,7 @@ impl InferenceEngine {
         let mut last_prefix_misses: u64 = 0;
         let mut last_spec_proposed: u64 = 0;
         let mut last_spec_accepted: u64 = 0;
+        let mut last_bisection_retries: u64 = 0;
 
         loop {
             let batch = engine.scheduler.schedule_step();
@@ -58,6 +59,13 @@ impl InferenceEngine {
                 }
                 last_spec_proposed = cur_proposed;
                 last_spec_accepted = cur_accepted;
+
+                let cur_bisection_retries = engine.model.bisection_retry_count();
+                let db = cur_bisection_retries.saturating_sub(last_bisection_retries);
+                if db > 0 {
+                    m.decode_bisection_retries_total.inc_by(db);
+                }
+                last_bisection_retries = cur_bisection_retries;
             }
 
             for seq_id in &batch.preempted_seq_ids {

@@ -205,6 +205,13 @@ pub trait Model: Send + Sync {
         0
     }
 
+    /// Lifetime count of batch-size-bisection retries triggered by a recoverable
+    /// `llama_decode` failure ("no KV slot for batch") during prefill/decode.
+    /// Default 0 — only `LlamaCppModel` (real) tracks this.
+    fn bisection_retry_count(&self) -> u64 {
+        0
+    }
+
     fn model_config(&self) -> ModelConfig;
 
     fn eos_token_id(&self) -> i32;

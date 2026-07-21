@@ -34,6 +34,9 @@ pub struct Metrics {
     pub spec_acceptance_ratio: Gauge,
     /// Requests rejected before admission, labelled by reason (`queue_full`, `too_large`).
     pub requests_rejected_total: IntCounterVec,
+    /// Batch-size-bisection retries triggered by a recoverable llama_decode failure
+    /// ("no KV slot for batch") during prefill/decode.
+    pub decode_bisection_retries_total: IntCounter,
 }
 
 impl Metrics {
@@ -90,6 +93,10 @@ impl Metrics {
                 "ferrumox_requests_rejected_total",
                 "Requests rejected before admission",
                 &["reason"]
+            )?,
+            decode_bisection_retries_total: register_int_counter!(
+                "ferrumox_decode_bisection_retries_total",
+                "Batch-size-bisection retries triggered by a recoverable llama_decode failure"
             )?,
         })
     }

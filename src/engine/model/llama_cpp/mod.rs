@@ -337,6 +337,11 @@ pub struct LlamaCppModel {
     /// Created lazily on the first constrained sample and freed via `free_grammar` on
     /// every terminal path (so they never leak). Empty unless a request set a grammar.
     pub(super) grammars: dashmap::DashMap<u64, GrammarSampler>,
+    /// Lifetime count of batch-size-bisection retries triggered by `llama_decode`
+    /// returning `1` ("no KV slot for batch") in `do_prefill`/`do_decode`. Surfaced
+    /// via `Model::bisection_retry_count()` and diffed into a Prometheus counter in
+    /// `run_loop`, same pattern as `spec_proposed`/`spec_accepted`.
+    pub(super) decode_bisection_retries: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(not(fox_stub))]
@@ -552,6 +557,7 @@ impl LlamaCppModel {
             owns_model: true,
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
+            decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -626,6 +632,7 @@ impl LlamaCppModel {
             owns_model: false, // weights are owned by the original LlamaCppModel
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
+            decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
@@ -877,6 +884,11 @@ impl Model for LlamaCppModel {
 
     fn vocab_fingerprint(&self) -> u64 {
         self.compute_vocab_fingerprint()
+    }
+
+    fn bisection_retry_count(&self) -> u64 {
+        self.decode_bisection_retries
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn embedding_dim(&self) -> usize {

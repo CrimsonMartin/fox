@@ -1,9 +1,35 @@
-// Speculative decoding — n-gram / prompt-lookup proposer (0.15, S1).
+// Speculative decoding proposers.
 //
-// The draft step of speculative decoding: guess the next few tokens by finding where the
-// recent output has occurred before in the same sequence. Pure logic (no llama.cpp), so
-// it lives here and is unit-tested; the verify/accept/cleanup half is the real-build
-// `LlamaCppModel::do_speculative_decode`. See `docs/design/speculative-decoding.md`.
+// The draft step of speculative decoding: guess the next few tokens before the target
+// model verifies them. `NgramProposer` (0.15, S1): guess by finding where the recent
+// output has occurred before in the same sequence. Pure logic (no llama.cpp).
+// The verify/accept/cleanup half (`LlamaCppModel::do_speculative_decode`) is proposer-
+// agnostic — it verifies whatever `Vec<i32>` of draft tokens it's given, so exactness
+// (byte-identical output on/off) holds regardless of which proposer produced them; a
+// wrong draft is simply rejected. See `docs/design/speculative-decoding.md`.
+
+/// Proposes candidate tokens for speculative decoding, to be verified against the
+/// target model's real logits. Implementations must be cheap to call once per decode
+/// step.
+pub trait Proposer: Send + Sync {
+    /// Propose up to `draft_len` candidate tokens for `seq` (the request's full
+    /// logical sequence so far: prompt ++ generated). `req_id` lets a stateful
+    /// proposer detect when a different request has taken over the single
+    /// speculative "slot" and reset its own state accordingly.
+    fn propose(&self, req_id: u64, seq: &[i32], draft_len: usize) -> Vec<i32>;
+}
+
+/// Thin wrapper around `propose_ngram` implementing `Proposer` (0.15's proposer,
+/// unchanged — this refactor only moves where it's called from).
+pub struct NgramProposer {
+    pub ngram: usize,
+}
+
+impl Proposer for NgramProposer {
+    fn propose(&self, _req_id: u64, seq: &[i32], draft_len: usize) -> Vec<i32> {
+        propose_ngram(seq, self.ngram, draft_len)
+    }
+}
 
 /// Propose up to `draft_len` draft tokens for the sequence `seq`.
 ///
@@ -33,7 +59,16 @@ pub(crate) fn propose_ngram(seq: &[i32], ngram: usize, draft_len: usize) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::propose_ngram;
+    use super::{propose_ngram, NgramProposer, Proposer};
+
+    #[test]
+    fn ngram_proposer_delegates_to_propose_ngram() {
+        // Thin-wrapper regression check: NgramProposer must produce exactly what the
+        // bare function does for the same inputs.
+        let seq = [10, 20, 30, 10, 20, 30, 10, 20];
+        let p = NgramProposer { ngram: 2 };
+        assert_eq!(p.propose(1, &seq, 4), propose_ngram(&seq, 2, 4));
+    }
 
     #[test]
     fn too_short_or_disabled_returns_empty() {

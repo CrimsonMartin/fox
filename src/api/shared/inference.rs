@@ -247,6 +247,29 @@ pub fn tools_system_message(tools: &[Tool], required: bool, specific: Option<&st
     format!("You have access to the following tools:\n{json}\n\n{usage}\n\n{constraint}")
 }
 
+/// Build a validated `ToolCall` from a name + arguments value, rejecting names not
+/// present in `known_tools` (when provided). Shared by every tool-call output format
+/// (generic JSON, Hermes tags, …) so the whitelist/id-generation logic lives once.
+fn build_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+    known_tools: Option<&[Tool]>,
+) -> Option<ToolCall> {
+    if let Some(tools) = known_tools {
+        if !tools.iter().any(|t| t.function.name == name) {
+            return None;
+        }
+    }
+    Some(ToolCall {
+        id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+    })
+}
+
 /// Try to parse `response` text as a JSON tool call.
 /// Returns `(content, tool_calls)`.
 pub fn try_parse_tool_call(
@@ -264,21 +287,10 @@ pub fn try_parse_tool_call(
         value.get("name").and_then(|n| n.as_str()),
         value.get("arguments"),
     ) {
-        // Validate name against known tools when provided.
-        if let Some(tools) = known_tools {
-            if !tools.iter().any(|t| t.function.name == name) {
-                return (response.to_string(), None);
-            }
-        }
-        let call = ToolCall {
-            id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
-            call_type: "function".to_string(),
-            function: ToolCallFunction {
-                name: name.to_string(),
-                arguments: args.to_string(),
-            },
+        return match build_tool_call(name, args, known_tools) {
+            Some(call) => (String::new(), Some(vec![call])),
+            None => (response.to_string(), None),
         };
-        return (String::new(), Some(vec![call]));
     }
 
     // Pattern: {"tool_calls": [...]}
@@ -286,22 +298,9 @@ pub fn try_parse_tool_call(
         let tool_calls: Vec<ToolCall> = calls
             .iter()
             .filter_map(|c| {
-                let name = c.get("name")?.as_str()?.to_string();
-                // Validate name if known_tools provided.
-                if let Some(tools) = known_tools {
-                    if !tools.iter().any(|t| t.function.name == name) {
-                        return None;
-                    }
-                }
-                let args = c.get("arguments")?.to_string();
-                Some(ToolCall {
-                    id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
-                    call_type: "function".to_string(),
-                    function: ToolCallFunction {
-                        name,
-                        arguments: args,
-                    },
-                })
+                let name = c.get("name")?.as_str()?;
+                let args = c.get("arguments")?;
+                build_tool_call(name, args, known_tools)
             })
             .collect();
         if !tool_calls.is_empty() {
@@ -310,6 +309,89 @@ pub fn try_parse_tool_call(
     }
 
     (response.to_string(), None)
+}
+
+/// One or more `<tool_call>{"name":..,"arguments":..}</tool_call>` blocks — the
+/// output format Hermes/Qwen tool-use chat templates instruct the model to emit.
+/// Parallel tool calls are native to the format (one block per call). Text outside
+/// the blocks (leading/trailing prose) becomes the returned content. A block with
+/// invalid JSON, or naming a tool not in `known_tools`, is silently dropped — same
+/// whitelist behavior as the generic parser.
+fn parse_hermes_tool_calls(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+) -> (String, Option<Vec<ToolCall>>) {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+
+    let mut calls = Vec::new();
+    let mut content = String::new();
+    let mut rest = response;
+
+    while let Some(start) = rest.find(OPEN) {
+        content.push_str(&rest[..start]);
+        let after_open = &rest[start + OPEN.len()..];
+        let Some(end) = after_open.find(CLOSE) else {
+            // Unterminated block (generation cut off) — keep it out of content and stop.
+            rest = "";
+            break;
+        };
+        let block = after_open[..end].trim();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(block) {
+            if let (Some(name), Some(args)) = (
+                value.get("name").and_then(|n| n.as_str()),
+                value.get("arguments"),
+            ) {
+                if let Some(call) = build_tool_call(name, args, known_tools) {
+                    calls.push(call);
+                }
+            }
+        }
+        rest = &after_open[end + CLOSE.len()..];
+    }
+    content.push_str(rest);
+
+    if calls.is_empty() {
+        (response.to_string(), None)
+    } else {
+        (content.trim().to_string(), Some(calls))
+    }
+}
+
+/// Which format to parse tool calls out of the model's raw output text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallParserKind {
+    /// `{"name":..,"arguments":..}` or `{"tool_calls":[...]}` as the whole response
+    /// (fox's original prompt-engineered format — the default/fallback).
+    Generic,
+    /// One or more `<tool_call>{...}</tool_call>` blocks (Hermes/Qwen tool-use
+    /// template format).
+    Hermes,
+}
+
+/// Resolve the effective parser. An explicit `configured` override (`"generic"` /
+/// `"hermes"`) wins; anything else (including `"auto"`, the default) picks Hermes
+/// when the loaded model's own chat template natively formats tool calls, generic
+/// otherwise — see `InferenceEngine::supports_native_tool_format`.
+pub fn resolve_tool_call_parser(configured: &str, model_native: bool) -> ToolCallParserKind {
+    match configured {
+        "generic" => ToolCallParserKind::Generic,
+        "hermes" => ToolCallParserKind::Hermes,
+        _ if model_native => ToolCallParserKind::Hermes,
+        _ => ToolCallParserKind::Generic,
+    }
+}
+
+/// Parse `response` for tool calls using the given parser. Returns `(content, tool_calls)`.
+pub fn parse_tool_call(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+    parser: ToolCallParserKind,
+) -> (String, Option<Vec<ToolCall>>) {
+    match parser {
+        ToolCallParserKind::Generic => try_parse_tool_call(response, known_tools),
+        ToolCallParserKind::Hermes => parse_hermes_tool_calls(response, known_tools),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +630,115 @@ mod tests {
             try_parse_tool_call(r#"{"name":"unknown_tool","arguments":{}}"#, Some(&tools));
         assert!(calls.is_none());
         assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_single() {
+        let response = r#"<tool_call>
+{"name": "get_weather", "arguments": {"city": "Madrid"}}
+</tool_call>"#;
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have tool calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_parallel() {
+        let response = r#"<tool_call>
+{"name": "get_weather", "arguments": {"city": "Madrid"}}
+</tool_call>
+<tool_call>
+{"name": "get_weather", "arguments": {"city": "Lisbon"}}
+</tool_call>"#;
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have parallel tool calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].function.arguments.contains("Madrid"));
+        assert!(calls[1].function.arguments.contains("Lisbon"));
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_with_surrounding_prose() {
+        let response = r#"Sure, let me check that for you.
+<tool_call>
+{"name": "get_weather", "arguments": {"city": "Madrid"}}
+</tool_call>
+Let me know if you need anything else."#;
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert!(calls.is_some());
+        assert!(content.contains("Sure, let me check"));
+        assert!(content.contains("Let me know"));
+        assert!(!content.contains("tool_call"));
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_unknown_tool_rejected() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let response = r#"<tool_call>
+{"name": "unknown_tool", "arguments": {}}
+</tool_call>"#;
+        let (content, calls) = parse_hermes_tool_calls(response, Some(&tools));
+        assert!(calls.is_none());
+        assert_eq!(content, response);
+    }
+
+    #[test]
+    fn test_parse_hermes_no_tool_call_tags_is_plain_text() {
+        let response = "The sky is blue because of Rayleigh scattering.";
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert_eq!(content, response);
+        assert!(calls.is_none());
+    }
+
+    #[test]
+    fn test_resolve_tool_call_parser_explicit_overrides_win() {
+        assert_eq!(
+            resolve_tool_call_parser("generic", true),
+            ToolCallParserKind::Generic
+        );
+        assert_eq!(
+            resolve_tool_call_parser("hermes", false),
+            ToolCallParserKind::Hermes
+        );
+    }
+
+    #[test]
+    fn test_resolve_tool_call_parser_auto_follows_model_native() {
+        assert_eq!(
+            resolve_tool_call_parser("auto", true),
+            ToolCallParserKind::Hermes
+        );
+        assert_eq!(
+            resolve_tool_call_parser("auto", false),
+            ToolCallParserKind::Generic
+        );
+    }
+
+    #[test]
+    fn test_parse_tool_call_dispatches_by_parser_kind() {
+        let generic_response = r#"{"name":"f","arguments":{}}"#;
+        let (_, calls) = parse_tool_call(generic_response, None, ToolCallParserKind::Generic);
+        assert!(calls.is_some());
+
+        let hermes_response = "<tool_call>\n{\"name\":\"f\",\"arguments\":{}}\n</tool_call>";
+        let (_, calls) = parse_tool_call(hermes_response, None, ToolCallParserKind::Hermes);
+        assert!(calls.is_some());
+
+        // Cross-format text must NOT parse under the wrong parser.
+        let (_, calls) = parse_tool_call(hermes_response, None, ToolCallParserKind::Generic);
+        assert!(calls.is_none());
     }
 
     #[test]

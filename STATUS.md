@@ -90,7 +90,7 @@ to confirm are marked ❓.
 
 | | Feature | Notes |
 |---|---------|-------|
-| ✅ | Tool/function calling | **Hermes native parser added (0.16)** — `tools` is now threaded into the Jinja render context, so a model whose real template natively formats tool calls (Hermes/Qwen tool-use templates, `<tool_call>{...}</tool_call>`) renders and parses its own format instead of fox's generic listing; auto-detected from the model's own template (`--tool-call-parser auto\|generic\|hermes` to override). Models without a native tool-use template keep the original generic prompt-based JSON parsing (`{"name","arguments"}` / `{"tool_calls":[…]}`, own `[tool_call: …]` wire format for history) as the fallback. Mistral/Llama3-specific parsers not yet added |
+| ✅ | Tool/function calling | **Hermes + Mistral + Llama3 parsers (0.16)** — `tools` is threaded into the Jinja render context, so a model whose real template natively formats tool calls (Hermes/Qwen `<tool_call>{...}</tool_call>`, Mistral `[TOOL_CALLS]`) renders and parses its own format instead of fox's generic listing; auto-detected from the model's own template (`--tool-call-parser auto\|generic\|hermes\|mistral\|llama3` to override). The Mistral parser handles both real-world wire formats (classic JSON array and the newer per-call `name[ARGS]{...}`). Llama3 (`{"name":..,"parameters":..}`, optional `<|python_tag|>`) is explicit-opt-in only — most GGUF chat templates for Llama3 models strip the tool-calling block entirely (verified against a cached `llama-3.2-1b-instruct` GGUF), so there's no reliable template signal to auto-detect it by. Models without a detected/selected native format keep the original generic prompt-based JSON parsing (`{"name","arguments"}` / `{"tool_calls":[…]}`) as the fallback |
 | ✅ | JSON mode / structured output | **fixed (0.14)** — GBNF-constrained via `response_format`/`format`, JSON-schema→grammar in Rust, golden-verified; was prompt-instruction-only, no enforcement. Regex/choice-based grammar still absent |
 | ✅ | Thinking / `--show-thinking` | **improved (0.11)** — `enable_thinking` is threaded through the real Jinja render, and detection uses the template's own `enable_thinking` marker before falling back to a literal-`<think>` tokenize check; the reasoning-delimiter registry (`REASONING_FORMATS`) knows Gemma/GPT-OSS's `<\|channel\|>` framing. Still whack-a-mole for any *other* model family whose real marker isn't `<think>` and isn't yet in the registry |
 | ❌ | Vision / multimodal | image blocks no longer dropped silently — the OpenAI handler warns when a request carries non-text content (0.11) — but there is still no actual vision support (no image encoder wired) |
@@ -226,18 +226,18 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | 6 | ✅ Resolved | Prefix-cache eviction cleanup | **0.12** — stress test (`stress_prefix_cache_no_leak`) proved no leak; three *other* prefix-cache correctness bugs (unrelated to leak) were later found and fixed in 0.15.1 via real end-to-end testing |
 | 7 | ✅ Resolved | Chat templates not executed (no Jinja) → thinking + native tool-calling lost (Gemma 4, Qwen3, …) | **0.11 (`cc12851`)** — real Jinja via `minijinja`, `enable_thinking` threaded, per-model reasoning-marker detection. `tools` threading (needed for native tool-*calling* specifically) landed separately in **0.16**, tracked as item 9 below |
 | 8 | ✅ Resolved (simple scope) | No backpressure/OOM recovery — an admission-rejected or engine-crashed request silently closes its response channel (fake 200), and a real `llama_decode` failure always killed every request in the batch even when llama.cpp itself reports it as recoverable | **0.16** — `--max-queue-depth` limit + explicit error signaling + a distinct `StopReason::EngineError`, plus batch-size-bisection retry on `llama_decode` ret==1 ("no KV slot for batch"). Reactive context-rolling on top of bisection (further "degrade" beyond retrying with a smaller batch) is still open, see `docs/design/vllm-gap-analysis.md` |
-| 9 | ✅ Resolved (Hermes) | Tool calling was generic prompt-based only; native per-model formats were never exercised even though real Jinja rendering exists | **0.16** — Hermes parser + `tools` threaded into the Jinja context. Mistral/Llama3 parsers still open |
+| 9 | ✅ Resolved | Tool calling was generic prompt-based only; native per-model formats were never exercised even though real Jinja rendering exists | **0.16** — Hermes, Mistral, and Llama3 parsers, `tools` threaded into the Jinja context. Llama3 is explicit-opt-in only (unreliable template auto-detection, see item above) |
 | 10 | ✅ Resolved (simple scope) | Draft-model speculative decoding (generalizes 0.15's n-gram win beyond repetitive/context-echoing output) | **0.16** — `Proposer` trait + `--draft-model`. Deliberately no eviction pairing/VRAM budgeting (operator sizes both models to fit) — see `docs/design/speculative-roadmap.md` Level 2 |
 
 **Bottom line:** the serving skeleton (batching, preemption, paged KV/CoW, prefix
 caching, UTF-8/stop handling, multi-GPU, both APIs, CLI, ops) is solid, and the original
 rework (items 1-7) closed most of the architecture-facts-scattered-across-layers class of
 defect — real Jinja execution, centralized sampling defaults, fixed embeddings, a leak-free
-prefix cache. Items 8-10 (backpressure, Hermes tool calling, draft-model speculation) are
+prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) are
 0.16's feature work, now landed. What's left clusters into genuine remaining correctness
 debt with no work scheduled (MLA/recurrent KV sizing, the `REASONING_FORMATS` registry's
 narrow coverage) and the feature gaps `docs/design/vllm-gap-analysis.md` still lists open
-(OOM retry/degradation, Mistral/Llama3 tool parsers, vision, LoRA).
+(reactive context-rolling on top of bisection retry, vision, LoRA).
 
 ---
 
@@ -257,14 +257,13 @@ parallel are explicit non-goals — see that doc's "What NOT to chase").
 **Already shipped since the gap analysis was last written up:** guided/structured decoding
 via GBNF (0.14), logprobs/top_logprobs (0.14), min_p/logit_bias/min_tokens (0.14),
 speculative decoding — n-gram (0.15) and draft-model (0.16), chunked prefill (0.13),
-context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes native
-tool-call parser (0.16), OOM recovery via batch-size-bisection retry (0.16).
+context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes/Mistral/Llama3
+tool-call parsers (0.16), OOM recovery via batch-size-bisection retry (0.16).
 
 **Still open, in priority order** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
 
-1. Mistral/Llama3 tool-call parsers (0.16 added Hermes only).
-2. Reactive context-rolling as a further OOM mitigation once a batch is already
+1. Reactive context-rolling as a further OOM mitigation once a batch is already
    bisected to a single request and still fails (0.16 only retries by shrinking the
    batch, not by rolling context).
-3. Vision/multimodal, MLA/recurrent correct KV sizing, LoRA — real gaps, no work
+2. Vision/multimodal, MLA/recurrent correct KV sizing, LoRA — real gaps, no work
    scheduled yet.

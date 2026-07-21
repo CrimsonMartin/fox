@@ -69,7 +69,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 | 🎯✅ | Chunked prefill | `--max-prefill-chunk` (default 512): a long prompt is prefilled in chunks across scheduler steps, interleaved with other requests' decode |
 | ✅ | Speculative decoding (draft / n-gram / EAGLE) | n-gram/prompt-lookup (0.15) + draft-model (0.16), both exact + golden-verified via `--speculative`/`--draft-model`; EAGLE-style trained draft heads ❌ |
 | ✅ | Guided/structured decoding (grammar / JSON-schema) | GBNF-constrained via `response_format`/`format` (0.14, golden-verified); regex ❌ |
-| ⚠️ | Tool/function calling | Hermes native parser added (0.16, auto-detected from the model's own template, `tools` threaded into the Jinja context); generic prompt-based JSON remains the fallback for models without a native tool-use template; Mistral/Llama3-specific parsers not yet added |
+| ✅ | Tool/function calling | Hermes + Mistral parsers auto-detected from the model's own template (0.16, `tools` threaded into the Jinja context); Llama3 parser explicit-opt-in only (`--tool-call-parser llama3` — unreliable template auto-detection in practice); generic prompt-based JSON remains the fallback otherwise |
 | ⚠️ | `n>1` / best_of / beam search; logprobs / echo | logprobs/top_logprobs ✅ (0.14); n>1/beam/echo ❌ |
 | ⚠️ | Context management: RoPE scaling partial; **context-shift/rolling** on full (`--context-shift`, shiftable caches) ✅; RoPE scaling still not exposed | |
 | ❌ | LoRA / adapters (incl. multi-LoRA) | |

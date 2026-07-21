@@ -106,7 +106,7 @@ Datacenter-scale features, outside fox's single-node niche.
 | Backpressure / rate-limit / max-queue | ✅ | ✅ (0.16) | — |
 | Request priority (priority preemption) | ✅ | ⚠️ LIFO preemption only, no priority | achievable |
 | KV offload / swap to CPU | ✅ | ⚠️ `--swap-fraction` placeholder, unimplemented | achievable |
-| Tool calling with per-model parsers | ✅ | ⚠️ Hermes (0.16); Mistral/Llama3 still generic | achievable |
+| Tool calling with per-model parsers | ✅ | ✅ Hermes, Mistral, Llama3 (0.16) | — |
 
 fox already has: continuous batching, disconnect cancellation, LIFO preemption,
 context rolling (0.13), OpenAI + Ollama compat, Prometheus metrics, auth, health.
@@ -140,10 +140,19 @@ Shipped since this analysis was written:
   Observable via `ferrumox_decode_bisection_retries_total` + a per-event
   `tracing::warn!`. Reactive context-rolling as a further mitigation (once already
   down to a single request) is still open.
-- ✅ **Hermes native tool-call parser** (0.16) — `tools` threaded into the Jinja render
-  context, auto-detected from the model's own template (`--tool-call-parser
-  auto\|generic\|hermes`); models without a native tool-use template keep the original
-  generic prompt-based JSON parsing as the fallback.
+- ✅ **Hermes, Mistral, and Llama3 tool-call parsers** (0.16) — `tools` threaded into
+  the Jinja render context, auto-detected from the model's own template
+  (`--tool-call-parser auto\|generic\|hermes\|mistral\|llama3`). Mistral's parser
+  handles both wire formats found in the wild: the classic `[TOOL_CALLS] [{"name":..,
+  "arguments":..}]` JSON array (docs.mistral.ai, vLLM's `mistral` parser) and the
+  newer per-call `[TOOL_CALLS]name[ARGS]{...}` format the currently-vendored
+  llama.cpp's own PEG chat parser implements. Llama3 (`{"name":..,"parameters":..}`,
+  optional `<|python_tag|>` prefix) is **explicit-opt-in only** — verified against the
+  `llama-3.2-1b-instruct` GGUF already cached for e2e testing that real-world GGUF
+  chat templates for Llama3 models routinely strip the tool-calling block entirely, so
+  there's no reliable template marker to auto-detect it by. Models without a
+  detected/selected native format keep the original generic prompt-based JSON parsing
+  as the fallback.
 - ✅ **Draft-model speculation** (0.16) — `--draft-model <name>` generalizes the 0.15
   n-gram win beyond context-echoing output via a second resident model; vocab
   compatibility is a hard load-time check, golden-verified exact via self-speculation.
@@ -152,9 +161,7 @@ Shipped since this analysis was written:
 
 Still open, in priority order:
 
-1. **Mistral / Llama3 tool-call parsers** — generalizes the 0.16 Hermes parser to more
-   model families.
-2. **Reactive context-rolling as a further OOM mitigation** — 0.16's bisection retry
+1. **Reactive context-rolling as a further OOM mitigation** — 0.16's bisection retry
    shrinks the batch on a recoverable failure; it doesn't roll a request's context
    once already down to a single request that still can't decode.
 

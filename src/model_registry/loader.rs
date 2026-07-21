@@ -19,6 +19,7 @@ pub(super) async fn load_model(
     let path = path.to_path_buf();
     let name = name.to_string();
     let max_batch_size = cfg.max_batch_size;
+    let max_queue_depth = cfg.max_queue_depth;
     let max_prefill_chunk = cfg.max_prefill_chunk;
     // None disables context rolling; Some(n_keep) enables it, preserving n_keep head tokens.
     let context_shift = cfg.context_shift.then_some(cfg.context_keep);
@@ -84,7 +85,11 @@ pub(super) async fn load_model(
     tracing::info!(model = %name, backend = %model.active_backend(), "model ready");
     let kv_cache = Arc::new(KVCacheManager::from_kv_tokens(kv_tokens, block_size));
 
-    let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
+    let scheduler = Arc::new(Scheduler::with_max_queue_depth(
+        kv_cache.clone(),
+        max_batch_size,
+        max_queue_depth,
+    ));
     let engine = Arc::new(InferenceEngine::new(
         model,
         scheduler,

@@ -264,6 +264,7 @@ mod tests {
             models_dir: dir.to_path_buf(),
             max_models,
             max_batch_size: 4,
+            max_queue_depth: 0,
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
@@ -464,7 +465,7 @@ mod tests {
         // a deterministic "busy" state (no race with the stub finishing it).
         entry.loop_handle.abort();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        entry.engine.submit_request(InferenceRequest::new(
+        let _ = entry.engine.submit_request(InferenceRequest::new(
             1,
             vec![1, 2, 3],
             4,

@@ -138,8 +138,18 @@ impl InferenceEngine {
             .unwrap_or_else(|| ("<think>".to_string(), "</think>".to_string()))
     }
 
-    pub fn submit_request(&self, req: InferenceRequest) {
-        self.scheduler.submit(req);
+    pub fn submit_request(
+        &self,
+        req: InferenceRequest,
+    ) -> Result<(), crate::scheduler::SubmitError> {
+        self.scheduler.submit(req)
+    }
+
+    /// Record a rejected request in the `requests_rejected_total{reason}` metric.
+    pub fn record_rejection(&self, reason: &str) {
+        if let Some(m) = &self.metrics {
+            m.requests_rejected_total.with_label_values(&[reason]).inc();
+        }
     }
 
     pub fn next_request_id(&self) -> u64 {

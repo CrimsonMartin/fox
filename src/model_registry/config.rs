@@ -14,6 +14,9 @@ pub struct RegistryConfig {
     pub models_dir: PathBuf,
     pub max_models: usize,
     pub max_batch_size: usize,
+    /// Maximum requests allowed to wait in the scheduler queue before new ones are
+    /// rejected (0 = unbounded).
+    pub max_queue_depth: usize,
     /// Max prompt tokens submitted per request per prefill step (0 = single-shot).
     /// Chunking a long prompt lets it interleave with other requests' decode steps.
     pub max_prefill_chunk: usize,

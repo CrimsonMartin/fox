@@ -27,6 +27,7 @@ pub fn make_test_registry(
         models_dir: dir.to_path_buf(),
         max_models: 4,
         max_batch_size: 4,
+        max_queue_depth: 0,
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
@@ -68,6 +69,58 @@ pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<Engi
     (state, entry)
 }
 
+/// Build a test `AppState` with one preloaded stub model and a capped scheduler queue
+/// (`max_queue_depth`), for testing backpressure/429 behavior. Note this bypasses
+/// `RegistryConfig::max_queue_depth` (which only applies to models loaded through the
+/// registry's normal `get_or_load` path) — the cap is set directly on the test entry's
+/// scheduler via `EngineEntry::for_test_with_queue_depth`, same as every other
+/// `for_test*` fixture in this file.
+pub fn make_test_state_with_queue_depth(
+    name: &str,
+    dir: &std::path::Path,
+    max_queue_depth: usize,
+) -> (AppState, Arc<EngineEntry>) {
+    std::fs::write(dir.join(format!("{name}.gguf")), b"").unwrap();
+    let cfg = RegistryConfig {
+        models_dir: dir.to_path_buf(),
+        max_models: 4,
+        max_batch_size: 4,
+        max_queue_depth: 0,
+        max_prefill_chunk: 0,
+        context_shift: false,
+        context_keep: 0,
+        speculative: false,
+        spec_ngram: 2,
+        spec_draft_len: 4,
+        max_context_len: Some(512),
+        block_size: 16,
+        gpu_memory_bytes: 4 * 1024 * 1024,
+        gpu_memory_fraction: 0.9,
+        metrics: None,
+        keep_alive_secs: 0,
+        type_k: 1,
+        type_v: 1,
+        main_gpu: 0,
+        split_mode: 1,
+        tensor_split: vec![],
+        moe_offload_cpu: false,
+    };
+    let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
+    let entry = EngineEntry::for_test_with_queue_depth(name, max_queue_depth);
+    registry.preload_for_test(name, entry.clone());
+    let state = AppState {
+        registry,
+        primary_model: name.to_string(),
+        system_prompt: None,
+        started_at: 0,
+        models_dir: dir.to_path_buf(),
+        digest_cache: Arc::new(Mutex::new(HashMap::new())),
+        hf_token: None,
+        api_key: None,
+    };
+    (state, entry)
+}
+
 /// Build a test `AppState` with speculative decoding enabled (StubModel emits two
 /// tokens per speculative step). Exercises the engine's multi-token commit path.
 pub fn make_test_state_speculative(
@@ -79,6 +132,7 @@ pub fn make_test_state_speculative(
         models_dir: dir.to_path_buf(),
         max_models: 4,
         max_batch_size: 4,
+        max_queue_depth: 0,
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
@@ -123,6 +177,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         models_dir: dir.to_path_buf(),
         max_models: 4,
         max_batch_size: 4,
+        max_queue_depth: 0,
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,

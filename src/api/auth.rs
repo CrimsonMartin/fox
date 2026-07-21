@@ -60,6 +60,7 @@ mod tests {
                     models_dir: PathBuf::from("/tmp"),
                     max_models: 1,
                     max_batch_size: 1,
+                    max_queue_depth: 0,
                     max_prefill_chunk: 0,
                     context_shift: false,
                     context_keep: 0,

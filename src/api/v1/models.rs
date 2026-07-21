@@ -156,6 +156,7 @@ mod tests {
             models_dir: dir.path().to_path_buf(),
             max_models: 4,
             max_batch_size: 4,
+            max_queue_depth: 0,
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,

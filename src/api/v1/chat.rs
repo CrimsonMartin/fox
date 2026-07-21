@@ -160,13 +160,18 @@ pub async fn chat_completions(
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry.engine.submit_request(InferenceRequest::new(
+    if let Err(e) = entry.engine.submit_request(InferenceRequest::new(
         req_id,
         prompt_tokens,
         max_tokens,
         sampling,
         tx,
-    ));
+    )) {
+        entry
+            .engine
+            .record_rejection(crate::api::error::rejection_reason_label(&e));
+        return AppError::from(e).into_response();
+    }
 
     let has_tools = eff_tools.is_some();
     let allow_parallel = req.parallel_tool_calls.unwrap_or(true);

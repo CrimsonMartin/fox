@@ -102,11 +102,11 @@ Datacenter-scale features, outside fox's single-node niche.
 
 | Capability | vLLM | fox | Kind |
 |---|---|---|---|
-| OOM recovery (retry, degrade context) | ✅ | ❌ | achievable |
-| Backpressure / rate-limit / max-queue | ✅ | ⚠️/❌ | achievable |
+| OOM recovery (retry, degrade context) | ✅ | ❌ | achievable — 0.16 added fail-fast (queue-depth cap → 429) but not retry/degrade |
+| Backpressure / rate-limit / max-queue | ✅ | ✅ (0.16) | — |
 | Request priority (priority preemption) | ✅ | ⚠️ LIFO preemption only, no priority | achievable |
 | KV offload / swap to CPU | ✅ | ⚠️ `--swap-fraction` placeholder, unimplemented | achievable |
-| Tool calling with per-model parsers | ✅ | ⚠️ generic prompt-based | achievable |
+| Tool calling with per-model parsers | ✅ | ⚠️ Hermes (0.16); Mistral/Llama3 still generic | achievable |
 
 fox already has: continuous batching, disconnect cancellation, LIFO preemption,
 context rolling (0.13), OpenAI + Ollama compat, Prometheus metrics, auth, health.
@@ -127,13 +127,28 @@ Shipped since this analysis was written:
 - ✅ **Speculative decoding — n-gram / prompt-lookup** (0.15) — exact (byte-identical
   output), off by default; 1.78× on repetitive output at 98% acceptance. Draft-model
   speculation is a later extension reusing the same verify/accept machinery.
+- ✅ **Backpressure / max-queue + fail-fast** (0.16) — `--max-queue-depth` rejects new
+  requests with HTTP 429 once the scheduler queue is full; a real engine failure
+  (`StopReason::EngineError`) is now reported as an error instead of silently closing
+  the response channel (which used to read as a fake empty 200). Automatic
+  retry/context-degradation is still open — see the OOM recovery row above.
+- ✅ **Hermes native tool-call parser** (0.16) — `tools` threaded into the Jinja render
+  context, auto-detected from the model's own template (`--tool-call-parser
+  auto\|generic\|hermes`); models without a native tool-use template keep the original
+  generic prompt-based JSON parsing as the fallback.
+- ✅ **Draft-model speculation** (0.16) — `--draft-model <name>` generalizes the 0.15
+  n-gram win beyond context-echoing output via a second resident model; vocab
+  compatibility is a hard load-time check, golden-verified exact via self-speculation.
+  Loaded eagerly, no eviction pairing/VRAM budgeting (simple-scope decision, see
+  `docs/design/speculative-roadmap.md` Level 2).
 
 Still open, in priority order:
 
-1. **OOM recovery + backpressure / max-queue** — makes it a real server under overload.
-2. **Per-model tool-call parsers** — today's tool calling is generic prompt-based.
-3. **Draft-model speculation** — generalizes the 0.15 n-gram win beyond context-echoing
-   output, at the cost of a second resident model.
+1. **OOM recovery — automatic retry / context degradation** — 0.16 only added the
+   fail-fast half (reject cleanly); actually recovering a request after a real
+   engine failure is still open.
+2. **Mistral / Llama3 tool-call parsers** — generalizes the 0.16 Hermes parser to more
+   model families.
 
 ## What NOT to chase (outside the niche)
 

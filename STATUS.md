@@ -322,9 +322,15 @@ requests that get a fresh pool allocation; a block-level prefix-cache *hit*
 inherits the donated request's old seq_id as-is, which drifts non-consecutive
 under heavy cache reuse — realistically common (any deployment sharing a
 system prompt across conversations) — degrading throughput back toward the
-pre-fix baseline. Not fixed yet (needs migrating KV data to a fresh seq_id
-on cache-hit via `llama_memory_seq_cp`, a real architecture change). Full
-evidence chain, including the abandoned "structural" theory, this
+pre-fix baseline. Not fixed yet — the obvious fix (migrate KV data to a
+fresh seq_id on cache-hit via `llama_memory_seq_cp`) was implemented and
+**crashes the server**: fox's non-unified KV cache makes every such
+migration a cross-stream copy, and `seq_cp` only supports cross-stream
+copies of the *entire* KV buffer, not the cached-prefix subrange this needs
+(`GGML_ASSERT(is_full)` in `vendor/llama.cpp/src/llama-kv-cache.cpp:518`).
+Reverted; needs a different mechanism (see `docs/design/rocm-benchmarking-2026-08.md`'s
+"Attempted fix" section for the ruled-out approach and untried alternatives).
+Full evidence chain, including the abandoned "structural" theory, this
 limitation, and the new `scripts/repeat_bench.sh` (multi-repetition,
 warmup, alternating-order, error-discarding — built after single ad-hoc
 runs proved too noisy to trust), in `docs/design/rocm-benchmarking-2026-08.md`;

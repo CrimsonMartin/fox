@@ -97,10 +97,16 @@ degrades throughput back toward the pre-fix baseline (confirmed: 5 sustained
 repetitions against one long-lived server settled at ~52.7 t/s, not the
 ~122-146 t/s single ad-hoc runs showed). This isn't just a benchmark
 artifact — any real deployment sharing a system prompt across concurrent
-conversations hits the same pattern. Not fixed here; needs the
-prefix-cache-hit path to migrate KV data to a fresh seq_id (via
-`llama_memory_seq_cp`) instead of reusing the donated one — see
-`docs/design/rocm-benchmarking-2026-08.md` for the full analysis.
+conversations hits the same pattern. **The obvious fix was attempted and
+ruled out**: migrating the prefix-cache-hit request's KV data to a fresh
+seq_id via `llama_memory_seq_cp` crashes the server —
+`GGML_ASSERT(is_full)` in `llama-kv-cache.cpp` rejects the partial
+(cached-tokens-only) cross-stream copy this needs; fox's non-unified KV
+cache (`kv_unified = false`) only supports cross-stream `seq_cp` of the
+*entire* KV buffer, not a subrange (see the beam-search analysis in §2 for
+the same underlying constraint from a different angle). Reverted; not
+fixed. See `docs/design/rocm-benchmarking-2026-08.md`'s "Attempted fix"
+section for the full analysis and untried alternatives.
 
 ## 2. Advanced decoding — **the highest-ROI gaps**
 
@@ -147,9 +153,13 @@ investigated:
   siblings, repeated every decode step as beams are pruned and re-spawned. At the
   llama.cpp level, fox runs with `kv_unified = false` (the default), under which every
   cross-sequence `llama_memory_seq_cp` is the expensive, real-buffer-copy path, not a
-  cheap metadata-only one — making per-step beam-forking cheap would additionally need
-  a `kv_unified = true` architecture change with its own side effects on fox's
-  existing context-sizing math.
+  cheap metadata-only one — and, confirmed directly (2026-08-01, see §1's prefix-cache
+  caveat): not just expensive but **only supported for the full buffer**,
+  `GGML_ASSERT(is_full)` in `llama-kv-cache.cpp` rejects copying any narrower
+  subrange. Beam-forking a live sequence's KV (a subrange, not the whole
+  context) would hit the exact same assert. Making per-step beam-forking work
+  at all would additionally need a `kv_unified = true` architecture change
+  with its own side effects on fox's existing context-sizing math.
 - **A *naive* implementation (each beam as an independent request, re-ranked between
   coarse rounds)** would just be a more expensive, weaker variant of the `n`/`best_of`
   fan-out already shipped in 0.18 — no per-token joint re-ranking, redundant prefill

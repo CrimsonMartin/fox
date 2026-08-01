@@ -13,6 +13,11 @@ with the evidence that overturned it, since it was briefly committed to
 `vllm-gap-analysis.md`/`STATUS.md` before being corrected. Related:
 [`engine-capabilities-checklist.md`](engine-capabilities-checklist.md)'s
 target-machine section, [`vllm-gap-analysis.md`](vllm-gap-analysis.md) §1.
+**Caveat**: this holds for low-prefix-cache-reuse traffic only — under
+sustained load with a shared system prompt (most real chat traffic),
+throughput degrades back toward the pre-fix baseline; see "Known
+limitation" and "Attempted fix" below, the latter of which rules out the
+obvious repair.
 
 ## Why this exists
 
@@ -344,14 +349,79 @@ conversations share a common system prompt hits this same pattern**, since
 that shared prefix is exactly the kind of content the block-level cache is
 designed to reuse.
 
-**Not fixed here** — a real fix needs the prefix-cache-hit path to hand the
-resuming request a **fresh**, densely-allocated seq_id instead of the
-donated one, migrating that sequence's KV data via llama.cpp's
-`llama_memory_seq_cp` (a real primitive, already used elsewhere in fox per
-`docs/design/reactive-context-rolling.md`'s survey of the sequence-primitive
-surface) — a genuine architecture change to the prefix-cache/seq_id
-interaction, not a one-line fix, and out of scope for this session. Left as
-the most important next step; see "What's next."
+**Not fixed here** — see the next section: the obvious fix (migrate via
+`llama_memory_seq_cp`) was attempted and **does not work** — it crashes the
+server. A real fix needs a different mechanism.
+
+## Attempted fix: migrate cache-hit requests to a fresh seq_id via `llama_memory_seq_cp` — crashes, reverted
+
+The natural fix for the limitation above is to give a prefix-cache-hit
+request a **fresh**, densely-allocated `seq_id` (via `Scheduler::
+try_pop_fresh_seq_id`) instead of the donated one, copying the cached
+prefix's KV data across with `llama_memory_seq_cp` before this step's
+prefill/decode runs — mirroring how `Model::roll_context` already does FFI
+work at the engine layer. This was fully implemented (new
+`batch::PrefixHitMigration`, `Scheduler::try_pop_fresh_seq_id`/
+`finalize_seq_migration`, a migration loop in `run_loop` calling the
+already-existing `Model::copy_sequence_range`) and passed `cargo fmt`/
+`clippy`/the full stub test suite, including a new unit test exercising the
+migration end-to-end at the scheduler level.
+
+**It crashed the server on the very first prefix-cache hit** when validated
+against a real ROCm build under `scripts/repeat_bench.sh`'s sustained-load
+test (the same test that surfaced the original limitation):
+
+```
+/app/vendor/llama.cpp/src/llama-kv-cache.cpp:518: GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers") failed
+```
+
+Root cause, confirmed by reading `vendor/llama.cpp/src/llama-kv-cache.cpp`
+directly (`llama_kv_cache::seq_cp`, ~line 463): fox's KV cache is
+**non-unified** (`n_stream = n_seq_max > 1`, one stream per seq_id — this is
+the same setting the seq_id-ordering fix above depends on for
+`split_equal` to batch concurrent sequences at all). When the source and
+destination seq_ids live in different streams (`s0 != s1` — true for any
+migration to a genuinely different seq_id, by construction), `seq_cp`
+takes the "cross-stream" path, which only supports copying the **entire**
+KV buffer (`p0`/`p1` must span `[0, get_size())`, i.e. the full `n_ctx`,
+not just the `cached_tokens` prefix) — `GGML_ASSERT(is_full)` rejects
+anything narrower, including the exact "copy just the cached prefix"
+partial range this fix needs. The same-stream fast path (cheap metadata-only
+remap, no assert) exists but is unreachable here: two different seq_ids in
+a non-unified cache are never in the same stream by construction, so a
+migration to a fresh id always takes the cross-stream path. This is not a
+fox bug or a version-specific quirk — it's how `seq_cp` is documented to
+behave for split/non-unified caches in fox's vendored llama.cpp commit, and
+the comment `// TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]` right above it
+suggests upstream is aware partial cross-stream copies aren't supported yet
+either. Confirmed via the "verify against upstream before calling something
+structural" lesson from this doc's own earlier retraction — this time the
+upstream check confirmed the limitation is real, not a fox misuse.
+
+**Reverted in full** (`src/scheduler/batch.rs`, `src/scheduler/mod.rs`,
+`src/scheduler/schedule.rs`, `src/engine/run.rs`) — the crash makes this
+strictly worse than the known limitation it tried to fix, so nothing from
+this attempt should ship. `Model::copy_sequence_range`/`supports_seq_copy`
+themselves are untouched and still exist as a capability probe only (as
+before this attempt); they should not be invoked as a real per-request KV
+migration mechanism against fox's current non-unified KV cache without a
+different approach to the copy itself.
+
+**What a real fix would need instead** (not attempted yet): since
+`llama_memory_seq_cp` cannot do a partial cross-stream copy, options are
+(a) avoid the copy entirely — treat a prefix-cache hit whose donated
+`seq_id` falls outside the pool's current dense/low range as a miss instead
+(recompute the ~16-token prefix rather than reuse it), trading a small,
+bounded amount of recompute for keeping seq_ids dense; (b) a full-buffer
+`seq_cp` (accepting the cost of copying the entire per-stream KV buffer,
+not just the cached prefix) if that cost turns out to be acceptable at this
+model's context size — unmeasured, and likely not acceptable at large
+`n_ctx`; (c) switch to a unified KV cache (`n_stream = 1`) for the
+non-batched dimension, if `split_equal`'s consecutive-seq_id requirement
+turns out not to actually need `n_stream > 1` — unconfirmed, needs reading
+`llama-batch.cpp`/`llama-kv-cache.cpp` more closely than this session did.
+None of these were evaluated in depth; this is a genuine open design
+problem, not a known-good approach waiting to be typed in.
 
 ## `n_batch`/`n_ubatch` experiment (tried, reverted, unrelated finding)
 
@@ -375,11 +445,13 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
 
 ## What's next
 
-1. **Highest priority**: fix the prefix-cache/seq_id interaction above — give
-   prefix-cache hits a fresh, densely-allocated seq_id (via
-   `llama_memory_seq_cp` to migrate the KV data) instead of inheriting the
-   donated one. This is what stands between "fixed in the easy case" and
-   "fixed for realistic shared-system-prompt traffic," which is the more
+1. **Highest priority**: fix the prefix-cache/seq_id interaction above. The
+   obvious approach (migrate via `llama_memory_seq_cp`) is **ruled out** —
+   see "Attempted fix" above, it crashes on fox's non-unified KV cache. Needs
+   one of that section's three untried alternatives (skip-cache-on-stale-id,
+   full-buffer copy, or unified KV cache), evaluated for cost/feasibility
+   before implementing. This is what stands between "fixed in the easy case"
+   and "fixed for realistic shared-system-prompt traffic," which is the more
    common real-world pattern.
 2. Close the remaining gap to `llama-server`'s 173 t/s (fox is at ~70-85% of
    it now, up from ~30-35% before these fixes, *in the low-prefix-cache-reuse
@@ -427,6 +499,7 @@ kept demonstrating.
 | **The main fix** — dense/ascending `seq_id` allocation | `src/scheduler/mod.rs` (`seq_id_pool`, now a min-heap) |
 | **The main fix** — batch emitted in ascending `seq_id` order | `src/engine/model/llama_cpp/batch.rs` (`do_decode_batch`) |
 | **Known limitation** — prefix-cache hits inherit a stale seq_id | `src/scheduler/schedule.rs` (prefix-hit admission path, `req.kv_seq_id = hit.seq_id`), `src/scheduler/mod.rs` (`try_insert_prefix`) |
+| **Ruled-out fix** — `seq_cp` can't do a partial cross-stream KV copy | `vendor/llama.cpp/src/llama-kv-cache.cpp:463` (`llama_kv_cache::seq_cp`, `is_full` assert at line 518) |
 | **The sampling fix** — adaptive candidate selection | `src/engine/model/sampling.rs` (`sample_token`) |
 | **The sampling fix** — skip logits copy when unneeded | `src/engine/model/mod.rs` (`needs_logits`), `src/engine/run.rs`, `src/engine/model/llama_cpp/batch.rs` |
 | OpenAI vs Ollama sampling defaults (`top_k=0` vs `40`) | `src/api/shared/sampling_defaults.rs` |

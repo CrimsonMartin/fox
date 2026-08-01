@@ -188,6 +188,7 @@ fn golden_chunked_prefill_matches_single_shot() {
         logit_bias: None,
         multimodal: None,
         lora: None,
+        needs_logits: false,
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -269,6 +270,7 @@ fn golden_context_shift_continues_past_n_ctx() {
         logit_bias: None,
         multimodal: None,
         lora: None,
+        needs_logits: false,
     };
 
     // Prefill the prompt on seq 0.
@@ -340,6 +342,7 @@ fn golden_grammar_constrains_output() {
         logit_bias: None,
         multimodal: None,
         lora: None,
+        needs_logits: false,
     };
 
     // Prefill seeds the grammar sampler and yields the first constrained token.
@@ -423,6 +426,7 @@ fn golden_json_schema_constrains_to_valid_json() {
         logit_bias: None,
         multimodal: None,
         lora: None,
+        needs_logits: false,
     };
 
     let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
@@ -497,6 +501,7 @@ fn golden_min_tokens_suppresses_eog() {
         logit_bias: None,
         multimodal: None,
         lora: None,
+        needs_logits: false,
     };
 
     // Prefill must also respect min_tokens (generated_tokens == 0 < floor).
@@ -559,6 +564,7 @@ fn golden_speculative_matches_greedy() {
             logit_bias: None,
             multimodal: None,
             lora: None,
+            needs_logits: false,
         }
     };
 
@@ -677,6 +683,7 @@ fn golden_draft_model_speculative_matches_greedy() {
             logit_bias: None,
             multimodal: None,
             lora: None,
+            needs_logits: false,
         }
     };
 
@@ -778,6 +785,7 @@ fn golden_prefix_reuse_after_trim() {
                 logit_bias: None,
                 multimodal: None,
                 lora: None,
+                needs_logits: false,
             }
         };
 

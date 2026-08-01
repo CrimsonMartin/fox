@@ -336,6 +336,7 @@ impl InferenceEngine {
                 logit_bias: r.sampling.logit_bias.clone(),
                 multimodal: r.multimodal.clone(),
                 lora: r.lora.clone(),
+                needs_logits: r.sampling.logprobs.is_some(),
             })
             .collect();
 
@@ -437,6 +438,7 @@ impl InferenceEngine {
                 logit_bias: r.sampling.logit_bias.clone(),
                 multimodal: r.multimodal.clone(),
                 lora: r.lora.clone(),
+                needs_logits: r.sampling.logprobs.is_some(),
             })
             .collect();
         let model = self.model.clone();

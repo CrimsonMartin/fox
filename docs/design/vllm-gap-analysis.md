@@ -36,50 +36,56 @@ it's a rewrite. So the gaps below are tagged:
 | Chunked prefill | ✅ | ✅ (0.13) | — |
 | CUDA graphs / `torch.compile` | ✅ | ❌ (llama.cpp's domain) | structural |
 | FlashAttention / FlashInfer selection | ✅ | ⚠️ FA=AUTO via llama.cpp | structural |
-| Multi-sequence decode GEMV batching (quantized weights, consumer GPU) | ✅ custom fused batched kernels | ⚠️ scheduler batches correctly, but llama.cpp's `mul_mat_vec_q` doesn't consistently reach full batch width — investigated and closed as structural (2026-08-01), see below | **structural** |
 
 Behaviourally (interleaving, queueing, fairness) fox can match vLLM; on raw GPU
 throughput it cannot, and that's fine — different hardware target.
 
-**Multi-sequence decode GEMV batching — investigated on real target hardware
-(AMD Radeon 890M, ROCm), closed as structural, not a fox defect
-(2026-08-01).** This came out of head-to-head benchmarking against Ollama on
-this machine (`docs/design/rocm-benchmarking-2026-08.md` has the full
-evidence chain) — fox trails Ollama by roughly 2x aggregate throughput at
-4-way concurrency despite matching it at solo/1-way concurrency. Traced
-through every layer fox actually owns, each ruled out in turn:
+**fox-vs-Ollama concurrent throughput gap on the target machine — investigated
+and fixed (2026-08-01).** Head-to-head benchmarking against Ollama on this
+machine (AMD Radeon 890M, ROCm) found fox trailing by roughly 2x aggregate
+throughput at 4-way concurrency despite matching it solo. Full evidence
+chain in `docs/design/rocm-benchmarking-2026-08.md`, including a real dead
+end (an earlier pass wrongly concluded this was a structural
+llama.cpp/ggml-cuda kernel limit — that conclusion didn't survive a direct
+comparison against vanilla `llama-server`, which had no trouble reaching
+173 t/s on the identical benchmark, proving the compute path itself is
+fine). Two real causes were found in **fox's own code**:
 
-- fox's scheduler admission/pipelining: **not the cause** — instrumented and
-  measured directly (a temporary per-tick log of prefill/decode batch sizes,
-  reverted after use). Average realized decode batch width is **~3.85 of a
-  possible 4**, identical within noise on both CPU and ROCm backends. The
-  scheduler keeps the batch essentially full regardless of backend speed.
-- fox's `llama_batch` construction (`do_decode_batch`): **not the cause** —
-  builds one combined batch per step and calls `llama_decode` once, standard
-  continuous batching.
-- llama.cpp's ubatch-splitter selection (`split_equal` vs `split_simple`):
-  **not the cause** — confirmed via direct instrumentation that `split_equal`
-  (the correct, fully-batching path) runs, not `split_simple`.
-- ROCm library version, and an llama.cpp version/patch gap vs Ollama's
-  bundled build: **not the cause** — both tested directly (pinning to
-  Ollama's exact ROCm 7.2, diffing Ollama's pinned llama.cpp commit and its
-  carried patches against fox's), no throughput change either way.
+1. **Sampling**: fox's OpenAI-surface default is `top_k = 0` (disabled,
+   deliberately matching real OpenAI's API, which has no `top_k` parameter
+   — see `sampling_defaults.rs`), which forced every sampled token through
+   a full sort plus a doubled `exp()` pass over the entire ~128K-token
+   vocabulary (~4.35ms/request). Ollama/`llama-server` always default
+   `top_k = 40` regardless of API surface, so they never pay this cost.
+   Fixed in `src/engine/model/sampling.rs`: an adaptively-expanding
+   candidate pool (via `select_nth_unstable_by`) satisfies `top_p`/`min_p`
+   without sorting or exponentiating the full vocab in the common case —
+   provably identical output distribution, no default changed. A second,
+   smaller win: `src/engine/model/mod.rs`'s new `needs_logits` flag skips
+   copying the full vocab logits vector when only `logprobs` would read it.
+2. **`seq_id` allocation order — the bigger cause.** `src/scheduler/mod.rs`'s
+   `seq_id_pool` was a LIFO stack (essentially arbitrary ID order across
+   concurrent requests), and `do_decode_batch` emitted the `llama_batch` in
+   scheduler-admission order. But llama.cpp's `split_equal` splitter (used
+   whenever the KV cache is non-unified — i.e. always, here) only groups
+   sequences into one ubatch when their seq_ids are strictly consecutive
+   and increasing in emission order (`llama-batch.cpp`). Non-monotonic IDs
+   silently split a real 4-wide decode batch into four separate 1-token GPU
+   calls — genuine kernel-level serialization, invisible from fox's own
+   scheduler metrics (which only see "4 requests decoding," never how
+   llama.cpp's splitter grouped them). This is what the doc's own earlier
+   `rocprofv3` profiling had already surfaced (`ncols_dst` averaging ~1.64
+   of a possible 4) without it being recognized as the mechanism at the
+   time. Fixed by making `seq_id_pool` a min-heap (always hands out the
+   lowest free ID, keeping concurrent requests' IDs dense and ascending)
+   and emitting the batch in ascending-`seq_id` order.
 
-What *is* confirmed, via `rocprofv3` kernel profiling: even though the
-scheduler hands the model a ~4-wide batch almost every step, the actual GPU
-kernel dispatch for the FFN/QKV projection matmuls (`mul_mat_vec_q`, the
-quantized-weight GEMV path) averages only **~1.64 of that possible width of
-4** — a gap between what fox (correctly) submits and what llama.cpp's
-ggml-cuda/HIP backend actually executes as one fused call. This is the same
-"fox rides llama.cpp's kernels" ceiling as PagedAttention and FlashAttention
-above: vLLM owns custom fused multi-sequence kernels for exactly this case;
-llama.cpp's quantized decode-GEMV path does not consistently fuse across
-sequences the way a datacenter-oriented kernel would. Fixing it would mean
-patching or forking ggml-cuda/HIP — directly against fox's own architecture
-(wrap llama.cpp, don't own its kernels) — so it's closed here as structural,
-not tracked as fox backlog. If a future llama.cpp release changes this
-kernel's batching behavior, revisit; until then this is the expected ceiling
-on GPU backends for this workload shape.
+**Net effect: ~46-52 t/s → ~122-146 t/s** on the standard benchmark (run
+twice to confirm, both far above every pre-fix number) — fox now matches or
+beats Ollama's ~110-148 t/s on this exact benchmark, and reaches ~70-85% of
+vanilla `llama-server`'s 173 t/s, up from ~30-35% before these fixes. The
+sampling fix alone only closed part of the gap (~58-66 t/s, still roughly
+half of Ollama) — both fixes were needed together to get here.
 
 ## 2. Advanced decoding — **the highest-ROI gaps**
 

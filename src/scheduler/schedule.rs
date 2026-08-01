@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::sync::atomic::Ordering;
 
 use tracing::{debug, info};
@@ -75,7 +76,7 @@ impl Scheduler {
                 );
             }
             if req.kv_seq_id >= 0 {
-                pool.push(req.kv_seq_id);
+                pool.push(Reverse(req.kv_seq_id));
             }
         }
         *running = still_running;
@@ -184,7 +185,7 @@ impl Scheduler {
                 if self.kv_cache.can_allocate(needed) {
                     match self.kv_cache.allocate(needed) {
                         Ok(ids) => {
-                            let Some(seq_id) = pool.pop() else {
+                            let Some(Reverse(seq_id)) = pool.pop() else {
                                 // Defensive: pool should be non-empty (checked at loop start).
                                 self.kv_cache.free_blocks(&ids);
                                 waiting.push_front(req);
@@ -445,7 +446,7 @@ impl Scheduler {
     /// Return a prefix seq_id back to the pool after the engine has copied and cleared it.
     pub fn return_prefix_seq_id(&self, seq_id: i32) {
         if let Ok(mut pool) = self.seq_id_pool.lock() {
-            pool.push(seq_id);
+            pool.push(Reverse(seq_id));
         }
     }
 

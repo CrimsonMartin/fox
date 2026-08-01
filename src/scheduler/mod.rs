@@ -13,7 +13,8 @@ pub use batch::{
     Token, TokenLogprob, TopLogprob,
 };
 
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -32,7 +33,19 @@ pub struct Scheduler {
     /// Notified when a new request is submitted, waking the engine loop.
     work_notify: tokio::sync::Notify,
     /// Pool of available llama.cpp sequence IDs (0..max_batch_size).
-    pub(super) seq_id_pool: std::sync::Mutex<Vec<i32>>,
+    ///
+    /// A min-heap, not a stack, and that is load-bearing for throughput: it always
+    /// hands out the *lowest* free ID, so N concurrent requests occupy IDs 0..N-1
+    /// densely. llama.cpp's `split_equal` (the splitter used whenever the KV cache
+    /// is non-unified, i.e. `n_stream > 1`) only groups sequences into one ubatch
+    /// while their seq_ids are *consecutive and increasing*
+    /// (`llama-batch.cpp`: `batch.seq_id[i][0] == last_seq_id + 1`). Sparse or
+    /// descending IDs make it split a 4-sequence decode batch into four 1-token
+    /// ubatches, collapsing the GPU matmul to `ncols_dst=1`. This mirrors how
+    /// `llama-server` assigns `slot.id = i`.
+    /// The batch itself must also be *emitted* in ascending seq_id order — see
+    /// `do_decode_batch` in `engine/model/llama_cpp/batch.rs`.
+    pub(super) seq_id_pool: std::sync::Mutex<BinaryHeap<Reverse<i32>>>,
     /// Prefix cache: completed-request KV data keyed by hash(prompt_tokens).
     /// LruCache provides O(1) access and automatic LRU ordering for future eviction.
     /// Lock ordering: always acquire `running_batch` BEFORE `prefix_cache`.
@@ -90,7 +103,7 @@ impl Scheduler {
         max_batch_size: usize,
         max_queue_depth: usize,
     ) -> Self {
-        let pool: Vec<i32> = (0..max_batch_size as i32).collect();
+        let pool: BinaryHeap<Reverse<i32>> = (0..max_batch_size as i32).map(Reverse).collect();
         // Reserve up to 1/4 of the batch size for prefix cache entries (minimum 1).
         let prefix_cache_max = (max_batch_size / 4).max(1);
         Self {
@@ -367,7 +380,7 @@ mod tests {
 
             // Every seq_id lives in exactly one place, and all TOTAL_SEQ are present.
             let mut seen: HashSet<i32> = HashSet::new();
-            for &s in pool.iter() {
+            for &Reverse(s) in pool.iter() {
                 assert!(seen.insert(s), "{label}: seq {s} duplicated in pool");
             }
             for r in running.iter() {
@@ -491,7 +504,7 @@ mod tests {
             let mut pool = sched.seq_id_pool.lock().unwrap();
             while let Some((_h, e)) = pcache.pop_lru() {
                 kv.free_blocks(&e.block_ids);
-                pool.push(e.seq_id);
+                pool.push(Reverse(e.seq_id));
             }
         }
         assert_eq!(

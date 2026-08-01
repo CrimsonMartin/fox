@@ -256,6 +256,11 @@ pub struct InferenceRequestForModel {
     /// this value and call `llama_set_adapters_lora` once per group, since the
     /// adapter set is a property of the whole `llama_context`, not a sequence.
     pub lora: Option<crate::scheduler::LoraSelection>,
+    /// Whether the caller asked for `logprobs` on this request. When `false`, the
+    /// model layer skips copying the full vocab-sized logits vector into `Logits`
+    /// (a real per-token cost — see `docs/design/rocm-benchmarking-2026-08.md`) since
+    /// nothing downstream will read it.
+    pub needs_logits: bool,
 }
 
 // ---------------------------------------------------------------------------

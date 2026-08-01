@@ -411,7 +411,12 @@ impl LlamaCppModel {
             } else {
                 sample_greedy(logits_slice)
             };
-            let values: Vec<f32> = logits_slice.to_vec();
+            let needs_logits = req.map(|r| r.needs_logits).unwrap_or(false);
+            let values: Vec<f32> = if needs_logits {
+                logits_slice.to_vec()
+            } else {
+                Vec::new()
+            };
             results.push(PrefillStep {
                 req_id,
                 prefill_pos: new_pos,
@@ -527,7 +532,30 @@ impl LlamaCppModel {
         let n_tokens = requests.len() as i32;
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
 
-        for (batch_slot, req) in requests.iter().enumerate() {
+        // Emit the batch in ascending kv_seq_id order. llama.cpp's `split_equal`
+        // (used for every decode whenever the KV cache is non-unified, i.e.
+        // `n_stream > 1` — see `llama-kv-cache.cpp`'s
+        // `n_stream == 1 ? split_simple : split_equal`) walks the batch in order and
+        // only keeps growing the current ubatch while
+        // `batch.seq_id[i][0] == last_seq_id + 1` (`llama-batch.cpp`). Emitting in
+        // scheduler-admission order instead means a 4-sequence decode batch is split
+        // into four 1-token ubatches, and the GPU matmul degrades to `ncols_dst=1` —
+        // real batching on fox's side, none on llama.cpp's. Combined with the
+        // scheduler's min-first seq_id pool (which keeps the live IDs dense), this
+        // hands llama.cpp one full-width ubatch, matching what `llama-server` gets
+        // from iterating its slots in `slot.id` order.
+        //
+        // `order` maps batch position -> index into `requests`/`req_ids`; the logits
+        // read below inverts it via `slot_of` so the returned order is unchanged.
+        let mut order: Vec<usize> = (0..requests.len()).collect();
+        order.sort_by_key(|&i| requests[i].kv_seq_id);
+        let mut slot_of = vec![0usize; requests.len()];
+        for (batch_slot, &orig_idx) in order.iter().enumerate() {
+            slot_of[orig_idx] = batch_slot;
+        }
+
+        for (batch_slot, &orig_idx) in order.iter().enumerate() {
+            let req = &requests[orig_idx];
             let input_token = req
                 .last_token
                 .or_else(|| req.prompt_tokens.last().copied())
@@ -597,7 +625,10 @@ impl LlamaCppModel {
 
         for (out_idx, &req_id) in req_ids.iter().enumerate() {
             let req = requests.get(out_idx);
-            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, out_idx as i32) };
+            // Undo the ascending-seq_id emission order: this request's logits live at
+            // the batch position it was written to, not at its index in `req_ids`.
+            let batch_slot = slot_of.get(out_idx).copied().unwrap_or(out_idx);
+            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, batch_slot as i32) };
             if logits_ptr.is_null() {
                 results.push((req_id, Logits::new(vec![], self.eos_token)));
                 continue;
@@ -609,7 +640,15 @@ impl LlamaCppModel {
             } else {
                 sample_greedy(logits_slice)
             };
-            let values: Vec<f32> = logits_slice.to_vec();
+            // Copying the full vocab-sized logits vector is only useful when the
+            // caller actually reads it (`logprobs`) — skip it otherwise, since
+            // it's a real per-token cost on real vocabs (128K+ entries).
+            let needs_logits = req.map(|r| r.needs_logits).unwrap_or(false);
+            let values: Vec<f32> = if needs_logits {
+                logits_slice.to_vec()
+            } else {
+                Vec::new()
+            };
             results.push((req_id, Logits::new(values, sampled)));
         }
 

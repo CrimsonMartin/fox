@@ -125,28 +125,79 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         *l /= temperature;
     }
 
-    // 4. Top-K masking
+    // 4/5. Candidate selection + softmax, avoiding an O(n log n) sort of the
+    // entire vocab (128K+ entries on real models) whenever possible:
+    //
+    // - `top_k > 0`: `select_nth_unstable_by` partitions in O(n) average to find
+    //   the top-k set directly — softmax normalizes over just this set, which
+    //   matches the pre-refactor semantics of masking non-top-k logits to
+    //   `-inf` then softmaxing over everything (masked entries contribute
+    //   `exp(-inf) == 0` to the sum either way, so restricting the sum to the
+    //   survivors is numerically identical).
+    // - `top_k` disabled (0, OpenAI's default — see `sampling_defaults.rs`):
+    //   softmax must still normalize over the *whole* vocab (that's the actual
+    //   probability distribution being sampled from), so `max_l`/`exp_sum`
+    //   are computed with one full linear pass each — unavoidable, but only
+    //   `O(n)` and comparisons/`exp()`, not a sort. What *is* avoidable: fully
+    //   sorting/materializing probabilities for all 128K entries just to find
+    //   min-p/top-p's cutoff, when in practice a real model's softmax output
+    //   concentrates almost all its mass in a small head. So: adaptively grow
+    //   a by-logit candidate pool (64 → 256 → 1024 → …) via the same
+    //   `select_nth_unstable_by`, and stop as soon as it provably contains
+    //   enough of the distribution to make min-p/top-p truncation below give
+    //   the exact same result as if the whole vocab had been sorted — falling
+    //   back to the whole vocab only if a request's parameters genuinely
+    //   require it (e.g. `top_p` at/near `1.0`).
     let k = top_k as usize;
-    if k > 0 && k < logits.len() {
-        let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-        indexed.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-        let threshold = indexed[k - 1].1;
-        for l in &mut logits {
-            if *l < threshold {
-                *l = f32::NEG_INFINITY;
-            }
-        }
-    }
-
-    // 5. Softmax + sort by descending probability
     let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exp_sum: f32 = logits.iter().map(|&l| (l - max_l).exp()).sum();
-    let mut probs: Vec<(usize, f32)> = logits
+    let (mut candidates, exp_sum): (Vec<usize>, f32) = if k > 0 && k < logits.len() {
+        let mut idx: Vec<usize> = (0..logits.len()).collect();
+        idx.select_nth_unstable_by(k - 1, |&a, &b| {
+            logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal)
+        });
+        idx.truncate(k);
+        let sum: f32 = idx.iter().map(|&i| (logits[i] - max_l).exp()).sum();
+        (idx, sum)
+    } else {
+        let sum: f32 = logits.iter().map(|&l| (l - max_l).exp()).sum();
+        let top_p_needed = top_p.clamp(0.0, 1.0);
+        // `min_p × max_prob`; `max_prob == 1/sum` since the single highest logit
+        // (always inside any non-empty candidate pool) has probability
+        // `exp(max_l - max_l)/sum == 1/sum`.
+        let min_p_threshold = if min_p > 0.0 { min_p / sum } else { 0.0 };
+        let mut bound = 64usize.min(logits.len());
+        let idx = loop {
+            let mut cand: Vec<usize> = (0..logits.len()).collect();
+            if bound < logits.len() {
+                cand.select_nth_unstable_by(bound - 1, |&a, &b| {
+                    logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal)
+                });
+                cand.truncate(bound);
+            }
+            if bound >= logits.len() {
+                break cand;
+            }
+            let mut covered = 0.0f32;
+            let mut min_prob_in_pool = f32::INFINITY;
+            for &i in &cand {
+                let prob = (logits[i] - max_l).exp() / sum;
+                covered += prob;
+                min_prob_in_pool = min_prob_in_pool.min(prob);
+            }
+            let top_p_satisfied = covered >= top_p_needed;
+            let min_p_satisfied = min_p <= 0.0 || min_prob_in_pool < min_p_threshold;
+            if top_p_satisfied && min_p_satisfied {
+                break cand;
+            }
+            bound = (bound * 4).min(logits.len());
+        };
+        (idx, sum)
+    };
+    candidates.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal));
+    let mut probs: Vec<(usize, f32)> = candidates
         .iter()
-        .enumerate()
-        .map(|(i, &l)| (i, (l - max_l).exp() / exp_sum))
+        .map(|&i| (i, (logits[i] - max_l).exp() / exp_sum))
         .collect();
-    probs.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
 
     // 5b. Min-P: drop tokens whose probability is below `min_p × max_prob`. Probs are
     // sorted descending, so keep the leading run above the threshold (at least the top).

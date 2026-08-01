@@ -26,7 +26,7 @@ pub async fn ollama_generate(
     LenientJson(req): LenientJson<OllamaGenerateRequest>,
 ) -> axum::response::Response {
     let start = Instant::now();
-    let entry = match load_model_or_respond(&state.registry, &req.model).await {
+    let (entry, lora) = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
         Err(r) => return r,
     };
@@ -149,6 +149,9 @@ pub async fn ollama_generate(
     let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
     if let Some(chunks) = multimodal {
         inference_req = inference_req.with_multimodal(chunks);
+    }
+    if let Some(selection) = lora {
+        inference_req = inference_req.with_lora(selection);
     }
     if let Err(e) = entry.engine.submit_request(inference_req) {
         entry

@@ -39,6 +39,7 @@ fn golden_model() -> Option<LlamaCppModel> {
         &[],
         false,
         None, // mmproj_path
+        &[],  // lora_modules
     )
     .expect("FOX_GOLDEN_MODEL failed to load");
     Some(model)
@@ -186,6 +187,7 @@ fn golden_chunked_prefill_matches_single_shot() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -266,6 +268,7 @@ fn golden_context_shift_continues_past_n_ctx() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
     };
 
     // Prefill the prompt on seq 0.
@@ -336,6 +339,7 @@ fn golden_grammar_constrains_output() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
     };
 
     // Prefill seeds the grammar sampler and yields the first constrained token.
@@ -346,15 +350,13 @@ fn golden_grammar_constrains_output() {
     // constrained pieces. Same position bookkeeping as the context-shift golden:
     // the token is written at position `live` (ctx_len = live + 1).
     let mut gen: Vec<i32> = Vec::new();
-    let mut live = prompt.len();
-    for _ in 0..8 {
+    for live in (prompt.len()..).take(8) {
         if m.is_eog_token(next) {
             break;
         }
         gen.push(next);
         let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
         next = out[0].1.sampled_token;
-        live += 1;
     }
 
     let mut bytes = Vec::new();
@@ -420,20 +422,19 @@ fn golden_json_schema_constrains_to_valid_json() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
     };
 
     let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
     let mut next = pre[0].logits.clone().unwrap().sampled_token;
     let mut gen: Vec<i32> = Vec::new();
-    let mut live = prompt.len();
-    for _ in 0..64 {
+    for live in (prompt.len()..).take(64) {
         if m.is_eog_token(next) {
             break;
         }
         gen.push(next);
         let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
         next = out[0].1.sampled_token;
-        live += 1;
     }
     let mut bytes = Vec::new();
     for &t in &gen {
@@ -495,6 +496,7 @@ fn golden_min_tokens_suppresses_eog() {
         min_tokens: floor,
         logit_bias: None,
         multimodal: None,
+        lora: None,
     };
 
     // Prefill must also respect min_tokens (generated_tokens == 0 < floor).
@@ -505,8 +507,7 @@ fn golden_min_tokens_suppresses_eog() {
         "first token must not be EOG under min_tokens"
     );
 
-    let mut live = prompt.len();
-    for i in 1..floor {
+    for (live, i) in (prompt.len()..).zip(1..floor) {
         // generated_tokens = i (< floor) keeps EOG suppressed.
         let out = m
             .do_decode(&[1], &[mk_req(Some(next), live + 1, i)])
@@ -516,7 +517,6 @@ fn golden_min_tokens_suppresses_eog() {
             !m.is_eog_token(next),
             "token {i} must not be EOG while below the min_tokens floor"
         );
-        live += 1;
     }
 }
 
@@ -558,6 +558,7 @@ fn golden_speculative_matches_greedy() {
             min_tokens: 0,
             logit_bias: None,
             multimodal: None,
+            lora: None,
         }
     };
 
@@ -631,6 +632,7 @@ fn golden_draft_model_speculative_matches_greedy() {
         &[],
         false,
         None, // mmproj_path
+        &[],  // lora_modules
     )
     .expect("draft (self-speculation) load failed");
 
@@ -674,6 +676,7 @@ fn golden_draft_model_speculative_matches_greedy() {
             min_tokens: 0,
             logit_bias: None,
             multimodal: None,
+            lora: None,
         }
     };
 
@@ -774,6 +777,7 @@ fn golden_prefix_reuse_after_trim() {
                 min_tokens: 0,
                 logit_bias: None,
                 multimodal: None,
+                lora: None,
             }
         };
 
@@ -782,8 +786,7 @@ fn golden_prefix_reuse_after_trim() {
         .do_prefill(&[1], &[mk_req(prompt_a.clone(), None, 0, 0, 0)], 0)
         .unwrap();
     let mut next = pre[0].logits.clone().unwrap().sampled_token;
-    let mut live = prompt_a.len();
-    for _ in 0..2 {
+    for live in (prompt_a.len()..).take(2) {
         let out = m
             .do_decode(
                 &[1],
@@ -791,7 +794,6 @@ fn golden_prefix_reuse_after_trim() {
             )
             .unwrap();
         next = out[0].1.sampled_token;
-        live += 1;
     }
 
     // Donate: keep exactly the cached prefix [0, cached-1); the boundary token is

@@ -177,6 +177,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            lora_modules: Vec::new(),
+            primary_model: None,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(

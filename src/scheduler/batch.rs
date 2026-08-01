@@ -3,6 +3,21 @@
 use crate::kv_cache::PageTable;
 use tokio::sync::mpsc;
 
+/// A LoRA adapter selection: which named adapter (`--lora-modules`) to apply for
+/// this request, and at what scale. Set when a client names an adapter alias
+/// (instead of the base model) in the `model` field — resolved by
+/// `ModelRegistry::resolve_for_request`. `do_prefill`/`do_decode` group requests
+/// by this value (comparing `name` — `f32` doesn't implement `Eq`, so equality is
+/// name-based; two requests naming the same adapter always share its one
+/// configured scale) and call `llama_set_adapters_lora` once per group, since the
+/// adapter set is a property of the whole `llama_context`, not of a sequence —
+/// see `docs/design/lora-support.md`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoraSelection {
+    pub name: String,
+    pub scale: f32,
+}
+
 /// All sampling hyper-parameters for a single inference request.
 #[derive(Debug, Clone)]
 pub struct SamplingParams {
@@ -204,6 +219,17 @@ pub struct InferenceRequest {
     /// every place that sizes KV/blocks from prompt length must read
     /// [`Self::n_positions`] instead so it accounts for image tokens too.
     pub multimodal: Option<crate::engine::model::MultimodalChunks>,
+    /// LoRA adapter to apply for this request, set via `with_lora` when the
+    /// client selected a named adapter alias instead of the base model.
+    pub lora: Option<LoraSelection>,
+    /// When true, this request never hits or donates to the prefix cache. Set
+    /// unconditionally by `with_lora` — KV computed under one adapter's weights
+    /// is invalid input for a different adapter (or no adapter) at the same
+    /// token positions, so cross-adapter reuse would silently corrupt
+    /// generation. Multimodal requests get this for free from an empty
+    /// `prompt_tokens` instead; LoRA requests have real text tokens, so this
+    /// flag is the explicit mechanism for them.
+    pub skip_prefix_cache: bool,
 }
 
 impl InferenceRequest {
@@ -234,6 +260,8 @@ impl InferenceRequest {
             prefill_pos: 0,
             rolled_tokens: 0,
             multimodal: None,
+            lora: None,
+            skip_prefix_cache: false,
         }
     }
 
@@ -242,6 +270,14 @@ impl InferenceRequest {
     /// position count comes from the chunks via [`Self::n_positions`] instead.
     pub fn with_multimodal(mut self, chunks: crate::engine::model::MultimodalChunks) -> Self {
         self.multimodal = Some(chunks);
+        self
+    }
+
+    /// Select a LoRA adapter for this request. Also sets `skip_prefix_cache` —
+    /// see that field's doc comment for why.
+    pub fn with_lora(mut self, selection: LoraSelection) -> Self {
+        self.lora = Some(selection);
+        self.skip_prefix_cache = true;
         self
     }
 

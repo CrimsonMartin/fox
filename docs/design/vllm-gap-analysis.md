@@ -62,8 +62,14 @@ mirostat, logit_bias, min_tokens.**
 
 ## 4. LoRA / adapters
 
-vLLM serves multi-LoRA with per-request hot-swap. fox: ❌. llama.cpp supports LoRA, so
-this is **achievable** at medium effort.
+vLLM serves multi-LoRA with per-request hot-swap (per-sequence, kernel-mixed). fox:
+✅ (0.18) single-base-model multi-LoRA via `--lora-modules`, adapter selected through
+the `model` field, group-and-switch per llama.cpp's own context-level
+`llama_set_adapters_lora` — see `lora-support.md`. **Not equivalent to vLLM's
+per-sequence mixing**: llama.cpp has no punica-style kernel, so two concurrently
+batched requests on different adapters are processed as separate sub-batches, and
+adapter switches carry a real `sched_need_reserve` cost under heavy churn. Serving
+LoRA on top of *multiple different* base models concurrently remains ❌.
 
 ## 5. Model architectures
 

@@ -120,6 +120,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         &tensor_split_parsed,
         args.moe_cpu,
         None, // mmproj_path
+        &[],  // lora_modules
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();

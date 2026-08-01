@@ -235,10 +235,11 @@ rework (items 1-7) closed most of the architecture-facts-scattered-across-layers
 defect — real Jinja execution, centralized sampling defaults, fixed embeddings, a leak-free
 prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) are
 0.16's feature work, now landed, plus vision/multimodal (0.17, see
-`docs/design/vision-support.md`). What's left clusters into genuine remaining correctness
+`docs/design/vision-support.md`) and LoRA adapters (0.18, see
+`docs/design/lora-support.md`). What's left clusters into genuine remaining correctness
 debt with no work scheduled (MLA/recurrent KV sizing, the `REASONING_FORMATS` registry's
 narrow coverage) and the feature gaps `docs/design/vllm-gap-analysis.md` still lists open
-(reactive context-rolling on top of bisection retry, LoRA).
+(reactive context-rolling on top of bisection retry).
 
 ---
 
@@ -252,19 +253,21 @@ just tracks the current bottom line:
 
 Fox is a **single binary over llama.cpp/GGUF**: it competes *down* with Ollama (ease,
 local-first) and looks *up* at vLLM (production throughput), and is **not** trying to become
-a smaller vLLM (distributed serving, multi-LoRA, non-GGUF formats, kernel-level tensor
-parallel are explicit non-goals — see that doc's "What NOT to chase").
+a smaller vLLM (distributed serving, per-sequence mixed-adapter LoRA batching, non-GGUF
+formats, kernel-level tensor parallel are explicit non-goals — see that doc's "What NOT
+to chase").
 
 **Already shipped since the gap analysis was last written up:** guided/structured decoding
 via GBNF (0.14), logprobs/top_logprobs (0.14), min_p/logit_bias/min_tokens (0.14),
 speculative decoding — n-gram (0.15) and draft-model (0.16), chunked prefill (0.13),
 context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes/Mistral/Llama3
 tool-call parsers (0.16), OOM recovery via batch-size-bisection retry (0.16),
-vision/multimodal via `mtmd` (0.17, see `docs/design/vision-support.md`).
+vision/multimodal via `mtmd` (0.17, see `docs/design/vision-support.md`), single-base-model
+multi-LoRA via `--lora-modules` (0.18, see `docs/design/lora-support.md`).
 
 **Still open, in priority order** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
 
 1. Reactive context-rolling as a further OOM mitigation once a batch is already
    bisected to a single request and still fails (0.16 only retries by shrinking the
    batch, not by rolling context).
-2. MLA/recurrent correct KV sizing, LoRA — real gaps, no work scheduled yet.
+2. MLA/recurrent correct KV sizing — real gap, no work scheduled yet.

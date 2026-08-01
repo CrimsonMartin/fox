@@ -578,5 +578,65 @@ if os.environ.get("FOX_E2E_VISION") == "1":
 else:
     print("14) vision: image input — SKIPPED (run with --mmproj-path / E2E_MMPROJ to enable)")
 
+# ── 15) LoRA: adapter selection via the `model` field ─────────────────────────
+# Exercises resolve_for_request (alias -> primary model + LoraSelection) and the
+# group-and-switch llama_set_adapters_lora path in do_prefill/do_decode. Requests
+# alternate base -> adapter -> base -> adapter. NOTE: this does NOT assert
+# byte-identical output across same-target requests — fox's decode is not
+# bit-reproducible in general (prefix-cache hit vs. miss alone takes a different
+# compute path with different floating-point rounding, confirmed by running two
+# plain base-only requests back-to-back with no adapter involved at all). What
+# this checks instead: (a) the adapter measurably changes output vs. the base
+# model on the same prompt (proves the adapter is actually engaged, not silently
+# ignored), and (b) every request in the interleaved sequence decodes fully and
+# healthily regardless of which config immediately preceded it (proves switching
+# adapters — including the skip_prefix_cache path — doesn't corrupt context state
+# or hang; see docs/design/lora-support.md).
+LORA_NAME = os.environ.get("FOX_E2E_LORA_NAME")
+if LORA_NAME:
+    print("15) LoRA adapter selection")
+
+    # A short-answer factual prompt ("capital of France") is greedy-deterministic
+    # enough at temperature 0 that many adapters won't visibly move it — this needs
+    # an open-ended prompt where an adapter's influence (style, verbosity, reasoning
+    # structure) actually has room to show up in the completion.
+    def ask(model_name):
+        st, r = post(
+            "/v1/chat/completions",
+            {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "If a train travels 60 miles in 90 minutes, "
+                        "what is its average speed in mph?",
+                    }
+                ],
+                "max_tokens": 64,
+                "min_tokens": 64,
+                "temperature": 0,
+            },
+        )
+        n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+        content = r["choices"][0]["message"]["content"] if st == 200 else ""
+        return st, n, content
+
+    sequence = [MODEL, LORA_NAME, MODEL, LORA_NAME]
+    results = [ask(name) for name in sequence]
+
+    check(
+        "every request in the base/adapter/base/adapter sequence decodes fully",
+        all(st == 200 and n >= 64 for st, n, _ in results),
+        f"statuses/tokens={[(st, n) for st, n, _ in results]}",
+    )
+    base1, lora1 = results[0][2], results[1][2]
+    check(
+        "adapter output differs from base (adapter is actually applied)",
+        base1.strip() != lora1.strip(),
+        f"base={base1[:60]!r} lora={lora1[:60]!r}",
+    )
+else:
+    print("15) LoRA adapter selection — SKIPPED (run with --lora-modules / E2E_LORA to enable)")
+
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")
 sys.exit(1 if fail_count else 0)

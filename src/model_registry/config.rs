@@ -46,6 +46,17 @@ pub struct RegistryConfig {
     /// whatever model is currently loaded. A mismatched pairing (mmproj for a
     /// different architecture) fails at load time rather than corrupting output.
     pub mmproj: Option<String>,
+    /// Named LoRA adapters `(name, path, scale)` loaded alongside the primary
+    /// model. A client selects one by naming it in the `model` field instead
+    /// of the base model name — resolved the same way as `draft_model`/`mmproj`
+    /// (one global pairing: all adapters here apply to whichever model is the
+    /// primary one, not to arbitrary other loaded models).
+    pub lora_modules: Vec<(String, PathBuf, f32)>,
+    /// Stem name of the primary model — the one `lora_modules` adapters attach to,
+    /// and what a LoRA-alias request (`model: "<adapter-name>"`) resolves to load
+    /// instead of the adapter name itself. `None` when there's no model configured
+    /// at startup (fully lazy mode, no `--model-path`, empty `models_dir`).
+    pub primary_model: Option<String>,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,

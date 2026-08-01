@@ -25,7 +25,76 @@ fn bisection_split(ret: i32, len: usize) -> Option<usize> {
     }
 }
 
+/// One group of requests sharing the same LoRA selection (by adapter name — see
+/// `LoraSelection`'s doc comment for why equality is name-based). `None` is its
+/// own group ("no adapter"). `do_prefill`/`do_decode` decode each group as an
+/// independent sub-batch, switching the context's active adapter set between
+/// groups — see `docs/design/lora-support.md`.
+struct LoraGroup {
+    selection: Option<crate::scheduler::LoraSelection>,
+    req_ids: Vec<u64>,
+    requests: Vec<InferenceRequestForModel>,
+}
+
+/// Partition requests into `LoraGroup`s, preserving each request's relative
+/// order within its group. Linear (not hash-based) since batch sizes are small
+/// (bounded by `--max-batch-size`) and this keeps output order deterministic.
+fn group_by_lora(req_ids: &[u64], requests: &[InferenceRequestForModel]) -> Vec<LoraGroup> {
+    let mut groups: Vec<LoraGroup> = Vec::new();
+    for (&id, req) in req_ids.iter().zip(requests.iter()) {
+        let key = req.lora.as_ref().map(|l| l.name.as_str());
+        match groups
+            .iter_mut()
+            .find(|g| g.selection.as_ref().map(|l| l.name.as_str()) == key)
+        {
+            Some(g) => {
+                g.req_ids.push(id);
+                g.requests.push(req.clone());
+            }
+            None => groups.push(LoraGroup {
+                selection: req.lora.clone(),
+                req_ids: vec![id],
+                requests: vec![req.clone()],
+            }),
+        }
+    }
+    groups
+}
+
 impl LlamaCppModel {
+    /// Set the context's active LoRA adapter set to match `selection` (`None`
+    /// clears it) before decoding a group's batch. `llama_set_adapters_lora`
+    /// only rebuilds the compute graph when the requested set actually differs
+    /// from what's already active, so calling this unconditionally per group —
+    /// even every step, even for the common all-`None` case — is cheap; fox
+    /// doesn't need to track "did it change" itself.
+    fn apply_lora_group(&self, selection: Option<&crate::scheduler::LoraSelection>) -> Result<()> {
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+        let ret = match selection {
+            Some(sel) => {
+                let (adapter, _) = self.lora_adapters.get(&sel.name).ok_or_else(|| {
+                    anyhow!("LoRA adapter '{}' is not loaded on this model", sel.name)
+                })?;
+                let mut adapters = [adapter.as_ptr()];
+                let mut scales = [sel.scale];
+                unsafe {
+                    ffi::llama_set_adapters_lora(ctx, adapters.as_mut_ptr(), 1, scales.as_mut_ptr())
+                }
+            }
+            None => unsafe {
+                ffi::llama_set_adapters_lora(ctx, std::ptr::null_mut(), 0, std::ptr::null_mut())
+            },
+        };
+        if ret != 0 {
+            anyhow::bail!("llama_set_adapters_lora failed (code {ret})");
+        }
+        Ok(())
+    }
+
     pub(super) fn do_prefill(
         &self,
         req_ids: &[u64],
@@ -57,6 +126,35 @@ impl LlamaCppModel {
             .unzip();
         let req_ids = &req_ids[..];
         let requests = &requests[..];
+
+        // Text requests: group by LoRA selection (switching the context's active
+        // adapter set is a whole-context operation — see docs/design/lora-support.md
+        // — so requests using different adapters can never share one llama_decode
+        // call) and prefill each group independently.
+        let mut results = mm_results;
+        for group in group_by_lora(req_ids, requests) {
+            self.apply_lora_group(group.selection.as_ref())?;
+            results.extend(self.do_prefill_batch(
+                &group.req_ids,
+                &group.requests,
+                max_prefill_chunk,
+            )?);
+        }
+        Ok(results)
+    }
+
+    /// The actual token-batch prefill for one group of requests that all share the
+    /// same LoRA selection (already applied to the context by the caller). Never
+    /// called directly outside `do_prefill` — see that function's LoRA-group split.
+    fn do_prefill_batch(
+        &self,
+        req_ids: &[u64],
+        requests: &[InferenceRequestForModel],
+        max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        if requests.is_empty() {
+            return Ok(vec![]);
+        }
 
         // Effective start of a request's FIRST prefill chunk: one token before
         // skip_prefix_tokens so the prefix-cache boundary position is always freshly
@@ -121,13 +219,16 @@ impl LlamaCppModel {
         // Nothing left to submit (all requests already fully prefilled) — report
         // completion without decoding. Defensive; the scheduler shouldn't emit these.
         if total_tokens == 0 {
-            mm_results.extend(req_ids.iter().enumerate().map(|(i, &req_id)| PrefillStep {
-                req_id,
-                prefill_pos: requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0),
-                logits: None,
-                tokens_in_kv: 0,
-            }));
-            return Ok(mm_results);
+            return Ok(req_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &req_id)| PrefillStep {
+                    req_id,
+                    prefill_pos: requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0),
+                    logits: None,
+                    tokens_in_kv: 0,
+                })
+                .collect());
         }
 
         let n_seq_max = requests.len().max(1) as i32;
@@ -194,10 +295,9 @@ impl LlamaCppModel {
                 );
                 let (ids_a, ids_b) = req_ids.split_at(split);
                 let (req_a, req_b) = requests.split_at(split);
-                let mut results = self.do_prefill(ids_a, req_a, max_prefill_chunk)?;
-                results.extend(self.do_prefill(ids_b, req_b, max_prefill_chunk)?);
-                mm_results.extend(results);
-                return Ok(mm_results);
+                let mut results = self.do_prefill_batch(ids_a, req_a, max_prefill_chunk)?;
+                results.extend(self.do_prefill_batch(ids_b, req_b, max_prefill_chunk)?);
+                return Ok(results);
             }
             return Err(anyhow!(
                 "llama_decode failed: {} (batch size {})",
@@ -260,8 +360,7 @@ impl LlamaCppModel {
         }
 
         unsafe { ffi::llama_batch_free(batch) };
-        mm_results.extend(results);
-        Ok(mm_results)
+        Ok(results)
     }
 
     /// Prefill a single multimodal request atomically via `mtmd_helper_eval_chunks`,
@@ -339,6 +438,31 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
+        // Group by LoRA selection — same reasoning as do_prefill: the adapter set
+        // is a whole-context property, so requests using different adapters can
+        // never share one llama_decode call. Unlike prefill, decode has no
+        // multimodal split (decode is always plain token-based, regardless of
+        // whether the request's *first* turn was multimodal).
+        let mut results = Vec::with_capacity(requests.len());
+        for group in group_by_lora(req_ids, requests) {
+            self.apply_lora_group(group.selection.as_ref())?;
+            results.extend(self.do_decode_batch(&group.req_ids, &group.requests)?);
+        }
+        Ok(results)
+    }
+
+    /// The actual token-batch decode for one group of requests that all share the
+    /// same LoRA selection (already applied to the context by the caller). Never
+    /// called directly outside `do_decode` — see that function's LoRA-group split.
+    fn do_decode_batch(
+        &self,
+        req_ids: &[u64],
+        requests: &[InferenceRequestForModel],
+    ) -> Result<Vec<(u64, Logits)>> {
+        if requests.is_empty() {
+            return Ok(vec![]);
+        }
+
         let n_tokens = requests.len() as i32;
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
 
@@ -385,8 +509,8 @@ impl LlamaCppModel {
                 );
                 let (ids_a, ids_b) = req_ids.split_at(split);
                 let (req_a, req_b) = requests.split_at(split);
-                let mut results = self.do_decode(ids_a, req_a)?;
-                results.extend(self.do_decode(ids_b, req_b)?);
+                let mut results = self.do_decode_batch(ids_a, req_a)?;
+                results.extend(self.do_decode_batch(ids_b, req_b)?);
                 return Ok(results);
             }
             return Err(anyhow!(
@@ -611,7 +735,7 @@ impl LlamaCppModel {
             return Err(anyhow!("llama_decode (speculative) failed: {}", ret));
         }
 
-        let n_vocab = self.config.vocab_size as usize;
+        let n_vocab = self.config.vocab_size;
         let mut committed: Vec<Logits> = Vec::with_capacity(n);
         // Penalty context grows with each committed token so per-position sampling matches
         // the non-speculative path exactly (repetition/frequency/presence penalties).
@@ -678,7 +802,7 @@ impl LlamaCppModel {
             Err(_) => return Vec::new(),
         };
         let ctx = ctx_guard.as_ptr();
-        let n_vocab = self.config.vocab_size as usize;
+        let n_vocab = self.config.vocab_size;
 
         // Feed `new_tokens`, requesting logits only at the last position — that's
         // all that's needed to pick the first draft token.

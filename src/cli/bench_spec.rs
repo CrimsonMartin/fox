@@ -253,6 +253,7 @@ pub async fn run_bench_spec(args: BenchSpecArgs) -> Result<()> {
         &tensor_split,
         args.moe_cpu,
         None, // mmproj_path
+        &[],  // lora_modules
     )?;
     spinner.finish_and_clear();
 

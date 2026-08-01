@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **LoRA adapter support** (`--lora-modules <name>=<path>[:<scale>][,...]` /
+  `FOX_LORA_MODULES`) — loads one or more named LoRA adapters onto the primary
+  model at startup; a client selects an adapter per-request the same way it
+  selects a model, by passing the adapter's name as the `model` field
+  (mirrors vLLM's `--lora-modules name=path` convention). Since
+  `llama_set_adapters_lora` is a property of the whole `llama_context`, not of
+  a sequence, requests are grouped by adapter selection and processed as
+  separate sub-batches — the same approach llama.cpp's own reference server
+  uses. Prefix caching is skipped for any request carrying an adapter
+  selection (KV computed under one adapter is invalid for another). Verified
+  end-to-end against a real base model + a real, independently-trained
+  reasoning-style adapter: 24/24 e2e checks pass, including the adapter
+  measurably changing output and an interleaved base/adapter/base/adapter
+  request sequence never corrupting context state. v1 scope: one base model
+  per `--lora-modules` set (no cross-base-model LoRA), no per-sequence mixed-
+  adapter batching (not a fox limitation — llama.cpp has no kernel for it), no
+  hot-reload. See `docs/design/lora-support.md`.
+
 ## [0.17.0]
 
 fox gets **vision/multimodal input** — the top feature-gap item for the LatAm

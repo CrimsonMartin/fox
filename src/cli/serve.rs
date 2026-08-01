@@ -100,6 +100,17 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
 
+    /// Named LoRA adapters to load alongside the primary model, so a client can
+    /// select one by name in the `model` field (OpenAI/Ollama) instead of the
+    /// base model — e.g. `--lora-modules support-es=adapters/es.gguf,legal=
+    /// adapters/legal.gguf:0.8`. Format: `name=path[:scale]` (scale default
+    /// `1.0`, mirrors llama.cpp's own `--lora-scaled FNAME:SCALE`), comma-
+    /// separated for multiple adapters. All adapters apply to the single
+    /// primary model (like `--draft-model`/`--mmproj`, this is one global
+    /// pairing, not per-request-selectable across multiple base models).
+    #[arg(long, env = "FOX_LORA_MODULES")]
+    pub lora_modules: Option<String>,
+
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
@@ -224,6 +235,31 @@ fn parse_split_mode(s: &str) -> u32 {
     }
 }
 
+/// Parse `name=path[:scale][,name=path[:scale]...]` into `(name, path, scale)`
+/// triples. Scale defaults to `1.0` when omitted. Entries that don't contain
+/// `=` are skipped (malformed input just yields fewer adapters rather than a
+/// startup crash — same leniency `parse_tensor_split` already has for a bad
+/// value).
+fn parse_lora_modules(s: &str) -> Vec<(String, PathBuf, f32)> {
+    s.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let (name, rest) = entry.split_once('=')?;
+            // Only treat a trailing `:N` as a scale if it actually parses as a
+            // number — a bare colon otherwise belongs to the path (e.g. a
+            // Windows drive letter, `C:\path\to\file.gguf`), not a scale.
+            let (path, scale) = match rest.rsplit_once(':') {
+                Some((p, sc)) if sc.parse::<f32>().is_ok() => (p, sc.parse().unwrap()),
+                _ => (rest, 1.0),
+            };
+            if name.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), PathBuf::from(path), scale))
+        })
+        .collect()
+}
+
 /// Parse "3,1" → [0.75, 0.25] (normalizes so values sum to 1.0).
 fn parse_tensor_split(s: &str) -> Vec<f32> {
     let raw: Vec<f32> = s
@@ -303,53 +339,17 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
     let models_dir = default_models_dir();
 
-    let registry_cfg = RegistryConfig {
-        models_dir: models_dir.clone(),
-        max_models: args.max_models.max(1),
-        max_batch_size: args.max_batch_size,
-        max_queue_depth: args.max_queue_depth,
-        max_prefill_chunk: args.max_prefill_chunk,
-        context_shift: args.context_shift,
-        context_keep: args.context_keep,
-        speculative: args.speculative,
-        spec_ngram: args.spec_ngram,
-        spec_draft_len: args.spec_draft_len,
-        draft_model: args.draft_model,
-        mmproj: args.mmproj,
-        max_context_len: args.max_context_len,
-        block_size: args.block_size,
-        gpu_memory_bytes,
-        gpu_memory_fraction: args.gpu_memory_fraction,
-        metrics,
-        keep_alive_secs: args.keep_alive_secs,
-        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv)),
-        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv)),
-        main_gpu: args.main_gpu,
-        split_mode,
-        tensor_split: args
-            .tensor_split
-            .as_deref()
-            .map(parse_tensor_split)
-            .unwrap_or_default(),
-        moe_offload_cpu: args.moe_cpu,
-    };
-
-    let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
-
-    // Pre-load the initial model if specified; otherwise use lazy loading.
+    // Determine the primary model's NAME up front (no registry needed for this —
+    // just file_stem / directory discovery). Needed both to pre-load below and to
+    // tell LoRA-alias resolution which model `--lora-modules` adapters attach to
+    // (mirrors `--draft-model`/`--mmproj`: one global pairing against whatever the
+    // primary model is, not a per-request-selectable base model).
     let primary_model = match &args.model_path {
-        Some(path) => {
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("default")
-                .to_string();
-            tracing::info!("pre-loading model from {:?}", path);
-            registry
-                .get_or_load(path.to_string_lossy().as_ref())
-                .await?;
-            name
-        }
+        Some(path) => path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default")
+            .to_string(),
         None => {
             // Lazy mode: discover the first model in models_dir as the primary.
             let first = match list_models(&models_dir) {
@@ -377,6 +377,53 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             first.unwrap_or_default()
         }
     };
+
+    let registry_cfg = RegistryConfig {
+        models_dir: models_dir.clone(),
+        max_models: args.max_models.max(1),
+        max_batch_size: args.max_batch_size,
+        max_queue_depth: args.max_queue_depth,
+        max_prefill_chunk: args.max_prefill_chunk,
+        context_shift: args.context_shift,
+        context_keep: args.context_keep,
+        speculative: args.speculative,
+        spec_ngram: args.spec_ngram,
+        spec_draft_len: args.spec_draft_len,
+        draft_model: args.draft_model,
+        mmproj: args.mmproj,
+        lora_modules: args
+            .lora_modules
+            .as_deref()
+            .map(parse_lora_modules)
+            .unwrap_or_default(),
+        primary_model: (!primary_model.is_empty()).then(|| primary_model.clone()),
+        max_context_len: args.max_context_len,
+        block_size: args.block_size,
+        gpu_memory_bytes,
+        gpu_memory_fraction: args.gpu_memory_fraction,
+        metrics,
+        keep_alive_secs: args.keep_alive_secs,
+        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv)),
+        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv)),
+        main_gpu: args.main_gpu,
+        split_mode,
+        tensor_split: args
+            .tensor_split
+            .as_deref()
+            .map(parse_tensor_split)
+            .unwrap_or_default(),
+        moe_offload_cpu: args.moe_cpu,
+    };
+
+    let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
+
+    // Actually pre-load the initial model now that the registry exists.
+    if let Some(path) = &args.model_path {
+        tracing::info!("pre-loading model from {:?}", path);
+        registry
+            .get_or_load(path.to_string_lossy().as_ref())
+            .await?;
+    }
 
     // Start background keep-alive eviction task.
     std::sync::Arc::clone(&registry).start_eviction_task();
@@ -463,4 +510,71 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lora_modules_single_no_scale_defaults_to_one() {
+        let got = parse_lora_modules("mylora=/models/lora.gguf");
+        assert_eq!(
+            got,
+            vec![(
+                "mylora".to_string(),
+                PathBuf::from("/models/lora.gguf"),
+                1.0
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_with_scale() {
+        let got = parse_lora_modules("legal=/models/legal.gguf:0.8");
+        assert_eq!(
+            got,
+            vec![(
+                "legal".to_string(),
+                PathBuf::from("/models/legal.gguf"),
+                0.8
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_multiple_mixed() {
+        let got = parse_lora_modules("a=/x/a.gguf:0.5,b=/x/b.gguf");
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), PathBuf::from("/x/a.gguf"), 0.5),
+                ("b".to_string(), PathBuf::from("/x/b.gguf"), 1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_windows_drive_letter_path_not_mistaken_for_scale() {
+        let got = parse_lora_modules(r"win=C:\models\lora.gguf");
+        assert_eq!(
+            got,
+            vec![(
+                "win".to_string(),
+                PathBuf::from(r"C:\models\lora.gguf"),
+                1.0
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_skips_malformed_entries() {
+        let got = parse_lora_modules("noequals,=missingname.gguf,name=");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn parse_lora_modules_empty_string_yields_no_adapters() {
+        assert!(parse_lora_modules("").is_empty());
+    }
 }

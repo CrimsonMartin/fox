@@ -263,6 +263,7 @@ impl InferenceEngine {
                 min_tokens: r.sampling.min_tokens,
                 logit_bias: r.sampling.logit_bias.clone(),
                 multimodal: r.multimodal.clone(),
+                lora: r.lora.clone(),
             })
             .collect();
 
@@ -363,6 +364,7 @@ impl InferenceEngine {
                 min_tokens: r.sampling.min_tokens,
                 logit_bias: r.sampling.logit_bias.clone(),
                 multimodal: r.multimodal.clone(),
+                lora: r.lora.clone(),
             })
             .collect();
         let model = self.model.clone();

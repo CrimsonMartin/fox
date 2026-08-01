@@ -9,8 +9,8 @@ mod schedule;
 
 #[allow(unused_imports)]
 pub use batch::{
-    InferenceRequest, RequestState, SamplingParams, ScheduledBatch, StopReason, Token,
-    TokenLogprob, TopLogprob,
+    InferenceRequest, LoraSelection, RequestState, SamplingParams, ScheduledBatch, StopReason,
+    Token, TokenLogprob, TopLogprob,
 };
 
 use std::collections::VecDeque;

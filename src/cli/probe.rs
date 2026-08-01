@@ -44,6 +44,7 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
         &[],   // tensor_split
         false, // moe_offload_cpu
         None,  // mmproj_path
+        &[],   // lora_modules
     )?;
 
     let info = model.model_info();

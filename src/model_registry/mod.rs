@@ -113,8 +113,18 @@ impl ModelRegistry {
             None => None,
         };
 
+        // Resolve each configured LoRA adapter's path the same way (direct file
+        // path or a `models_dir` match) — the operator-chosen adapter `name` and
+        // `scale` pass through unchanged.
+        let mut lora_modules = Vec::with_capacity(self.config.lora_modules.len());
+        for (name, path_or_name, scale) in &self.config.lora_modules {
+            let resolved_path = self.resolve_model_name(&path_or_name.to_string_lossy())?.1;
+            lora_modules.push((name.clone(), resolved_path, *scale));
+        }
+
         // Load the model (FFI is blocking, so we use spawn_blocking inside).
-        let entry = Arc::new(load_model(&stem, &path, &self.config, draft, mmproj).await?);
+        let entry =
+            Arc::new(load_model(&stem, &path, &self.config, draft, mmproj, lora_modules).await?);
         self.engines.insert(stem.clone(), entry.clone());
         self.last_used.insert(stem.clone(), Instant::now());
         if let Ok(mut lru) = self.lru.lock() {
@@ -122,6 +132,44 @@ impl ModelRegistry {
         }
 
         Ok(entry)
+    }
+
+    /// Whether `name` matches a configured LoRA adapter's name (`--lora-modules`),
+    /// as opposed to a real model/alias. Used by `load_model_or_respond` to give a
+    /// clean 404 only when `name` is neither.
+    pub(crate) fn is_lora_alias(&self, name: &str) -> bool {
+        self.config.lora_modules.iter().any(|(n, _, _)| n == name)
+    }
+
+    /// Resolve a client-supplied `model` name for a request. If `name` matches a
+    /// configured LoRA adapter's name (`--lora-modules`), loads/reuses the
+    /// *primary* model's engine (same cache as `get_or_load`, same single-flight
+    /// and LRU behavior — this is a resolution-layer concern, not a new caching
+    /// concept: `EngineEntry` itself carries no name/alias metadata, several
+    /// names can share one already-loaded engine) and returns the adapter
+    /// selection alongside it. Otherwise behaves exactly like `get_or_load` with
+    /// no selection. See `docs/design/lora-support.md`.
+    pub async fn resolve_for_request(
+        &self,
+        name: &str,
+    ) -> Result<(Arc<EngineEntry>, Option<crate::scheduler::LoraSelection>)> {
+        if let Some((_, _, scale)) = self.config.lora_modules.iter().find(|(n, _, _)| n == name) {
+            let primary = self.config.primary_model.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'{name}' matches a configured LoRA adapter, but no primary model is \
+                     configured to apply it to (pass --model-path, or put a model in models_dir)"
+                )
+            })?;
+            let entry = self.get_or_load(primary).await?;
+            return Ok((
+                entry,
+                Some(crate::scheduler::LoraSelection {
+                    name: name.to_string(),
+                    scale: *scale,
+                }),
+            ));
+        }
+        Ok((self.get_or_load(name).await?, None))
     }
 
     /// Returns all currently-loaded (name, entry) pairs.
@@ -307,6 +355,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            lora_modules: Vec::new(),
+            primary_model: None,
         }
     }
 
@@ -518,5 +568,63 @@ mod tests {
             registry2.engines.contains_key("busy"),
             "a busy model must never be LRU evicted"
         );
+    }
+
+    #[test]
+    fn test_is_lora_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 1.0)];
+        let registry = ModelRegistry::new(cfg, HashMap::new());
+        assert!(registry.is_lora_alias("finetune"));
+        assert!(!registry.is_lora_alias("finetune-typo"));
+        assert!(!registry.is_lora_alias("base"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_for_request_lora_alias_resolves_to_primary_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("base.gguf"), b"").unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        cfg.primary_model = Some("base".to_string());
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 0.7)];
+        let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
+        registry.preload_for_test("base", EngineEntry::for_test("base"));
+
+        let (_entry, lora) = registry.resolve_for_request("finetune").await.unwrap();
+        let selection = lora.expect("expected a LoRA selection for an adapter alias");
+        assert_eq!(selection.name, "finetune");
+        assert_eq!(selection.scale, 0.7);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_for_request_plain_model_name_has_no_lora_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("base.gguf"), b"").unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 0.7)];
+        let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
+        registry.preload_for_test("base", EngineEntry::for_test("base"));
+
+        let (_entry, lora) = registry.resolve_for_request("base").await.unwrap();
+        assert!(
+            lora.is_none(),
+            "a plain model name must not pick up a LoRA selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_for_request_lora_alias_without_primary_model_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        // primary_model left None on purpose.
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 1.0)];
+        let registry = ModelRegistry::new(cfg, HashMap::new());
+
+        let result = registry.resolve_for_request("finetune").await;
+        let Err(err) = result else {
+            panic!("a LoRA alias with no primary model configured must error, not panic");
+        };
+        assert!(err.to_string().contains("no primary model"));
     }
 }

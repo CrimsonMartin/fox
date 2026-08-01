@@ -227,6 +227,11 @@ pub struct InferenceRequestForModel {
     /// an atomic `mtmd_helper_eval_chunks` call instead of the normal token batch
     /// path (see `docs/design/vision-support.md`).
     pub multimodal: Option<MultimodalChunks>,
+    /// LoRA adapter to apply while decoding this request, if any — see
+    /// `docs/design/lora-support.md`. `do_prefill`/`do_decode` group requests by
+    /// this value and call `llama_set_adapters_lora` once per group, since the
+    /// adapter set is a property of the whole `llama_context`, not a sequence.
+    pub lora: Option<crate::scheduler::LoraSelection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +402,13 @@ pub trait Model: Send + Sync {
     /// loaded without a paired mmproj — the overwhelming majority — return `false`.
     fn supports_vision(&self) -> bool {
         false
+    }
+
+    /// Names of the LoRA adapters loaded alongside this model (`--lora-modules`),
+    /// available for a client to select via the `model` field. Empty for the
+    /// overwhelming majority of models (no adapters configured).
+    fn lora_adapter_names(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Render the chat prompt (same inputs as `build_prompt_tokens`) and tokenize

@@ -48,6 +48,7 @@ async fn load_draft_model(
             &tensor_split,
             moe_offload_cpu,
             None, // mmproj_path — draft models are text-only speculation proposers
+            &[],  // lora_modules — adapters apply to the primary model, not the draft
         )
     })
     .await
@@ -71,6 +72,7 @@ pub(super) async fn load_model(
     cfg: &RegistryConfig,
     draft: Option<(String, PathBuf)>,
     mmproj: Option<PathBuf>,
+    lora_modules: Vec<(String, PathBuf, f32)>,
 ) -> Result<EngineEntry> {
     let path = path.to_path_buf();
     let name = name.to_string();
@@ -126,6 +128,7 @@ pub(super) async fn load_model(
             &tensor_split,
             moe_offload_cpu,
             mmproj.as_deref(),
+            &lora_modules,
         )
     })
     .await

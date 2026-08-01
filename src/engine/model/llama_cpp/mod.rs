@@ -120,7 +120,7 @@ fn resolve_head_dim(model: *const ffi::llama_model, n_embd: usize, n_head: usize
         .and_then(|arch| meta_str(model, &format!("{arch}.attention.key_length")))
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|&d| d > 0);
-    from_meta.unwrap_or(if n_head > 0 { n_embd / n_head } else { 128 })
+    from_meta.unwrap_or(n_embd.checked_div(n_head).unwrap_or(128))
 }
 
 /// Diagnose why `llama_model_load_from_file` returned null and return a
@@ -290,7 +290,7 @@ pub(crate) fn active_backend_description() -> String {
 /// sampling), so concurrent use is already serialized. `Drop` frees the sampler, so
 /// removing the entry from the `grammars` map — or dropping the model — releases it.
 #[cfg(not(fox_stub))]
-struct GrammarSampler {
+pub(super) struct GrammarSampler {
     ptr: *mut ffi::llama_sampler,
 }
 
@@ -346,6 +346,12 @@ pub struct LlamaCppModel {
     /// with a paired mmproj GGUF. `None` for the overwhelming majority of models —
     /// every multimodal code path is gated on this being `Some`.
     pub(super) mtmd_ctx: Option<NonNull<ffi::mtmd_context>>,
+    /// Named LoRA adapters loaded alongside this model (`--lora-modules`),
+    /// keyed by the operator-chosen name a client selects via the `model`
+    /// field. Value is the loaded adapter handle plus its configured default
+    /// scale. Empty for the overwhelming majority of models.
+    pub(super) lora_adapters:
+        std::collections::HashMap<String, (NonNull<ffi::llama_adapter_lora>, f32)>,
 }
 
 #[cfg(not(fox_stub))]
@@ -356,6 +362,11 @@ impl Drop for LlamaCppModel {
         // first regardless, before either of the resources it borrowed goes away.
         if let Some(mtmd_ctx) = self.mtmd_ctx {
             unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+        }
+        // LoRA adapters borrow the model's weights (loaded via `llama_adapter_lora_init(model, ..)`)
+        // but are otherwise independent objects — free them before the model itself.
+        for (adapter, _scale) in self.lora_adapters.values() {
+            unsafe { ffi::llama_adapter_lora_free(adapter.as_ptr()) };
         }
         // Free the context first (must happen before model is freed).
         if let Ok(ctx) = self._ctx.lock() {
@@ -384,6 +395,7 @@ impl LlamaCppModel {
         tensor_split: &[f32],
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
+        lora_modules: &[(String, std::path::PathBuf, f32)],
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -577,6 +589,35 @@ impl LlamaCppModel {
             None => None,
         };
 
+        // Named LoRA adapters (--lora-modules): loaded once alongside the model,
+        // attached/detached per decode step by do_prefill/do_decode via
+        // llama_set_adapters_lora — see docs/design/lora-support.md. A bad
+        // adapter file fails loudly here, same posture as mmproj above.
+        let mut lora_adapters = std::collections::HashMap::new();
+        for (name, path, scale) in lora_modules {
+            let path_cstr = CString::new(
+                path.to_str()
+                    .ok_or_else(|| anyhow!("lora adapter path not valid UTF-8: {path:?}"))?,
+            )?;
+            let raw = unsafe { ffi::llama_adapter_lora_init(model.as_ptr(), path_cstr.as_ptr()) };
+            let adapter = NonNull::new(raw).ok_or_else(|| {
+                for (adapter, _) in lora_adapters.values() {
+                    let adapter: &NonNull<ffi::llama_adapter_lora> = adapter;
+                    unsafe { ffi::llama_adapter_lora_free(adapter.as_ptr()) };
+                }
+                if let Some(mtmd_ctx) = mtmd_ctx {
+                    unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+                }
+                unsafe { ffi::llama_free(ctx.as_ptr()) };
+                unsafe { ffi::llama_model_free(model.as_ptr()) };
+                anyhow!(
+                    "llama_adapter_lora_init failed for '{name}' ({path:?}) — check the \
+                     adapter matches this model's architecture"
+                )
+            })?;
+            lora_adapters.insert(name.clone(), (adapter, *scale));
+        }
+
         // SAFETY: We manually implement Send + Sync for LlamaCppModel below.
         // The Arc<Mutex<NonNull<...>>> is intentionally used here for shared ownership
         // across clone (e.g. future multi-backend); the unsafe impls guarantee thread safety.
@@ -599,6 +640,7 @@ impl LlamaCppModel {
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
             mtmd_ctx,
+            lora_adapters,
         })
     }
 
@@ -674,9 +716,10 @@ impl LlamaCppModel {
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
-            // bench-kv compares KV cache types, not vision; the original instance
-            // (if any) keeps ownership of its mtmd context.
+            // bench-kv compares KV cache types, not vision/LoRA; the original
+            // instance (if any) keeps ownership of its mtmd context and adapters.
             mtmd_ctx: None,
+            lora_adapters: std::collections::HashMap::new(),
         })
     }
 }
@@ -811,6 +854,10 @@ impl Model for LlamaCppModel {
 
     fn supports_vision(&self) -> bool {
         self.mtmd_ctx.is_some()
+    }
+
+    fn lora_adapter_names(&self) -> Vec<String> {
+        self.lora_adapters.keys().cloned().collect()
     }
 
     fn tokenize_multimodal(

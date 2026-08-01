@@ -106,7 +106,17 @@ impl Scheduler {
             // This allows two requests that share a common prefix (e.g. the same
             // system prompt) to reuse each other's cached KV blocks even when the
             // rest of the prompt differs.
-            let block_hashes = prompt_block_hashes(&req.prompt_tokens, block_size);
+            //
+            // `skip_prefix_cache` (LoRA requests): KV computed under one adapter's
+            // weights is invalid input for a different adapter (or none) at the
+            // same positions — an empty hash list here means the search below
+            // never matches, taking the same "normal admission" path as any other
+            // miss (see docs/design/lora-support.md).
+            let block_hashes = if req.skip_prefix_cache {
+                Vec::new()
+            } else {
+                prompt_block_hashes(&req.prompt_tokens, block_size)
+            };
             let mut prefix_hit: Option<(usize, PrefixCacheEntry)> = None;
             for i in (0..block_hashes.len()).rev() {
                 if let Some(entry) = pcache.pop(&block_hashes[i]) {
@@ -372,6 +382,13 @@ impl Scheduler {
             // A rolled request's low KV positions no longer hold the prompt prefix
             // the cache key promises — donating them would silently corrupt hits.
             if req.rolled_tokens > 0 {
+                return None;
+            }
+
+            // LoRA requests: KV computed under this adapter's weights is invalid
+            // input for a future request using a different adapter (or none) —
+            // never donate it. See docs/design/lora-support.md.
+            if req.skip_prefix_cache {
                 return None;
             }
 

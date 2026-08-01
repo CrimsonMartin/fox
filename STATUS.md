@@ -316,20 +316,34 @@ fine. Two real causes were found in **fox's own code**:
 **Net result: ~46-52 t/s → ~122-146 t/s** on the standard benchmark — fox now
 matches or beats Ollama's ~110-148 t/s on this exact benchmark, and reaches
 ~70-85% of vanilla `llama-server`'s 173 t/s, up from ~30-35% before these
-fixes. **Known limitation, found via a follow-up sustained-load test (not a
-one-off run)**: the seq_id fix only guarantees dense/consecutive IDs for
-requests that get a fresh pool allocation; a block-level prefix-cache *hit*
-inherits the donated request's old seq_id as-is, which drifts non-consecutive
-under heavy cache reuse — realistically common (any deployment sharing a
-system prompt across conversations) — degrading throughput back toward the
-pre-fix baseline. Not fixed yet — the obvious fix (migrate KV data to a
-fresh seq_id on cache-hit via `llama_memory_seq_cp`) was implemented and
-**crashes the server**: fox's non-unified KV cache makes every such
-migration a cross-stream copy, and `seq_cp` only supports cross-stream
-copies of the *entire* KV buffer, not the cached-prefix subrange this needs
-(`GGML_ASSERT(is_full)` in `vendor/llama.cpp/src/llama-kv-cache.cpp:518`).
-Reverted; needs a different mechanism (see `docs/design/rocm-benchmarking-2026-08.md`'s
-"Attempted fix" section for the ruled-out approach and untried alternatives).
+fixes.
+
+3. **The prefix-cache follow-on, now fixed too (`kv_unified`).** The seq_id
+   fix above only guaranteed dense IDs for requests getting a fresh pool
+   allocation; a block-level prefix-cache *hit* inherits the donated
+   request's old seq_id as-is, which drifts non-consecutive under heavy
+   cache reuse — realistically common (any deployment sharing a system
+   prompt across conversations) — degrading throughput back toward the
+   pre-fix baseline. Sorting cannot repair it: `{0, 1, 29, 31}` still
+   splits. The fix is to stop depending on ID density at all — setting
+   `ctx_params.kv_unified = true` makes `llama_kv_cache::init_batch` select
+   `split_simple` instead of `split_equal`, and `split_simple` has no
+   consecutive-ID requirement, so the batch folds into one full-width
+   ubatch whatever IDs the scheduler holds. Measured directly (via the new
+   `FOX_LLAMA_LOG=1` + `LLAMA_BATCH_DEBUG=1` path, no vendor patch needed):
+   average decode ubatch width under sustained load went **1.74 → 3.90 of a
+   possible 4**, with zero ubatches taking the `split_equal` path.
+   **ROCm throughput: median 110.9 t/s (range [72.3, 154.6]) → 158.2 t/s
+   (range [155.0, 158.9])** — now above Ollama's 144-155 and at ~91% of
+   vanilla `llama-server`'s 173. The collapsing range is the real tell: the
+   earlier run-to-run swings were this fragmentation, not thermal noise.
+   Costs no extra memory (KV total is identical, 4224 MiB either way — only
+   `4096 cells × 33 streams` vs `135168 shared cells`), and the shared pool
+   is strictly more flexible, since one long conversation can exceed the
+   per-stream ceiling when others are idle. This also retires the crashing
+   `llama_memory_seq_cp` migration approach as unnecessary — and, incidentally,
+   would have unblocked it, since same-stream `seq_cp` supports partial
+   ranges where cross-stream does not.
 Full evidence chain, including the abandoned "structural" theory, this
 limitation, and the new `scripts/repeat_bench.sh` (multi-repetition,
 warmup, alternating-order, error-discarding — built after single ad-hoc

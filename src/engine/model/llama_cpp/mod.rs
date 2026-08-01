@@ -421,7 +421,33 @@ impl LlamaCppModel {
             _user_data: *mut std::os::raw::c_void,
         ) {
         }
-        unsafe { ffi::llama_log_set(Some(noop_log), std::ptr::null_mut()) };
+        // `FOX_LLAMA_LOG=1` forwards llama.cpp's own log to stderr instead of
+        // dropping it. Without this escape hatch, llama.cpp's internal
+        // diagnostics are unreachable from a fox build — notably its
+        // `LLAMA_BATCH_DEBUG=1` ubatch tracing, which is the only way to observe
+        // how a submitted `llama_batch` actually gets split into ubatches (the
+        // batching behaviour investigated in
+        // docs/design/rocm-benchmarking-2026-08.md). Previously the only way to
+        // see any of it was to patch the vendored source and rebuild.
+        unsafe extern "C" fn passthrough_log(
+            _level: ffi::ggml_log_level,
+            text: *const std::os::raw::c_char,
+            _user_data: *mut std::os::raw::c_void,
+        ) {
+            if text.is_null() {
+                return;
+            }
+            let text = unsafe { std::ffi::CStr::from_ptr(text) };
+            eprint!("{}", text.to_string_lossy());
+        }
+        let forward_llama_log = std::env::var_os("FOX_LLAMA_LOG").is_some_and(|v| v != "0");
+        unsafe {
+            if forward_llama_log {
+                ffi::llama_log_set(Some(passthrough_log), std::ptr::null_mut())
+            } else {
+                ffi::llama_log_set(Some(noop_log), std::ptr::null_mut())
+            }
+        };
 
         // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
         // Passing null searches the executable's directory and cwd — fox ships
@@ -573,6 +599,16 @@ impl LlamaCppModel {
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
+        // Unified KV cache (one shared buffer, `n_stream = 1`) instead of one
+        // stream per sequence. This is what makes `llama_kv_cache::init_batch`
+        // select `split_simple` over `split_equal` — and `split_simple` has no
+        // "seq_ids must be consecutive and increasing" requirement, so a decode
+        // batch folds into ONE full-width ubatch regardless of which IDs the
+        // scheduler happens to hold. Without it, a prefix-cache hit inheriting a
+        // donated, non-dense seq_id silently fragments the batch (measured: 1.74
+        // of a possible 4 under sustained load) — see
+        // docs/design/rocm-benchmarking-2026-08.md's "Known limitation".
+        ctx_params.kv_unified = true;
         // AUTO (-1): let llama.cpp enable flash attention only when the active
         // backend supports it for this model/KV type. Forcing ENABLED (1) caused
         // decode failures and garbage output on Vulkan / some ROCm setups and with
@@ -748,6 +784,7 @@ impl LlamaCppModel {
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
+        ctx_params.kv_unified = true; // see load() for why
         ctx_params.flash_attn_type = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO (see load())
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;

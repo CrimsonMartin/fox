@@ -13,11 +13,13 @@ with the evidence that overturned it, since it was briefly committed to
 `vllm-gap-analysis.md`/`STATUS.md` before being corrected. Related:
 [`engine-capabilities-checklist.md`](engine-capabilities-checklist.md)'s
 target-machine section, [`vllm-gap-analysis.md`](vllm-gap-analysis.md) §1.
-**Caveat**: this holds for low-prefix-cache-reuse traffic only — under
-sustained load with a shared system prompt (most real chat traffic),
-throughput degrades back toward the pre-fix baseline; see "Known
-limitation" and "Attempted fix" below, the latter of which rules out the
-obvious repair.
+A follow-up caveat — that the fix held only for low-prefix-cache-reuse
+traffic, and degraded back toward baseline under a shared system prompt —
+was **also fixed since** (2026-08-01, third pass), by switching to a
+unified KV cache: **median 158.2 t/s, range [155.0, 158.9]**, above
+Ollama's 144-155 and at ~91% of `llama-server`. See "Known limitation" (now
+resolved), "Attempted fix" (the ruled-out repair), and "The fix that
+actually closed it: `kv_unified`" below.
 
 ## Why this exists
 
@@ -305,7 +307,7 @@ an upstream/structural ceiling — fox's own request-lifecycle overhead
 (scheduling, HTTP/streaming layers) is the more likely remaining source,
 not a fundamental limitation.
 
-## Known limitation: the seq_id fix degrades under heavy prefix-cache reuse
+## Known limitation (RESOLVED — see "The fix that actually closed it" below): the seq_id fix degrades under heavy prefix-cache reuse
 
 The ad-hoc single-shot numbers above (fresh container, one comparison, then
 torn down) turned out to be an optimistic case. Built `scripts/repeat_bench.sh`
@@ -423,6 +425,116 @@ turns out not to actually need `n_stream > 1` — unconfirmed, needs reading
 None of these were evaluated in depth; this is a genuine open design
 problem, not a known-good approach waiting to be typed in.
 
+## The fix that actually closed it: `kv_unified` (2026-08-01, third pass)
+
+Alternative (c) above turned out to be correct, and its stated uncertainty
+("if `split_equal`'s consecutive-seq_id requirement turns out not to
+actually need `n_stream > 1`") resolves cleanly by reading the two files it
+names. The requirement isn't a property of `split_equal` that fox must
+satisfy — it's a property of *which splitter runs at all*:
+
+```cpp
+// llama-kv-cache.cpp, llama_kv_cache::init_batch
+auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch)
+                            : balloc.split_equal(n_ubatch, true);
+```
+
+`n_stream` is `unified ? 1 : n_seq_max`. So a unified KV cache doesn't make
+fox *satisfy* the consecutive-ID rule — it takes the code path where the
+rule does not exist. `split_simple` has no equivalent of `split_equal`'s
+`batch.seq_id[i][0] == last_seq_id + 1` guard, so it folds the whole decode
+batch into one ubatch regardless of which IDs the scheduler happens to
+hold. Prefix-cache hits can donate whatever `seq_id` they like.
+
+**The change** is two lines: `ctx_params.kv_unified = true` in both
+`LlamaCppModel::load()` and `::new_context()`
+(`src/engine/model/llama_cpp/mod.rs`).
+
+### Measuring it without patching the vendor
+
+Verifying this by throughput alone is hopeless on this hardware — the
+run-to-run spread swamps the effect (one config measured [72.3, 154.6] t/s
+across 5 repetitions). So this pass measured the *mechanism* instead: the
+actual width of each decode ubatch, which is deterministic and needs one
+short run.
+
+llama.cpp already traces this under `LLAMA_BATCH_DEBUG=1`, but fox installs
+a `noop_log` callback that drops llama.cpp's log entirely — which is why
+earlier passes resorted to patching the vendored source and rebuilding.
+Added instead: **`FOX_LLAMA_LOG=1` forwards llama.cpp's log to stderr**
+(same file, next to `noop_log`). Combined:
+
+```bash
+LLAMA_BATCH_DEBUG=1 FOX_LLAMA_LOG=1 fox serve --model-path <model.gguf>
+# then, from the log:  grep -A4 'equal_seqs   = 0' | grep n_tokens
+```
+
+No submodule edits, nothing to remember to revert.
+
+### Result
+
+Same protocol both times: one warmup round, then 3 sustained rounds of
+`fox-bench --concurrency 4 --requests 40 --max-tokens 128` against one
+long-lived server (the sustained-load shape that surfaced the limitation in
+the first place), counting decode ubatch widths.
+
+| Decode ubatch width | Before (non-unified) | After (`kv_unified`) |
+|---|---|---|
+| 1 token | 5498 | 46 |
+| 2 | 1257 | 116 |
+| 3 | 379 | 410 |
+| 4 (full) | 1444 | 7070 |
+| **weighted average** | **1.74 / 4** | **3.90 / 4** |
+
+The before-column's 1.74 independently reproduces the ~1.64 that
+`rocprofv3` measured at the kernel level in the first pass — same
+fragmentation, measured two unrelated ways. After the change, **zero**
+ubatches take the `split_equal` path (`equal_seqs = 1` count: 0),
+confirming the splitter switch rather than inferring it.
+
+ROCm throughput (`scripts/repeat_bench.sh`, 5 repetitions, same container
+lifetime), for the target machine:
+
+| | median | range |
+|---|---|---|
+| Before | 110.9 t/s | [72.3, 154.6] |
+| After | **158.2 t/s** | **[155.0, 158.9]** |
+
+The collapsing range matters as much as the median: the wild run-to-run
+variance previously attributed to thermal/iGPU noise was substantially this
+fragmentation, appearing or not depending on which seq_ids the prefix cache
+happened to be recycling. fox is now above Ollama's 144-155 t/s on this
+benchmark and at ~91% of vanilla `llama-server`'s 173 t/s.
+
+### Cost
+
+**No extra memory.** The KV allocation is identical either way — only its
+shape changes (`llama_kv_cache: size` line, same model, `--max-context-len 4096`):
+
+| | total | cells | seqs/streams |
+|---|---|---|---|
+| Before | 4224.00 MiB | 4096 (per stream) | 33/33 |
+| After | 4224.00 MiB | 135168 (shared) | 33/1 |
+
+The shared pool is in fact strictly more flexible: a single long
+conversation can exceed the per-stream ceiling when other slots are idle,
+which the non-unified layout cannot do.
+
+Verified with `make e2e` (22 passed, 0 failed — including 4-way concurrency,
+context rolling past `n_ctx`, embeddings, and mid-stream disconnect) plus
+the full stub suite and `cargo test --release --lib` (347 tests).
+
+**Side note**: this also retires the crashing `llama_memory_seq_cp`
+migration from the previous section as unnecessary — and would have
+unblocked it anyway, since the `GGML_ASSERT(is_full)` that killed it only
+guards the *cross-stream* path; with `n_stream = 1` every `seq_cp` is
+same-stream, where partial ranges are supported.
+
+**Not verified**: whether `kv_unified` interacts badly with models fox
+hasn't exercised here (SWA/sliding-window architectures, recurrent/hybrid
+models). The e2e suite and golden tests only cover Llama-family GGUFs on
+this machine.
+
 ## `n_batch`/`n_ubatch` experiment (tried, reverted, unrelated finding)
 
 Separately from the residual above, capping `n_batch`/`n_ubatch` at 2048
@@ -445,20 +557,20 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
 
 ## What's next
 
-1. **Highest priority**: fix the prefix-cache/seq_id interaction above. The
-   obvious approach (migrate via `llama_memory_seq_cp`) is **ruled out** —
-   see "Attempted fix" above, it crashes on fox's non-unified KV cache. Needs
-   one of that section's three untried alternatives (skip-cache-on-stale-id,
-   full-buffer copy, or unified KV cache), evaluated for cost/feasibility
-   before implementing. This is what stands between "fixed in the easy case"
-   and "fixed for realistic shared-system-prompt traffic," which is the more
-   common real-world pattern.
-2. Close the remaining gap to `llama-server`'s 173 t/s (fox is at ~70-85% of
-   it now, up from ~30-35% before these fixes, *in the low-prefix-cache-reuse
-   case*) — no longer suggests an upstream ceiling, so this is exploratory
-   rather than a known lead: fox's own request-lifecycle overhead
-   (HTTP/streaming layers, scheduler tick overhead) is the more likely place
-   to look next, not llama.cpp internals.
+1. ~~**Highest priority**: fix the prefix-cache/seq_id interaction.~~
+   **Done** — alternative (c), the unified KV cache, closed it; see "The fix
+   that actually closed it: `kv_unified`" above. The other two alternatives
+   (skip-cache-on-stale-id, full-buffer copy) are moot and were never
+   implemented.
+2. Close the remaining gap to `llama-server`'s 173 t/s (fox is at ~91% of it
+   now, up from ~30-35% before these fixes, and now *under sustained
+   prefix-cache reuse*, not just the easy case) — no longer suggests an
+   upstream ceiling, so this is exploratory rather than a known lead: fox's
+   own request-lifecycle overhead (HTTP/streaming layers, scheduler tick
+   overhead) is the more likely place to look next, not llama.cpp internals.
+   Note the decode ubatch width is now 3.90/4, not 4.00 — the residual is
+   the expected prefill-step gap when a finished request is replaced, so
+   there is little left to win at the batching layer specifically.
 3. Profile Ollama/`llama-server` itself with `rocprofv3` (its minimal image
    ships no profiling tools — would need building or copying in a
    profiling-capable image) to directly confirm it's hitting `ncols_dst=4`
@@ -498,7 +610,9 @@ kept demonstrating.
 | Repeated/statistically-sound benchmarking | `scripts/repeat_bench.sh` |
 | **The main fix** — dense/ascending `seq_id` allocation | `src/scheduler/mod.rs` (`seq_id_pool`, now a min-heap) |
 | **The main fix** — batch emitted in ascending `seq_id` order | `src/engine/model/llama_cpp/batch.rs` (`do_decode_batch`) |
-| **Known limitation** — prefix-cache hits inherit a stale seq_id | `src/scheduler/schedule.rs` (prefix-hit admission path, `req.kv_seq_id = hit.seq_id`), `src/scheduler/mod.rs` (`try_insert_prefix`) |
+| **The closing fix** — unified KV cache, so `split_simple` runs instead of `split_equal` | `src/engine/model/llama_cpp/mod.rs` (`ctx_params.kv_unified` in `load()` and `new_context()`) |
+| **Measuring ubatch widths** — forward llama.cpp's own log (pairs with `LLAMA_BATCH_DEBUG=1`) | `src/engine/model/llama_cpp/mod.rs` (`FOX_LLAMA_LOG`, next to `noop_log`) |
+| **Resolved limitation** — prefix-cache hits inherit a stale seq_id (now harmless) | `src/scheduler/schedule.rs` (prefix-hit admission path, `req.kv_seq_id = hit.seq_id`), `src/scheduler/mod.rs` (`try_insert_prefix`) |
 | **Ruled-out fix** — `seq_cp` can't do a partial cross-stream KV copy | `vendor/llama.cpp/src/llama-kv-cache.cpp:463` (`llama_kv_cache::seq_cp`, `is_full` assert at line 518) |
 | **The sampling fix** — adaptive candidate selection | `src/engine/model/sampling.rs` (`sample_token`) |
 | **The sampling fix** — skip logits copy when unneeded | `src/engine/model/mod.rs` (`needs_logits`), `src/engine/run.rs`, `src/engine/model/llama_cpp/batch.rs` |

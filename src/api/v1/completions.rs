@@ -43,6 +43,8 @@ pub async fn completions(
         frequency_penalty: None,
         presence_penalty: None,
         user: None,
+        n: req.n,
+        best_of: req.best_of,
     };
     chat_completions(State(state), Json(chat_req)).await
 }

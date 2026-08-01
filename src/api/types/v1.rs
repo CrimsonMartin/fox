@@ -242,6 +242,16 @@ pub struct ChatCompletionRequest {
     /// Caller identifier — accepted for API compatibility, not used.
     #[serde(default)]
     pub user: Option<String>,
+    /// Number of completion choices to return (1–8). Each choice is an
+    /// independent generation over the same prompt, not a shared-prefill fork
+    /// — see `docs/design/n-best-of-support.md`.
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// Generate this many candidates server-side and return only the `n` with
+    /// the highest total log-likelihood. Must be >= `n`; incompatible with
+    /// `stream: true`.
+    #[serde(default)]
+    pub best_of: Option<u32>,
 }
 
 impl ChatCompletionRequest {
@@ -259,6 +269,29 @@ impl ChatCompletionRequest {
         if let Some(r) = self.repetition_penalty {
             if r < 0.0 {
                 return Err(format!("repetition_penalty must be >= 0, got {r}"));
+            }
+        }
+        if let Some(n) = self.n {
+            if !(1..=crate::api::shared::sampling_defaults::openai::MAX_N).contains(&n) {
+                return Err(format!(
+                    "n must be in [1, {}], got {n}",
+                    crate::api::shared::sampling_defaults::openai::MAX_N
+                ));
+            }
+        }
+        if let Some(best_of) = self.best_of {
+            if !(1..=crate::api::shared::sampling_defaults::openai::MAX_N).contains(&best_of) {
+                return Err(format!(
+                    "best_of must be in [1, {}], got {best_of}",
+                    crate::api::shared::sampling_defaults::openai::MAX_N
+                ));
+            }
+            let n = self.n.unwrap_or(1);
+            if best_of < n {
+                return Err(format!("best_of ({best_of}) must be >= n ({n})"));
+            }
+            if best_of > n && self.stream {
+                return Err("best_of > n is not supported with stream: true".to_string());
             }
         }
         Ok(())
@@ -397,6 +430,10 @@ pub struct CompletionRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub n: Option<u32>,
+    #[serde(default)]
+    pub best_of: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -435,6 +472,64 @@ pub struct ModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chat_req(extra: &str) -> ChatCompletionRequest {
+        let json =
+            format!(r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}]{extra}}}"#);
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn validate_n_within_bounds_ok() {
+        assert!(chat_req(r#","n":8"#).validate().is_ok());
+        assert!(chat_req(r#","n":1"#).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_n_zero_rejected() {
+        assert!(chat_req(r#","n":0"#).validate().is_err());
+    }
+
+    #[test]
+    fn validate_n_over_max_rejected() {
+        assert!(chat_req(r#","n":9"#).validate().is_err());
+    }
+
+    #[test]
+    fn validate_best_of_within_bounds_ok() {
+        assert!(chat_req(r#","n":2,"best_of":4"#).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_best_of_less_than_n_rejected() {
+        let err = chat_req(r#","n":4,"best_of":2"#).validate().unwrap_err();
+        assert!(err.contains("best_of"));
+    }
+
+    #[test]
+    fn validate_best_of_over_max_rejected() {
+        assert!(chat_req(r#","best_of":9"#).validate().is_err());
+    }
+
+    #[test]
+    fn validate_best_of_greater_than_n_with_stream_rejected() {
+        let err = chat_req(r#","n":1,"best_of":3,"stream":true"#)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("stream"));
+    }
+
+    #[test]
+    fn validate_best_of_greater_than_n_without_stream_ok() {
+        assert!(chat_req(r#","n":1,"best_of":3"#).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_best_of_equal_to_n_with_stream_ok() {
+        assert!(chat_req(r#","n":2,"best_of":2,"stream":true"#)
+            .validate()
+            .is_ok());
+    }
 
     fn text_block(s: &str) -> ContentBlock {
         ContentBlock {

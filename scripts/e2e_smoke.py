@@ -638,5 +638,39 @@ if LORA_NAME:
 else:
     print("15) LoRA adapter selection — SKIPPED (run with --lora-modules / E2E_LORA to enable)")
 
+# ── 16) n: multiple completions per request ───────────────────────────────────
+# n branches are independent fan-out generations, not a shared-prefill fork (see
+# docs/design/n-best-of-support.md) — deliberately NOT asserting the choices are
+# textually distinct (no such guarantee; thread_rng-driven divergence is likely
+# but not proven, per the LoRA e2e experience that exact-content assumptions on
+# this engine are risky to bake into a check). What's actually verified: the
+# right number of choices at the right indices, all non-empty, and usage summed
+# across every branch.
+print("16) n: multiple completions per request")
+st, r = post(
+    "/v1/chat/completions",
+    {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Tell me a short fun fact."}],
+        "max_tokens": 24,
+        "temperature": 0.9,
+        "n": 3,
+    },
+)
+choices = r.get("choices", []) if st == 200 else []
+indices = sorted(c.get("index") for c in choices)
+non_empty = all(c["message"]["content"].strip() for c in choices)
+check(
+    "n=3 returns 3 choices at indices 0,1,2, all non-empty",
+    st == 200 and indices == [0, 1, 2] and non_empty,
+    f"status={st} indices={indices}",
+)
+usage = r.get("usage", {}) if st == 200 else {}
+check(
+    "usage.completion_tokens reflects all 3 branches, not just one",
+    usage.get("completion_tokens", 0) >= 3,
+    f"usage={usage}",
+)
+
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")
 sys.exit(1 if fail_count else 0)

@@ -22,7 +22,7 @@ use crate::api::shared::streaming::finish_reason_str;
 use crate::api::types::{
     ChatCompletionChoice, ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionRequest,
     ChatCompletionResponse, ChatLogprobEntry, ChatLogprobs, ChatMessageDelta, ChatMessageResponse,
-    ToolCallDelta, ToolCallFunctionDelta, Usage,
+    ToolCall, ToolCallDelta, ToolCallFunctionDelta, Usage,
 };
 use crate::engine::model::MEDIA_MARKER;
 use crate::scheduler::{InferenceRequest, SamplingParams, Token};
@@ -219,20 +219,70 @@ pub async fn chat_completions(
         logit_bias,
     };
 
-    let req_id = entry.engine.next_request_id();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
-    if let Some(chunks) = multimodal {
-        inference_req = inference_req.with_multimodal(chunks);
-    }
-    if let Some(selection) = lora {
-        inference_req = inference_req.with_lora(selection);
-    }
-    if let Err(e) = entry.engine.submit_request(inference_req) {
-        entry
-            .engine
-            .record_rejection(crate::api::error::rejection_reason_label(&e));
-        return AppError::from(e).into_response();
+    // n/best_of: each branch is a fully independent generation over the same
+    // prompt (fan-out, not a shared-prefill fork — see
+    // docs/design/n-best-of-support.md). `req.validate()` already guarantees
+    // best_of >= n and (best_of == n whenever stream: true), so streaming
+    // callers below never need to rank/discard.
+    let n = req.n.unwrap_or(1).clamp(1, defaults::openai::MAX_N);
+    let effective_best_of = req
+        .best_of
+        .unwrap_or(n)
+        .max(n)
+        .clamp(1, defaults::openai::MAX_N);
+    let branch_logprobs = if want_logprobs {
+        Some(logprobs_top_n)
+    } else if effective_best_of > n {
+        // best_of ranking needs each branch's total log-likelihood even when
+        // the caller didn't request logprobs — Some(0) is cheap (just the
+        // sampled token, no top-k alternatives).
+        Some(0)
+    } else {
+        None
+    };
+
+    let mut branch_rxs: Vec<tokio::sync::mpsc::UnboundedReceiver<Token>> =
+        Vec::with_capacity(effective_best_of as usize);
+    for branch_idx in 0..effective_best_of {
+        let mut branch_sampling = sampling.clone();
+        branch_sampling.logprobs = branch_logprobs;
+        // Perturb the seed per branch so n>1/best_of doesn't collapse to
+        // identical output under an explicit seed (StdRng is a pure function
+        // of seed + position, no per-request salt). Branch 0 keeps the
+        // caller's literal seed, so a plain seed + n:1 request is unaffected.
+        if branch_idx > 0 {
+            branch_sampling.seed = branch_sampling
+                .seed
+                .map(|s| s.wrapping_add(u64::from(branch_idx)));
+        }
+
+        let req_id = entry.engine.next_request_id();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
+        let mut inference_req = InferenceRequest::new(
+            req_id,
+            prompt_tokens.clone(),
+            max_tokens,
+            branch_sampling,
+            tx,
+        );
+        if let Some(chunks) = multimodal.clone() {
+            inference_req = inference_req.with_multimodal(chunks);
+        }
+        if let Some(selection) = lora.clone() {
+            inference_req = inference_req.with_lora(selection);
+        }
+        // Admission failure is safe by construction: bailing here drops every
+        // already-submitted branch's `rx` (and its paired `tx`), which is
+        // exactly the existing client-disconnect preemption path
+        // (`send().is_err()` → preempt, frees GPU memory) — no separate
+        // cancellation mechanism needed.
+        if let Err(e) = entry.engine.submit_request(inference_req) {
+            entry
+                .engine
+                .record_rejection(crate::api::error::rejection_reason_label(&e));
+            return AppError::from(e).into_response();
+        }
+        branch_rxs.push(rx);
     }
 
     let has_tools = eff_tools.is_some();
@@ -253,118 +303,135 @@ pub async fn chat_completions(
 
     if req.stream {
         if has_tools {
-            // With tools: buffer all tokens, parse tool call, emit as SSE deltas.
-            // (logprobs are not surfaced for tool-call responses.)
-            let (full_content, completion_tokens, stop_reason, _lp) = buffer_tokens(&mut rx).await;
+            // With tools: buffer every branch, parse each one's tool call,
+            // emit index-tagged SSE deltas. (logprobs are not surfaced for
+            // tool-call responses.) stream: true guarantees best_of == n
+            // (enforced in ChatCompletionRequest::validate()), so every
+            // submitted branch is returned — no ranking needed here.
+            let branches: Vec<(
+                String,
+                u32,
+                Option<crate::scheduler::StopReason>,
+                Vec<ChatLogprobEntry>,
+            )> = futures::future::join_all(branch_rxs.iter_mut().map(buffer_tokens)).await;
+            let n_branches = branches.len();
 
-            let (content, mut tool_calls) = parse_tool_call(&full_content, eff_tools, tool_parser);
-
-            // Enforce parallel_tool_calls: false
-            if !allow_parallel {
-                if let Some(ref mut calls) = tool_calls {
-                    calls.truncate(1);
-                }
-            }
-
-            let finish_reason = if tool_calls.is_some() {
-                "tool_calls".to_string()
-            } else {
-                stop_reason
-                    .as_ref()
-                    .map(finish_reason_str)
-                    .unwrap_or("stop")
-                    .to_string()
-            };
+            let mut completion_tokens_total = 0u32;
+            let parsed: Vec<(String, Option<Vec<ToolCall>>, String)> = branches
+                .into_iter()
+                .map(|(full_content, completion_tokens, stop_reason, _lp)| {
+                    completion_tokens_total += completion_tokens;
+                    let (content, mut tool_calls) =
+                        parse_tool_call(&full_content, eff_tools, tool_parser);
+                    if !allow_parallel {
+                        if let Some(ref mut calls) = tool_calls {
+                            calls.truncate(1);
+                        }
+                    }
+                    let finish_reason = if tool_calls.is_some() {
+                        "tool_calls".to_string()
+                    } else {
+                        stop_reason
+                            .as_ref()
+                            .map(finish_reason_str)
+                            .unwrap_or("stop")
+                            .to_string()
+                    };
+                    (content, tool_calls, finish_reason)
+                })
+                .collect();
 
             tracing::info!(
                 model = %req.model,
                 stream = true,
                 prompt_tokens = prompt_tokens_len as u32,
-                completion_tokens,
+                completion_tokens = completion_tokens_total,
+                n = n_branches,
                 duration_ms = start.elapsed().as_millis() as u64,
-                finish_reason = %finish_reason,
                 "done"
             );
 
-            let usage = Usage {
-                prompt_tokens: prompt_tokens_len as u32,
-                completion_tokens,
-                total_tokens: prompt_tokens_len as u32 + completion_tokens,
-            };
-
             let id_c = id.clone();
             let model_c = req.model.clone();
-            let finish_c = finish_reason.clone();
+            let prompt_tokens_u32 = prompt_tokens_len as u32;
             let stream = async_stream::stream! {
-                // Chunk 1: role announcement
-                let first = ChatCompletionChunk {
-                    id: id_c.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model_c.clone(),
-                    choices: vec![ChatCompletionChunkChoice {
-                        index: 0,
-                        delta: ChatMessageDelta {
-                            role: Some("assistant".to_string()),
+                for (branch_idx, (content, tool_calls, finish_reason)) in parsed.into_iter().enumerate() {
+                    // Chunk 1: role announcement
+                    let first = ChatCompletionChunk {
+                        id: id_c.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_c.clone(),
+                        choices: vec![ChatCompletionChunkChoice {
+                            index: branch_idx as u32,
+                            delta: ChatMessageDelta {
+                                role: Some("assistant".to_string()),
+                                content: None,
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                            logprobs: None,
+                        }],
+                        usage: None,
+                        system_fingerprint: None,
+                    };
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().json_data(first).unwrap_or_else(|_| Event::default().data(""))
+                    );
+                    tokio::task::yield_now().await;
+
+                    // Chunk 2: tool_calls delta or content, + summed usage on
+                    // the very last chunk of the very last branch.
+                    let delta = if let Some(ref tcs) = tool_calls {
+                        ChatMessageDelta {
+                            role: None,
                             content: None,
+                            tool_calls: Some(
+                                tcs.iter()
+                                    .enumerate()
+                                    .map(|(i, tc)| ToolCallDelta {
+                                        index: i as u32,
+                                        id: Some(tc.id.clone()),
+                                        call_type: Some("function".to_string()),
+                                        function: ToolCallFunctionDelta {
+                                            name: Some(tc.function.name.clone()),
+                                            arguments: Some(tc.function.arguments.clone()),
+                                        },
+                                    })
+                                    .collect(),
+                            ),
+                        }
+                    } else {
+                        ChatMessageDelta {
+                            role: None,
+                            content: Some(content),
                             tool_calls: None,
-                        },
-                        finish_reason: None,
-                        logprobs: None,
-                    }],
-                    usage: None,
-                    system_fingerprint: None,
-                };
-                yield Ok::<_, std::convert::Infallible>(
-                    Event::default().json_data(first).unwrap_or_else(|_| Event::default().data(""))
-                );
-                tokio::task::yield_now().await;
+                        }
+                    };
 
-                // Chunk 2: tool_calls delta or content + usage
-                let delta = if let Some(ref tcs) = tool_calls {
-                    ChatMessageDelta {
-                        role: None,
-                        content: None,
-                        tool_calls: Some(
-                            tcs.iter()
-                                .enumerate()
-                                .map(|(i, tc)| ToolCallDelta {
-                                    index: i as u32,
-                                    id: Some(tc.id.clone()),
-                                    call_type: Some("function".to_string()),
-                                    function: ToolCallFunctionDelta {
-                                        name: Some(tc.function.name.clone()),
-                                        arguments: Some(tc.function.arguments.clone()),
-                                    },
-                                })
-                                .collect(),
-                        ),
-                    }
-                } else {
-                    ChatMessageDelta {
-                        role: None,
-                        content: Some(content),
-                        tool_calls: None,
-                    }
-                };
-
-                let final_chunk = ChatCompletionChunk {
-                    id: id_c,
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model_c,
-                    choices: vec![ChatCompletionChunkChoice {
-                        index: 0,
-                        delta,
-                        finish_reason: Some(finish_c),
-                        logprobs: None,
-                    }],
-                    usage: Some(usage),
-                    system_fingerprint: None,
-                };
-                yield Ok::<_, std::convert::Infallible>(
-                    Event::default().json_data(final_chunk).unwrap_or_else(|_| Event::default().data(""))
-                );
+                    let is_last = branch_idx + 1 == n_branches;
+                    let final_chunk = ChatCompletionChunk {
+                        id: id_c.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_c.clone(),
+                        choices: vec![ChatCompletionChunkChoice {
+                            index: branch_idx as u32,
+                            delta,
+                            finish_reason: Some(finish_reason),
+                            logprobs: None,
+                        }],
+                        usage: is_last.then(|| Usage {
+                            prompt_tokens: prompt_tokens_u32,
+                            completion_tokens: completion_tokens_total,
+                            total_tokens: prompt_tokens_u32 + completion_tokens_total,
+                        }),
+                        system_fingerprint: None,
+                    };
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().json_data(final_chunk).unwrap_or_else(|_| Event::default().data(""))
+                    );
+                }
 
                 // OpenAI-compatible stream terminator
                 yield Ok::<_, std::convert::Infallible>(Event::default().data("[DONE]"));
@@ -375,42 +442,55 @@ pub async fn chat_completions(
                 .into_response();
         }
 
-        // Normal streaming path (no tools).
+        // Normal streaming path (no tools). stream: true guarantees best_of
+        // == n (validated above), so every branch in `branch_rxs` is
+        // returned — no ranking needed. Branches are merged into one SSE
+        // stream via StreamMap, tagged by branch index, in arrival order.
         let log_model = req.model.clone();
         let log_prompt = prompt_tokens_len;
+        let n_branches = branch_rxs.len();
         let stream = async_stream::stream! {
-            let mut completion_tokens: u32 = 0;
-            let mut first_chunk = true;
-            while let Some(token) = rx.recv().await {
+            use tokio_stream::StreamExt as _;
+
+            let mut merged: tokio_stream::StreamMap<
+                usize,
+                tokio_stream::wrappers::UnboundedReceiverStream<Token>,
+            > = tokio_stream::StreamMap::new();
+            for (branch_idx, rx) in branch_rxs.into_iter().enumerate() {
+                merged.insert(branch_idx, tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+            }
+
+            let mut first_chunk = vec![true; n_branches];
+            let mut completion_tokens = vec![0u32; n_branches];
+            let mut done_count = 0usize;
+            while let Some((branch_idx, token)) = merged.next().await {
                 let is_done = token.stop_reason.is_some();
                 let finish_reason = token.stop_reason.as_ref().map(finish_reason_str).map(str::to_string);
-                completion_tokens += 1;
-
+                completion_tokens[branch_idx] += 1;
                 if is_done {
+                    done_count += 1;
                     tracing::info!(
                         model = %log_model,
                         stream = true,
                         prompt_tokens = log_prompt,
-                        completion_tokens,
+                        completion_tokens = completion_tokens[branch_idx],
+                        branch = branch_idx,
                         duration_ms = start.elapsed().as_millis() as u64,
                         finish_reason = %finish_reason.as_deref().unwrap_or("stop"),
                         "done"
                     );
                 }
 
-                let usage = if is_done {
-                    Some(Usage {
-                        prompt_tokens: log_prompt as u32,
-                        completion_tokens,
-                        total_tokens: log_prompt as u32 + completion_tokens,
-                    })
-                } else {
-                    None
-                };
+                // Summed usage attaches once, on the very last chunk overall.
+                let usage = (is_done && done_count == n_branches).then(|| Usage {
+                    prompt_tokens: log_prompt as u32,
+                    completion_tokens: completion_tokens.iter().sum(),
+                    total_tokens: log_prompt as u32 + completion_tokens.iter().sum::<u32>(),
+                });
 
-                // First chunk carries role; subsequent chunks carry content.
-                let (role, content) = if first_chunk {
-                    first_chunk = false;
+                // First chunk of each branch carries role; subsequent chunks carry content.
+                let (role, content) = if first_chunk[branch_idx] {
+                    first_chunk[branch_idx] = false;
                     (Some("assistant".to_string()), Some(token.text.clone()))
                 } else {
                     (None, Some(token.text.clone()))
@@ -425,7 +505,7 @@ pub async fn chat_completions(
                     created,
                     model: req.model.clone(),
                     choices: vec![ChatCompletionChunkChoice {
-                        index: 0,
+                        index: branch_idx as u32,
                         delta: ChatMessageDelta {
                             role,
                             content,
@@ -442,7 +522,7 @@ pub async fn chat_completions(
                     .unwrap_or_else(|_| Event::default().data(""));
                 tokio::task::yield_now().await;
                 yield Ok::<_, std::convert::Infallible>(event);
-                if is_done {
+                if done_count == n_branches {
                     break;
                 }
             }
@@ -453,50 +533,56 @@ pub async fn chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let (full_content, completion_tokens, stop_reason, logprob_entries) =
-            buffer_tokens(&mut rx).await;
-        let stop_str = stop_reason
-            .as_ref()
-            .map(finish_reason_str)
-            .unwrap_or("stop")
-            .to_string();
+        let mut branches: Vec<(
+            String,
+            u32,
+            Option<crate::scheduler::StopReason>,
+            Vec<ChatLogprobEntry>,
+        )> = futures::future::join_all(branch_rxs.iter_mut().map(buffer_tokens)).await;
 
-        let (content, mut tool_calls) = if has_tools {
-            parse_tool_call(&full_content, eff_tools, tool_parser)
-        } else {
-            (full_content, None)
-        };
-
-        // Enforce parallel_tool_calls: false
-        if !allow_parallel {
-            if let Some(ref mut calls) = tool_calls {
-                calls.truncate(1);
-            }
+        // best_of > n: rank by total log-likelihood (sum of per-token
+        // logprobs) and keep only the top n. A no-op when best_of == n.
+        if branches.len() > n as usize {
+            let scored = branches
+                .into_iter()
+                .map(|b| (b.3.iter().map(|e| e.logprob).sum::<f32>(), b))
+                .collect();
+            branches = select_best_of(scored, n as usize);
         }
 
-        let finish_reason = if tool_calls.is_some() {
-            "tool_calls".to_string()
-        } else {
-            stop_str
-        };
+        let mut completion_tokens_total = 0u32;
+        let mut choices = Vec::with_capacity(branches.len());
+        for (index, (full_content, completion_tokens, stop_reason, logprob_entries)) in
+            branches.into_iter().enumerate()
+        {
+            completion_tokens_total += completion_tokens;
+            let stop_str = stop_reason
+                .as_ref()
+                .map(finish_reason_str)
+                .unwrap_or("stop")
+                .to_string();
 
-        tracing::info!(
-            model = %req.model,
-            stream = false,
-            prompt_tokens = prompt_tokens_len as u32,
-            completion_tokens,
-            duration_ms = start.elapsed().as_millis() as u64,
-            finish_reason = %finish_reason,
-            "done"
-        );
+            let (content, mut tool_calls) = if has_tools {
+                parse_tool_call(&full_content, eff_tools, tool_parser)
+            } else {
+                (full_content, None)
+            };
 
-        Json(ChatCompletionResponse {
-            id,
-            object: "chat.completion".to_string(),
-            created,
-            model: req.model,
-            choices: vec![ChatCompletionChoice {
-                index: 0,
+            // Enforce parallel_tool_calls: false
+            if !allow_parallel {
+                if let Some(ref mut calls) = tool_calls {
+                    calls.truncate(1);
+                }
+            }
+
+            let finish_reason = if tool_calls.is_some() {
+                "tool_calls".to_string()
+            } else {
+                stop_str
+            };
+
+            choices.push(ChatCompletionChoice {
+                index: index as u32,
                 message: ChatMessageResponse {
                     role: "assistant".to_string(),
                     content: if tool_calls.is_some() {
@@ -514,16 +600,43 @@ pub async fn chat_completions(
                 } else {
                     None
                 },
-            }],
+            });
+        }
+
+        tracing::info!(
+            model = %req.model,
+            stream = false,
+            prompt_tokens = prompt_tokens_len as u32,
+            completion_tokens = completion_tokens_total,
+            n = choices.len(),
+            duration_ms = start.elapsed().as_millis() as u64,
+            "done"
+        );
+
+        Json(ChatCompletionResponse {
+            id,
+            object: "chat.completion".to_string(),
+            created,
+            model: req.model,
+            choices,
             usage: Some(Usage {
                 prompt_tokens: prompt_tokens_len as u32,
-                completion_tokens,
-                total_tokens: prompt_tokens_len as u32 + completion_tokens,
+                completion_tokens: completion_tokens_total,
+                total_tokens: prompt_tokens_len as u32 + completion_tokens_total,
             }),
             system_fingerprint: None,
         })
         .into_response()
     }
+}
+
+/// Rank `(score, item)` pairs by score descending and keep the first `n`. Used
+/// for `best_of`: score is a branch's total log-likelihood (sum of per-token
+/// logprobs) — higher is a more confident completion.
+fn select_best_of<T>(mut candidates: Vec<(f32, T)>, n: usize) -> Vec<T> {
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    candidates.truncate(n);
+    candidates.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Buffer all tokens from the receiver into `(text, count, stop_reason, logprobs)`.
@@ -556,7 +669,172 @@ async fn buffer_tokens(
 
 #[cfg(test)]
 mod tests {
+    use super::select_best_of;
     use crate::api::test_helpers::*;
+
+    /// Parse SSE body bytes into a list of JSON values from "data: " lines.
+    /// Skips the "[DONE]" sentinel (mirrors `tests/integration.rs`'s helper).
+    fn parse_sse_chunks(bytes: &[u8]) -> Vec<serde_json::Value> {
+        let body = std::str::from_utf8(bytes).expect("SSE body is not UTF-8");
+        body.lines()
+            .filter(|l| l.starts_with("data: "))
+            .filter_map(|l| {
+                let payload = &l["data: ".len()..];
+                if payload == "[DONE]" {
+                    return None;
+                }
+                serde_json::from_str(payload).ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn select_best_of_keeps_highest_scored() {
+        let candidates = vec![(-5.0, "worst"), (-1.0, "best"), (-3.0, "middle")];
+        assert_eq!(select_best_of(candidates, 2), vec!["best", "middle"]);
+    }
+
+    #[test]
+    fn select_best_of_n_equal_len_is_noop_order_by_score() {
+        let candidates = vec![(-2.0, "a"), (-1.0, "b")];
+        assert_eq!(select_best_of(candidates, 2), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn select_best_of_n_larger_than_candidates_returns_all() {
+        let candidates = vec![(-1.0, "only")];
+        assert_eq!(select_best_of(candidates, 5), vec!["only"]);
+    }
+
+    #[tokio::test]
+    async fn test_n_returns_multiple_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": false,
+            "max_tokens": 4,
+            "n": 3
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 200);
+        let bytes = body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let choices = v["choices"].as_array().unwrap();
+        assert_eq!(choices.len(), 3);
+        let mut indices: Vec<u64> = choices
+            .iter()
+            .map(|c| c["index"].as_u64().unwrap())
+            .collect();
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 1, 2]);
+        for c in choices {
+            assert!(!c["message"]["content"].as_str().unwrap().is_empty());
+        }
+        let completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap();
+        assert!(
+            completion_tokens >= 3,
+            "expected tokens summed across 3 branches, got {completion_tokens}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_best_of_greater_than_n_returns_n_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": false,
+            "max_tokens": 4,
+            "n": 1,
+            "best_of": 3
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 200);
+        let bytes = body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["choices"].as_array().unwrap().len(), 1);
+        assert_eq!(v["choices"][0]["index"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_best_of_greater_than_n_with_stream_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+            "n": 1,
+            "best_of": 3
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn test_n_over_max_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": false,
+            "n": 9
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn test_n_streaming_returns_interleaved_indexed_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+            "max_tokens": 4,
+            "n": 2
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 200);
+        let bytes = body_bytes(resp).await;
+        let chunks = parse_sse_chunks(&bytes);
+        assert!(!chunks.is_empty());
+
+        let indices_seen: std::collections::HashSet<u64> = chunks
+            .iter()
+            .map(|c| c["choices"][0]["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(indices_seen, std::collections::HashSet::from([0, 1]));
+
+        // Each branch must terminate with a non-null finish_reason.
+        for branch_idx in [0u64, 1u64] {
+            let finished = chunks.iter().any(|c| {
+                c["choices"][0]["index"].as_u64() == Some(branch_idx)
+                    && !c["choices"][0]["finish_reason"].is_null()
+            });
+            assert!(finished, "branch {branch_idx} never sent a finish_reason");
+        }
+
+        // Usage (summed across both branches) appears exactly once, on the last chunk.
+        let usage_chunks: Vec<_> = chunks.iter().filter(|c| !c["usage"].is_null()).collect();
+        assert_eq!(usage_chunks.len(), 1);
+        assert!(
+            usage_chunks[0]["usage"]["completion_tokens"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+    }
 
     #[tokio::test]
     async fn test_chat_completions_non_streaming() {

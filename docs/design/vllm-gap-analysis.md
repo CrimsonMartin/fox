@@ -47,7 +47,8 @@ throughput it cannot, and that's fine — different hardware target.
 | Guided / structured decoding (JSON-schema, regex, grammar) | ✅ (outlines / xgrammar) | ❌ prompt-only | **achievable** |
 | logprobs / prompt_logprobs / echo | ✅ | ❌ | **achievable** |
 | Speculative decoding (draft / n-gram / EAGLE / Medusa) | ✅ | ⚠️ n-gram/prompt-lookup ✅ (0.15); draft-model ❌ | **achievable** |
-| `n>1` / best_of / beam search | ✅ | ❌ | achievable |
+| `n>1` / `best_of` | ✅ | ✅ (0.18) independent fan-out, capped at 8 — see `n-best-of-support.md` | — |
+| beam search | ✅ | ❌ — no beam-search decoding algorithm; `n`/`best_of` are independent samples, not beams | achievable |
 
 **llama.cpp has native GBNF grammar support** → structured/JSON decoding is the single
 biggest impact for the least effort. Speculative decoding is the largest *latency* win

@@ -29,6 +29,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapter batching (not a fox limitation — llama.cpp has no kernel for it), no
   hot-reload. See `docs/design/lora-support.md`.
 
+- **Multiple completions per request** (`n`, `best_of` on
+  `/v1/chat/completions` and `/v1/completions`) — `n` (1–8) returns that many
+  independent completions in `choices[]`; `best_of` (≥ `n`) samples more
+  candidates than returned and keeps the `n` with the highest total
+  log-likelihood. Each choice is a fully independent generation over the same
+  prompt (fan-out, not a shared-prefill fork), so branches naturally diverge
+  under `temperature > 0`; an explicit `seed` is perturbed per branch so it
+  doesn't collapse `n` completions into identical copies. Streaming interleaves
+  all branches into one SSE stream, tagged by `index`, merged via
+  `tokio_stream::StreamMap`. `best_of > n` is rejected with `stream: true`
+  (matches OpenAI's own restriction — ranking needs the full completion
+  before anything can be shown). Verified end-to-end against a real model:
+  `n: 3` returns 3 correctly-indexed choices with correctly summed usage, no
+  regressions across the rest of the e2e suite. v1 scope: no KV-level
+  shared-prefill forking (each branch reprocesses the prompt independently),
+  beam search itself remains unimplemented. See
+  `docs/design/n-best-of-support.md`.
+
 ## [0.17.0]
 
 fox gets **vision/multimodal input** — the top feature-gap item for the LatAm

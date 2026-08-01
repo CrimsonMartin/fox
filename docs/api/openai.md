@@ -73,6 +73,8 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `logit_bias` | `object` | `null` | Additive per-token bias keyed by token id (string): `{"123": 5, "456": -100}`. `±100` effectively forces/bans a token. |
 | `min_p` | `number` | `0.0` | Min-P sampling: drop tokens below `min_p × max_prob` (fox extension). |
 | `min_tokens` | `integer` | `0` | Suppress end-of-generation until at least this many tokens are produced (fox extension). |
+| `n` | `integer` | `1` | Number of completion choices to return (1–8). Each choice is an independent generation over the same prompt. See [Multiple completions](#multiple-completions-n--best_of). |
+| `best_of` | `integer` | `n` | Generate this many candidates server-side and return only the `n` with the highest total log-likelihood (1–8, must be ≥ `n`). Not supported with `stream: true` when `best_of > n`. |
 
 > **Sampling defaults.** The OpenAI surface mirrors OpenAI: no `top_k` and no repeat
 > penalty (use `frequency_penalty`/`presence_penalty`, both `0.0` = off). The Ollama
@@ -567,6 +569,36 @@ high confidence; large negatives mean the model was unsure. In streaming mode th
 logprobs for each token arrive on that token's chunk. The numbers are the model's **raw**
 distribution — if guided decoding (`response_format`) is also active, they reflect the
 unconstrained probabilities, not the grammar-masked ones.
+
+---
+
+## Multiple completions (`n` / `best_of`)
+
+Set `n` to get more than one completion per request — each appears in `choices[]`,
+tagged by `index`:
+
+```json
+{
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "Give me a name for a coffee shop."}],
+  "n": 3
+}
+```
+
+Each of the `n` choices is a fully independent generation over the same prompt (not a
+shared-prefill fork — see `docs/design/n-best-of-support.md`), so at `temperature: 0`
+they come out identical (expected — greedy decoding is deterministic). At
+`temperature > 0` they diverge on their own; an explicit `seed` still yields distinct
+choices, since each branch perturbs the seed internally rather than reusing it verbatim.
+
+`usage.completion_tokens` is the sum across every returned choice, not just one.
+
+Set `best_of` higher than `n` to sample more candidates than you keep: fox generates
+`best_of` completions, ranks them by total log-likelihood (summed per-token
+log-probability — no need to also set `logprobs: true`, ranking is computed
+internally), and returns only the top `n`. `best_of > n` is rejected with `400` when
+combined with `stream: true` — ranking needs every candidate's full completion before
+anything can be shown, which streaming can't do incrementally.
 
 ---
 

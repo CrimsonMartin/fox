@@ -241,10 +241,13 @@ prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) a
 `docs/design/n-best-of-support.md`), MLA/recurrent KV sizing (0.18, see
 `docs/design/mla-recurrent-kv-sizing.md`), and reactive context-rolling plus a
 process-crash fix in prefill batching (0.18, see
-`docs/design/reactive-context-rolling.md`). What's left clusters into genuine remaining
+`docs/design/reactive-context-rolling.md`). What's left is genuine remaining
 correctness debt with no work scheduled (the `REASONING_FORMATS` registry's narrow
-coverage) and the one remaining feature gap `docs/design/vllm-gap-analysis.md` lists open
-(beam search).
+coverage) — `docs/design/vllm-gap-analysis.md`'s feature-gap list is now fully closed;
+its one remaining row (beam search) was investigated and reclassified as a deliberate
+non-goal (2026-08-01): llama.cpp removed its beam-search API in 2024, vLLM itself
+demoted beam search out of its fast serving path, and no major LLM API exposes
+real token-level beam search today.
 
 ---
 
@@ -273,7 +276,10 @@ multiple completions per request (0.18, see `docs/design/n-best-of-support.md`),
 correct MLA/recurrent KV sizing (0.18, see `docs/design/mla-recurrent-kv-sizing.md`), and
 reactive context-rolling on OOM (0.18, see `docs/design/reactive-context-rolling.md`).
 
-**Still open** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
-
-1. Beam search — `n`/`best_of` are independent-sample fan-out (0.18), not a
-   beam-search decoding algorithm; no work scheduled.
+**Nothing left open** on `vllm-gap-analysis.md`'s "Prioritized shortlist." Its one
+remaining row, beam search, was investigated (2026-08-01) and closed as a deliberate
+non-goal rather than a backlog item — see that doc for the full reasoning
+(llama.cpp removed its beam-search API in 2024, vLLM demoted beam search out of its
+own fast serving path, and no major LLM API exposes real token-level beam search
+today; a naive fan-out approximation would just be a weaker, more expensive variant
+of the `n`/`best_of` already shipped in 0.18).

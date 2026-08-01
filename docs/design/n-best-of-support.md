@@ -6,7 +6,10 @@ Status: **Shipped (0.18)**
 > comparison vs Ollama/vLLM lives in
 > [`vllm-gap-analysis.md`](vllm-gap-analysis.md). This doc records *why*
 > multi-completion support was built the way it was, for whoever extends it
-> next (shared-prefill forking, beam search).
+> next (shared-prefill forking). Beam search specifically is **not** a
+> natural next step here — see `vllm-gap-analysis.md`'s §2 for why it was
+> investigated and closed as a deliberate non-goal (2026-08-01) rather than
+> left as a future extension.
 
 ## Why this shape
 
@@ -105,9 +108,12 @@ prefill cost turns out to matter in practice.
 
 - **No shared-prefill forking** — see the key decision above. Each branch
   independently reprocesses the prompt.
-- **Beam search stays unimplemented** — `n`/`best_of` are independent-sample
-  fan-out, not a beam-search decoding algorithm. `vllm-gap-analysis.md` no
-  longer lists this row as a full gap, but beam search itself is still ❌.
+- **Beam search stays unimplemented, now a closed non-goal, not a gap** —
+  `n`/`best_of` are independent-sample fan-out, not a beam-search decoding
+  algorithm. Investigated and formally closed in `vllm-gap-analysis.md`
+  (2026-08-01): llama.cpp removed its beam-search API in 2024 and vLLM itself
+  demoted beam search out of its fast serving path, so this isn't tracked as
+  future work for this feature to grow into.
 - **OpenAI-only** — no Ollama equivalent exists to wire this into.
 
 ## Where to look

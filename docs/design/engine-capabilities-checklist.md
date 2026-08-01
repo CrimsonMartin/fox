@@ -70,7 +70,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 | ✅ | Speculative decoding (draft / n-gram / EAGLE) | n-gram/prompt-lookup (0.15) + draft-model (0.16), both exact + golden-verified via `--speculative`/`--draft-model`; EAGLE-style trained draft heads ❌ |
 | ✅ | Guided/structured decoding (grammar / JSON-schema) | GBNF-constrained via `response_format`/`format` (0.14, golden-verified); regex ❌ |
 | ✅ | Tool/function calling | Hermes + Mistral parsers auto-detected from the model's own template (0.16, `tools` threaded into the Jinja context); Llama3 parser explicit-opt-in only (`--tool-call-parser llama3` — unreliable template auto-detection in practice); generic prompt-based JSON remains the fallback otherwise |
-| ⚠️ | `n>1` / best_of / beam search; logprobs / echo | logprobs/top_logprobs ✅ (0.14); n>1/beam/echo ❌ |
+| ⚠️ | `n>1` / `best_of` / beam search; logprobs / echo | logprobs/top_logprobs ✅ (0.14); `n`/`best_of` ✅ (0.18, independent fan-out); beam search closed as a deliberate non-goal (0.18) — see `vllm-gap-analysis.md`; echo ❌ |
 | ⚠️ | Context management: RoPE scaling partial; **context-shift/rolling** on full (`--context-shift`, shiftable caches) ✅; RoPE scaling still not exposed | |
 | ❌ | LoRA / adapters (incl. multi-LoRA) | |
 | ⚠️ | Thinking/reasoning (`<think>` separation) | real per-model detection via the Jinja template's `enable_thinking` + a small `REASONING_FORMATS` registry (0.11); an unlisted family still falls back to the `<think>` heuristic |

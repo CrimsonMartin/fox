@@ -48,11 +48,57 @@ throughput it cannot, and that's fine — different hardware target.
 | logprobs / prompt_logprobs / echo | ✅ | ❌ | **achievable** |
 | Speculative decoding (draft / n-gram / EAGLE / Medusa) | ✅ | ⚠️ n-gram/prompt-lookup ✅ (0.15); draft-model ❌ | **achievable** |
 | `n>1` / `best_of` | ✅ | ✅ (0.18) independent fan-out, capped at 8 — see `n-best-of-support.md` | — |
-| beam search | ✅ | ❌ — no beam-search decoding algorithm; `n`/`best_of` are independent samples, not beams | achievable |
+| beam search | ⚠️ demoted, not first-class | ❌ — deliberately out of scope (2026-08-01), see below | **structural, not achievable** |
 
 **llama.cpp has native GBNF grammar support** → structured/JSON decoding is the single
 biggest impact for the least effort. Speculative decoding is the largest *latency* win
 that is actually within reach (llama.cpp has draft-model and n-gram primitives).
+
+**Beam search — researched and deliberately closed as out of scope (2026-08-01), not
+just "not yet done."** This row was tracked as "achievable" until actually
+investigated:
+
+- **llama.cpp removed `llama_beam_search()` from its public API in 2024** (dropped
+  from the HTTP server in `a8c981b73`, then from the core library in `0cd6bd348`) —
+  an ancestor of fox's currently pinned commit. There is no beam-search primitive left
+  to build on; only the generic `llama_memory_seq_cp`/`seq_rm`/`seq_add` sequence
+  primitives remain, and llama.cpp's own source marks true N-way KV cell sharing
+  between sequences an unfinished refactor (`TAG_KV_CACHE_SHARE_CELLS` TODOs
+  throughout `llama-kv-cache.cpp`), not a hardened feature.
+- **vLLM itself demoted beam search out of its fast path** (RFC
+  [#8306](https://github.com/vllm-project/vllm/issues/8306), 2024): pulled out of the
+  core scheduler/PagedAttention-integrated path into a separate, offline-batch-oriented
+  API (`LLM.beam_search()`), because it doesn't compose with continuous batching the
+  way independent sampling does — `use_beam_search` was removed from `SamplingParams`
+  entirely. The "vLLM has it" side of this gap-analysis row was already weaker than it
+  looked.
+- **OpenAI's API has never exposed real, token-level beam search** — the closest
+  historical analog, the legacy `/v1/completions` `best_of` parameter, was always
+  independent-sample-then-rank (exactly what fox's own `best_of` already does, see
+  `n-best-of-support.md`), not joint per-token re-ranking. There is no natural
+  OpenAI-compatible request shape to attach real beam search to; it would have to be a
+  fox-only extension nobody's client library expects.
+- **A *real*, KV-sharing-efficient implementation would need mechanics fox doesn't
+  have and llama.cpp doesn't cleanly offer**: fox's existing block-sharing (used for
+  prefix-cache donation) is a one-time, exclusive hand-off from a *finished* sequence
+  to a *new* one — beam search needs a *live* fork of a *running* sequence into K
+  siblings, repeated every decode step as beams are pruned and re-spawned. At the
+  llama.cpp level, fox runs with `kv_unified = false` (the default), under which every
+  cross-sequence `llama_memory_seq_cp` is the expensive, real-buffer-copy path, not a
+  cheap metadata-only one — making per-step beam-forking cheap would additionally need
+  a `kv_unified = true` architecture change with its own side effects on fox's
+  existing context-sizing math.
+- **A *naive* implementation (each beam as an independent request, re-ranked between
+  coarse rounds)** would just be a more expensive, weaker variant of the `n`/`best_of`
+  fan-out already shipped in 0.18 — no per-token joint re-ranking, redundant prefill
+  cost scaling with beam width × generation length × rounds, without the actual
+  benefit beam search is supposed to provide.
+
+Given all of the above, this is scoped out as a considered decision, not a backlog
+item — consistent with "major LLM APIs such as GPT, Gemini, and Claude" not supporting
+it either. If llama.cpp or a client ecosystem ever brings back a real, efficient
+primitive for this, it's worth revisiting; nothing here is expected to change on its
+own.
 
 ## 3. Sampling
 
@@ -185,8 +231,9 @@ Shipped since this analysis was written:
   chunking, no prefix caching, no OOM bisection-retry on this path) — see
   `docs/design/vision-support.md` for why that scope was chosen.
 
-Nothing left open in this section — see §2's "beam search" row (under Advanced
-decoding) for the one other tracked gap.
+Nothing left open in this section. Beam search (§2) was the last row still marked
+"achievable" — investigated and reclassified as a deliberate non-goal, not a backlog
+item; see the detailed reasoning under that table.
 
 ## What NOT to chase (outside the niche)
 

@@ -128,6 +128,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request's own multi-step chunking already relied on. See
   `docs/design/reactive-context-rolling.md`.
 
+### Changed
+
+- **Beam search closed as a deliberate non-goal**, not left as an open
+  backlog item — the last row on `vllm-gap-analysis.md`'s vLLM-parity
+  shortlist. Investigated rather than assumed: llama.cpp removed its
+  `llama_beam_search()` API in 2024 (an ancestor of fox's pinned commit,
+  nothing to build on); vLLM itself pulled beam search out of its
+  PagedAttention/continuous-batching fast path into a separate,
+  offline-batch-oriented API for the same composability reasons fox would
+  face; and no major LLM API (OpenAI, Gemini, Claude) exposes real
+  token-level beam search today. A real, KV-sharing-efficient
+  implementation would need live cross-sequence forking mechanics neither
+  fox nor llama.cpp currently offer cleanly; a naive independent-request
+  approximation would just be a more expensive, weaker variant of the
+  `n`/`best_of` fan-out already shipped in 0.18. No code changed — see
+  `docs/design/vllm-gap-analysis.md` §2 for the full reasoning.
+
 ## [0.17.0]
 
 fox gets **vision/multimodal input** — the top feature-gap item for the LatAm

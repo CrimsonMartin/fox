@@ -273,6 +273,39 @@ fn parse_tensor_split(s: &str) -> Vec<f32> {
     raw.iter().map(|&v| v / sum).collect()
 }
 
+/// One-time startup note when `--max-models` is left at its default of 1.
+///
+/// The default trades resident-model churn (a second model's request evicts
+/// the first, once idle) for VRAM safety: fox has no cross-model VRAM
+/// accounting today — the per-load "does this fit" check compares against a
+/// static, whole-GPU figure captured at startup, never subtracting what's
+/// already resident, so raising the default without that accounting would
+/// risk silently trading a churn footgun for an OOM footgun. Making the
+/// trade-off visible here (not just in `--help`) is the fix; see STATUS.md's
+/// "Known issues" for the max_models item and why the default itself stays 1.
+fn max_models_default_hint(max_models: usize) -> Option<&'static str> {
+    (max_models <= 1).then_some(
+        "only 1 model will be kept resident at a time (--max-models 1, the default) — \
+         requesting a second model evicts the first once it's idle. Pass --max-models N \
+         to keep more resident if you have the VRAM; fox does not yet track how much VRAM \
+         already-loaded models are using when deciding whether another will fit.",
+    )
+}
+
+/// Warn once if `--swap-fraction` was explicitly set to a nonzero value — the
+/// flag is accepted for forward compatibility but is not wired to anything
+/// (CPU↔GPU KV transfer needs a llama.cpp API that doesn't exist yet).
+/// Silently dropping a value the user explicitly asked for is exactly the
+/// kind of silent failure CLAUDE.md's conventions ask fox to avoid.
+pub(crate) fn swap_fraction_unused_warning(swap_fraction: f32) -> Option<String> {
+    (swap_fraction != 0.0).then(|| {
+        format!(
+            "--swap-fraction {swap_fraction} was set but is not implemented yet (no-op) — \
+             CPU↔GPU KV swap needs a llama.cpp API that doesn't exist yet; this value is ignored."
+        )
+    })
+}
+
 impl ServeArgs {
     fn validate(&self) -> Result<()> {
         if self.gpu_memory_fraction <= 0.0 || self.gpu_memory_fraction > 1.0 {
@@ -314,6 +347,14 @@ fn setup_logging(json: bool) {
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
     args.validate()?;
     setup_logging(args.json_logs);
+
+    let effective_max_models = args.max_models.max(1);
+    if let Some(hint) = max_models_default_hint(effective_max_models) {
+        tracing::info!("{hint}");
+    }
+    if let Some(warning) = swap_fraction_unused_warning(args.swap_fraction) {
+        tracing::warn!("{warning}");
+    }
 
     let split_mode = parse_split_mode(&args.split_mode);
     // Use total VRAM across all GPUs when splitting across multiple GPUs.
@@ -380,7 +421,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
     let registry_cfg = RegistryConfig {
         models_dir: models_dir.clone(),
-        max_models: args.max_models.max(1),
+        max_models: effective_max_models,
         max_batch_size: args.max_batch_size,
         max_queue_depth: args.max_queue_depth,
         max_prefill_chunk: args.max_prefill_chunk,
@@ -576,5 +617,35 @@ mod tests {
     #[test]
     fn parse_lora_modules_empty_string_yields_no_adapters() {
         assert!(parse_lora_modules("").is_empty());
+    }
+
+    #[test]
+    fn max_models_default_hint_fires_at_default() {
+        assert!(max_models_default_hint(1).is_some());
+    }
+
+    #[test]
+    fn max_models_default_hint_fires_below_default_too() {
+        // args.max_models.max(1) clamps 0 up to 1 before this is called in
+        // practice, but the function itself should still treat "0" as "1".
+        assert!(max_models_default_hint(0).is_some());
+    }
+
+    #[test]
+    fn max_models_default_hint_silent_when_raised() {
+        assert!(max_models_default_hint(2).is_none());
+        assert!(max_models_default_hint(8).is_none());
+    }
+
+    #[test]
+    fn swap_fraction_unused_warning_silent_at_zero() {
+        assert!(swap_fraction_unused_warning(0.0).is_none());
+    }
+
+    #[test]
+    fn swap_fraction_unused_warning_fires_when_set() {
+        let msg = swap_fraction_unused_warning(0.3).expect("nonzero should warn");
+        assert!(msg.contains("0.3"));
+        assert!(msg.contains("not implemented"));
     }
 }

@@ -133,6 +133,10 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
             .init();
     }
 
+    if let Some(warning) = super::serve::swap_fraction_unused_warning(args.swap_fraction) {
+        eprintln!("Warning: {warning}");
+    }
+
     // Resolve model — auto-pull from HuggingFace if not found locally.
     let (model_name, model_path) = match resolve_model_path(&args.model, args.alias_file.as_deref())
     {

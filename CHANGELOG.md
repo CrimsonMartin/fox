@@ -84,6 +84,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `llama_model_is_recurrent`/`llama_model_is_hybrid` — the direct,
   architecture-level llama.cpp APIs for the question actually being asked.
 
+- **`--max-models 1` (the default) and `--swap-fraction` were silent
+  footguns** — a second model request evicting the first, or a
+  `--swap-fraction` value doing nothing at all, both happened with zero
+  feedback. `fox serve` now logs the trade-off explicitly at startup when
+  `--max-models` is left at its default, and warns if `--swap-fraction` is
+  set to a nonzero value (it remains unimplemented — real CPU↔GPU KV swap is
+  blocked on a llama.cpp API that doesn't exist yet). The `max_models=1`
+  default itself is intentionally left unchanged: fox has no cross-model VRAM
+  accounting yet (the per-load fit check compares against a static,
+  whole-GPU figure from startup, never subtracting what other loaded models
+  already claim), so raising the default without that accounting would trade
+  a churn footgun for a real OOM-crash footgun.
+
 ## [0.17.0]
 
 fox gets **vision/multimodal input** — the top feature-gap item for the LatAm

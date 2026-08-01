@@ -80,12 +80,27 @@ fine). Two real causes were found in **fox's own code**:
    lowest free ID, keeping concurrent requests' IDs dense and ascending)
    and emitting the batch in ascending-`seq_id` order.
 
-**Net effect: ~46-52 t/s → ~122-146 t/s** on the standard benchmark (run
-twice to confirm, both far above every pre-fix number) — fox now matches or
-beats Ollama's ~110-148 t/s on this exact benchmark, and reaches ~70-85% of
-vanilla `llama-server`'s 173 t/s, up from ~30-35% before these fixes. The
-sampling fix alone only closed part of the gap (~58-66 t/s, still roughly
-half of Ollama) — both fixes were needed together to get here.
+**Net effect: ~46-52 t/s → ~122-146 t/s** on the standard benchmark — fox now
+matches or beats Ollama's ~110-148 t/s on this exact benchmark, and reaches
+~70-85% of vanilla `llama-server`'s 173 t/s, up from ~30-35% before these
+fixes. The sampling fix alone only closed part of the gap (~58-66 t/s, still
+roughly half of Ollama) — both fixes were needed together to get here.
+
+**Known limitation, workload-dependent**: the seq_id fix only guarantees
+dense/consecutive IDs for requests admitted via a fresh pool allocation. A
+block-level prefix-cache *hit* inherits the donating request's existing
+seq_id unchanged, which drifts non-consecutive under heavy cache reuse — and
+since every chat request shares the same first ~16 tokens (chat-template
+boilerplate) regardless of user content, in practice most requests hit this
+shared prefix and inherit a "hand-me-down" ID. Under sustained load this
+degrades throughput back toward the pre-fix baseline (confirmed: 5 sustained
+repetitions against one long-lived server settled at ~52.7 t/s, not the
+~122-146 t/s single ad-hoc runs showed). This isn't just a benchmark
+artifact — any real deployment sharing a system prompt across concurrent
+conversations hits the same pattern. Not fixed here; needs the
+prefix-cache-hit path to migrate KV data to a fresh seq_id (via
+`llama_memory_seq_cp`) instead of reusing the donated one — see
+`docs/design/rocm-benchmarking-2026-08.md` for the full analysis.
 
 ## 2. Advanced decoding — **the highest-ROI gaps**
 

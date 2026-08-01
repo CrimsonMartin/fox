@@ -313,11 +313,20 @@ fine. Two real causes were found in **fox's own code**:
    scheduler-level metrics. Fixed by making the pool a min-heap (dense,
    ascending IDs) and emitting the batch in ascending-`seq_id` order.
 
-**Net result: ~46-52 t/s → ~122-146 t/s** on the standard benchmark (run
-twice to confirm, both far above every pre-fix number) — fox now matches or
-beats Ollama's ~110-148 t/s on this exact benchmark, and reaches ~70-85% of
-vanilla `llama-server`'s 173 t/s (native llama.cpp, no serving-engine
-overhead), up from ~30-35% before these fixes. Full evidence chain,
-including the abandoned "structural" theory and why it was wrong, in
-`docs/design/rocm-benchmarking-2026-08.md`; the throughput-gap row in
-`docs/design/vllm-gap-analysis.md` §1 reflects the corrected status.
+**Net result: ~46-52 t/s → ~122-146 t/s** on the standard benchmark — fox now
+matches or beats Ollama's ~110-148 t/s on this exact benchmark, and reaches
+~70-85% of vanilla `llama-server`'s 173 t/s, up from ~30-35% before these
+fixes. **Known limitation, found via a follow-up sustained-load test (not a
+one-off run)**: the seq_id fix only guarantees dense/consecutive IDs for
+requests that get a fresh pool allocation; a block-level prefix-cache *hit*
+inherits the donated request's old seq_id as-is, which drifts non-consecutive
+under heavy cache reuse — realistically common (any deployment sharing a
+system prompt across conversations) — degrading throughput back toward the
+pre-fix baseline. Not fixed yet (needs migrating KV data to a fresh seq_id
+on cache-hit via `llama_memory_seq_cp`, a real architecture change). Full
+evidence chain, including the abandoned "structural" theory, this
+limitation, and the new `scripts/repeat_bench.sh` (multi-repetition,
+warmup, alternating-order, error-discarding — built after single ad-hoc
+runs proved too noisy to trust), in `docs/design/rocm-benchmarking-2026-08.md`;
+the throughput-gap row in `docs/design/vllm-gap-analysis.md` §1 reflects the
+corrected status.

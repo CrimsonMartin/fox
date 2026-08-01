@@ -300,6 +300,59 @@ an upstream/structural ceiling — fox's own request-lifecycle overhead
 (scheduling, HTTP/streaming layers) is the more likely remaining source,
 not a fundamental limitation.
 
+## Known limitation: the seq_id fix degrades under heavy prefix-cache reuse
+
+The ad-hoc single-shot numbers above (fresh container, one comparison, then
+torn down) turned out to be an optimistic case. Built `scripts/repeat_bench.sh`
+(committed — see below) to properly benchmark with warmup, multiple
+repetitions, alternating engine order, and automatic discarding of runs with
+request errors, specifically because single ad-hoc runs on this hardware
+showed too much run-to-run variance to trust. Running it for 5 sustained
+repetitions against the **same long-lived fox container** (rather than a
+fresh one per comparison) surfaced a real, reproducible degradation the
+one-shot numbers missed entirely: throughput settled at a rock-stable
+**~52.7 t/s** (range 52.6-52.9 across all 5 repetitions) — back down to the
+pre-seq_id-fix baseline, while Ollama stayed at 144-155 t/s the whole time.
+
+Root cause, confirmed via `docker logs | grep seq_id` and `/metrics`: **not**
+a resource leak (`ferrumox_kv_cache_usage_ratio` sits at ~0.4% at idle —
+blocks are freed correctly). The seq_id min-heap and ascending-emission-order
+fix above guarantees dense, consecutive IDs only for requests that get a
+**fresh pool pop** (a genuine prefix-cache miss). But `try_insert_prefix`'s
+block-level prefix cache donates a finished request's **existing** seq_id to
+the cache entry, and a future cache **hit** (`schedule.rs`'s admission path,
+`req.kv_seq_id = hit.seq_id`) inherits that donated ID as-is — not a fresh
+pop from the ascending pool. Every chat request shares the same first ~16
+tokens (BOS + role-header boilerplate from the chat template) regardless of
+user content, so in practice almost every request hits this shared-header
+cache entry and inherits whatever seq_id was last donated to it — which
+drifts to arbitrary, non-consecutive values (observed: IDs cycling at 29 and
+31, with nothing below 29 admitted for extended stretches) as the cache
+churns. llama.cpp's `split_equal` requires **strictly** consecutive
+`+1`-incrementing seq_ids to merge sequences into one ubatch — sorting
+ascending (which `do_decode_batch` already does) cannot repair a gap; only a
+genuinely dense set of IDs can satisfy it. A set like `{0, 1, 29, 31}` still
+splits into multiple ubatches even sorted.
+
+**This means the fix's real-world benefit is workload-dependent**: it fully
+holds for traffic with low prefix-cache reuse (varied prompts/no shared
+system prompt), which is what the earlier one-shot benchmarks happened to
+exercise (short runs, cache still mostly cold). It degrades toward the
+pre-fix baseline under heavy reuse — which, notably, is not just a synthetic
+benchmark artifact: **any real deployment where multiple concurrent
+conversations share a common system prompt hits this same pattern**, since
+that shared prefix is exactly the kind of content the block-level cache is
+designed to reuse.
+
+**Not fixed here** — a real fix needs the prefix-cache-hit path to hand the
+resuming request a **fresh**, densely-allocated seq_id instead of the
+donated one, migrating that sequence's KV data via llama.cpp's
+`llama_memory_seq_cp` (a real primitive, already used elsewhere in fox per
+`docs/design/reactive-context-rolling.md`'s survey of the sequence-primitive
+surface) — a genuine architecture change to the prefix-cache/seq_id
+interaction, not a one-line fix, and out of scope for this session. Left as
+the most important next step; see "What's next."
+
 ## `n_batch`/`n_ubatch` experiment (tried, reverted, unrelated finding)
 
 Separately from the residual above, capping `n_batch`/`n_ubatch` at 2048
@@ -322,24 +375,47 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
 
 ## What's next
 
-1. Close the remaining gap to `llama-server`'s 173 t/s (fox is at ~70-85% of
-   it now, up from ~30-35% before these fixes) — no longer suggests an
-   upstream ceiling, so this is exploratory rather than a known lead:
-   fox's own request-lifecycle overhead (HTTP/streaming layers, scheduler
-   tick overhead) is the more likely place to look next, not llama.cpp
-   internals.
-2. Profile Ollama/`llama-server` itself with `rocprofv3` (its minimal image
+1. **Highest priority**: fix the prefix-cache/seq_id interaction above — give
+   prefix-cache hits a fresh, densely-allocated seq_id (via
+   `llama_memory_seq_cp` to migrate the KV data) instead of inheriting the
+   donated one. This is what stands between "fixed in the easy case" and
+   "fixed for realistic shared-system-prompt traffic," which is the more
+   common real-world pattern.
+2. Close the remaining gap to `llama-server`'s 173 t/s (fox is at ~70-85% of
+   it now, up from ~30-35% before these fixes, *in the low-prefix-cache-reuse
+   case*) — no longer suggests an upstream ceiling, so this is exploratory
+   rather than a known lead: fox's own request-lifecycle overhead
+   (HTTP/streaming layers, scheduler tick overhead) is the more likely place
+   to look next, not llama.cpp internals.
+3. Profile Ollama/`llama-server` itself with `rocprofv3` (its minimal image
    ships no profiling tools — would need building or copying in a
    profiling-capable image) to directly confirm it's hitting `ncols_dst=4`
    consistently, as a sanity check against fox's now-fixed dispatch pattern.
-3. Re-run a `rocprofv3` capture on fox's own fixed build to directly
+4. Re-run a `rocprofv3` capture on fox's own fixed build to directly
    confirm `ncols_dst=4` now dominates (this doc's fix is verified via
-   aggregate throughput, run twice; a kernel-level reconfirmation would be
-   the last piece of direct evidence, blocked this session by the ROCm
-   runtime image missing `libdw.so.1`, a `rocprofv3` dependency not
-   installed in `Dockerfile.rocm`'s minimal runtime stage).
-4. The independent 7-13% `n_batch`/`n_ubatch` win in the section above, if
+   aggregate throughput; a kernel-level reconfirmation would be the last
+   piece of direct evidence, blocked this session by the ROCm runtime image
+   missing `libdw.so.1`, a `rocprofv3` dependency not installed in
+   `Dockerfile.rocm`'s minimal runtime stage).
+5. The independent 7-13% `n_batch`/`n_ubatch` win in the section above, if
    someone builds the causal/non-causal model detection it needs.
+
+## Benchmarking methodology: use `scripts/repeat_bench.sh`, not one-off runs
+
+Single ad-hoc `fox-bench` invocations (fresh container, one comparison) are
+what produced every number in this doc until the prefix-cache finding above
+— and they're exactly what missed that degradation, since a short one-shot
+run never gives the prefix cache time to saturate with donated seq_ids the
+way a real, sustained server process does. `scripts/repeat_bench.sh` (new,
+committed) runs N repetitions against **already-running** servers, with a
+discarded warmup request per engine, alternating which engine goes first
+each round (cancels thermal/cache ordering bias), and drops (with a loud
+warning, retried once first) any repetition that comes back with request
+errors instead of silently averaging in a result computed on a smaller
+sample. It reports median + [min, max], not a single number — use it for
+any future fox-vs-X comparison on this hardware; a single run here isn't
+trustworthy enough to draw conclusions from, as this whole investigation
+kept demonstrating.
 
 ## Where to look
 
@@ -347,8 +423,10 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
 |---|---|
 | `AMDGPU_TARGETS` passthrough | `build.rs` (ROCm/HIP auto-detection block) |
 | ROCm Docker build | `Dockerfile.rocm` |
+| Repeated/statistically-sound benchmarking | `scripts/repeat_bench.sh` |
 | **The main fix** — dense/ascending `seq_id` allocation | `src/scheduler/mod.rs` (`seq_id_pool`, now a min-heap) |
 | **The main fix** — batch emitted in ascending `seq_id` order | `src/engine/model/llama_cpp/batch.rs` (`do_decode_batch`) |
+| **Known limitation** — prefix-cache hits inherit a stale seq_id | `src/scheduler/schedule.rs` (prefix-hit admission path, `req.kv_seq_id = hit.seq_id`), `src/scheduler/mod.rs` (`try_insert_prefix`) |
 | **The sampling fix** — adaptive candidate selection | `src/engine/model/sampling.rs` (`sample_token`) |
 | **The sampling fix** — skip logits copy when unneeded | `src/engine/model/mod.rs` (`needs_logits`), `src/engine/run.rs`, `src/engine/model/llama_cpp/batch.rs` |
 | OpenAI vs Ollama sampling defaults (`top_k=0` vs `40`) | `src/api/shared/sampling_defaults.rs` |

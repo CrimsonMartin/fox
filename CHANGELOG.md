@@ -63,6 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fox pull <name>` didn't actually use the curated registry it advertises** —
+  `fox models`/`registry.json` map short names/aliases to a specific HF repo +
+  recommended file, but `fox pull` never consulted that catalog: it always ran
+  a live HuggingFace search by name and hoped the top result happened to match.
+  `fox pull` now checks the registry first (exact name, alias, or
+  `<name>-<quant>`) and resolves straight to the intended repo/file; falls back
+  to the historical live-search behavior unchanged for any name not in the
+  registry. Vision entries now print a follow-up hint for their paired mmproj
+  file after downloading (not auto-fetched, to avoid a surprise extra
+  download for text-only use).
+
 - **Recurrent/hybrid models were silently getting prefix caching enabled**
   when it should have been disabled — found while verifying the KV-sizing fix
   above against a real Mamba model. The existing detection

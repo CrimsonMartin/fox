@@ -49,6 +49,7 @@ bytes = "1"
 dirs = "5"
 minijinja = "2"
 minijinja-contrib = { version = "2", features = ["pycompat"] }
+base64 = "0.22"
 
 # Optional (enabled via test-helpers feature)
 tower = { version = "0.4", features = ["util"], optional = true }

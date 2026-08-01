@@ -111,6 +111,15 @@
       "description": "Nomic Embed Text v1.5 — high-quality text embeddings",
       "size_gb": 0.1,
       "tags": ["embeddings", "search", "rag"]
+    },
+    "moondream2": {
+      "aliases": ["moondream", "moondream2:vision"],
+      "repo": "ggml-org/moondream2-20250414-GGUF",
+      "recommended": "moondream2-text-model-f16_ct-vicuna.gguf",
+      "mmproj": "moondream2-mmproj-f16-20250414.gguf",
+      "description": "Moondream2 1.8B (vision) — small, fast image understanding. Pull both files (`fox pull moondream2` then `fox pull ggml-org/moondream2-20250414-GGUF --filename moondream2-mmproj-f16-20250414.gguf`), then serve with `--mmproj moondream2-mmproj-f16-20250414`",
+      "size_gb": 3.75,
+      "tags": ["chat", "vision", "edge"]
     }
   }
 }

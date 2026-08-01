@@ -171,6 +171,30 @@ pub struct PrefillStep {
     pub tokens_in_kv: usize,
 }
 
+/// `llama_decode` failed with ret==1 ("no KV slot for batch") even at the
+/// minimum possible batch size — `batch.rs`'s bisection retry already
+/// narrowed the batch down to this one request and it still doesn't fit.
+/// Distinct from a generic decode failure so the engine layer (which owns
+/// the `Scheduler` and `--context-shift` config that `LlamaCppModel`/
+/// `batch.rs` have no access to) can attempt one targeted context roll
+/// before giving up — see `docs/design/reactive-context-rolling.md`.
+#[derive(Debug)]
+pub(crate) struct KvCacheFullAtMinimum {
+    pub req_id: u64,
+}
+
+impl std::fmt::Display for KvCacheFullAtMinimum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "llama_decode: no KV slot for request {} even at the minimum batch size",
+            self.req_id
+        )
+    }
+}
+
+impl std::error::Error for KvCacheFullAtMinimum {}
+
 /// Inference request (minimal view for model).
 #[derive(Debug, Clone)]
 pub struct InferenceRequestForModel {
@@ -531,5 +555,31 @@ pub trait Model: Send + Sync {
             stop_token_count: self.stop_tokens().len(),
             recommended_sampling: self.recommended_sampling(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KvCacheFullAtMinimum;
+
+    #[test]
+    fn kv_cache_full_at_minimum_downcasts_from_anyhow_error() {
+        let err: anyhow::Error = anyhow::Error::new(KvCacheFullAtMinimum { req_id: 42 });
+        let downcast = err
+            .downcast_ref::<KvCacheFullAtMinimum>()
+            .expect("must downcast back to KvCacheFullAtMinimum");
+        assert_eq!(downcast.req_id, 42);
+    }
+
+    #[test]
+    fn kv_cache_full_at_minimum_display_mentions_req_id() {
+        let err = KvCacheFullAtMinimum { req_id: 7 };
+        assert!(err.to_string().contains('7'));
+    }
+
+    #[test]
+    fn unrelated_error_does_not_downcast() {
+        let err = anyhow::anyhow!("some other decode failure");
+        assert!(err.downcast_ref::<KvCacheFullAtMinimum>().is_none());
     }
 }

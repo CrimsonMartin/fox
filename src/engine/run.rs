@@ -131,7 +131,18 @@ impl InferenceEngine {
                 // Before decoding, roll any sequence whose KV window is full so it can
                 // continue past n_ctx instead of failing (context shift).
                 engine.roll_full_contexts(&decode_ids).await;
-                match engine.run_decode(&decode_ids).await {
+                let mut decode_result = engine.run_decode(&decode_ids).await;
+                // Reactive context roll: bisection retry (batch.rs) already shrank the
+                // batch as far as it can — if it still failed because exactly one
+                // request has no KV slot even alone, and that request has old context
+                // it can afford to discard, roll it and retry the whole batch once
+                // more before giving up. See docs/design/reactive-context-rolling.md.
+                if let Err(e) = &decode_result {
+                    if let Some(true) = engine.try_reactive_roll(&decode_ids, e).await {
+                        decode_result = engine.run_decode(&decode_ids).await;
+                    }
+                }
+                match decode_result {
                     Ok(decode_results) => {
                         engine.handle_logits(&decode_results, false).await?;
                     }
@@ -231,6 +242,67 @@ impl InferenceEngine {
                 Err(e) => {
                     tracing::warn!(request_id = req.id, "context roll join error: {e}")
                 }
+            }
+        }
+    }
+
+    /// If `err` failed a decode step, that request has old context worth
+    /// discarding, and one more attempt at the full batch might succeed:
+    /// attempt exactly one reactive context roll on the specific request that
+    /// `batch.rs` reported as `KvCacheFullAtMinimum`, and let the caller retry.
+    ///
+    /// Returns `None` when `err` isn't that specific signal at all (a normal
+    /// fatal decode error — unchanged behavior). Returns `Some(false)` when it
+    /// is, but rolling doesn't apply (context-shift disabled, model can't
+    /// shift, or the request doesn't have enough context left to make
+    /// discarding meaningful) — the caller falls through to `EngineError`
+    /// exactly as it did before this feature existed. Returns `Some(true)`
+    /// only after a real, successful roll, which the caller should retry once.
+    async fn try_reactive_roll(&self, decode_ids: &[u64], err: &anyhow::Error) -> Option<bool> {
+        let req_id = err
+            .downcast_ref::<super::model::KvCacheFullAtMinimum>()?
+            .req_id;
+        let n_keep_cfg = self.context_shift?;
+        if !self.supports_prefix_cache {
+            return Some(false);
+        }
+        let n_ctx = self.model.context_len() as usize;
+        let running = self.scheduler.get_running(decode_ids);
+        let Some(req) = running.iter().find(|r| r.id == req_id) else {
+            return Some(false);
+        };
+        if req.kv_seq_id < 0 {
+            return Some(false);
+        }
+        let Some((n_keep, n_discard)) = reactive_roll_amounts(n_keep_cfg, n_ctx, req.context_len())
+        else {
+            return Some(false);
+        };
+        let seq_id = req.kv_seq_id;
+        let model = self.model.clone();
+        let res =
+            tokio::task::spawn_blocking(move || model.roll_context(seq_id, n_keep, n_discard))
+                .await;
+        match res {
+            Ok(Ok(())) => {
+                self.scheduler.record_context_roll(req_id, n_discard);
+                tracing::info!(
+                    request_id = req_id,
+                    seq_id,
+                    n_keep,
+                    n_discard,
+                    n_ctx,
+                    "reactively rolled context after KV-cache-full at minimum batch size — retrying decode"
+                );
+                Some(true)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(request_id = req_id, "reactive context roll failed: {e}");
+                Some(false)
+            }
+            Err(e) => {
+                tracing::warn!(request_id = req_id, "reactive context roll join error: {e}");
+                Some(false)
             }
         }
     }
@@ -414,5 +486,70 @@ impl InferenceEngine {
                 .await
                 .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))??;
         Ok(out.into_iter().map(|(id, l)| (id, vec![l])).collect())
+    }
+}
+
+/// Compute `(n_keep, n_discard)` for a reactive context roll, or `None` when
+/// there isn't enough context beyond the preserved head to make discarding
+/// meaningful (e.g. `n_ctx` itself is tiny, or the request's `ctx_len` barely
+/// exceeds `n_keep`). Deliberately a separate, small function from
+/// `roll_full_contexts`'s inline arithmetic rather than a shared abstraction:
+/// the proactive trigger only ever calls its math once `ctx_len` has already
+/// crossed a large threshold (`n_ctx - reserve`), where this edge case can't
+/// arise, so reusing it here isn't necessary and forcing a shared helper into
+/// that already-shipped, already-tested path isn't worth the risk.
+fn reactive_roll_amounts(
+    n_keep_cfg: usize,
+    n_ctx: usize,
+    ctx_len: usize,
+) -> Option<(usize, usize)> {
+    if n_ctx == 0 {
+        return None;
+    }
+    let n_keep = n_keep_cfg.min(n_ctx.saturating_sub(1));
+    if ctx_len <= n_keep + 1 {
+        return None;
+    }
+    let n_discard = (ctx_len.saturating_sub(n_keep) / 2).max(1);
+    Some((n_keep, n_discard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reactive_roll_amounts;
+
+    #[test]
+    fn enough_context_yields_keep_and_discard() {
+        let (n_keep, n_discard) = reactive_roll_amounts(0, 2048, 2000).unwrap();
+        assert_eq!(n_keep, 0);
+        assert_eq!(n_discard, 1000);
+    }
+
+    #[test]
+    fn n_keep_cfg_is_clamped_below_n_ctx() {
+        // n_keep_cfg (10_000) exceeds n_ctx (100) — clamp to n_ctx - 1 = 99.
+        let (n_keep, n_discard) = reactive_roll_amounts(10_000, 100, 150).unwrap();
+        assert_eq!(n_keep, 99);
+        assert_eq!(n_discard, 25);
+    }
+
+    #[test]
+    fn discard_is_at_least_one() {
+        // ctx_len just barely above n_keep + 1 — halving would round to 0,
+        // clamped up to 1.
+        let (_, n_discard) = reactive_roll_amounts(100, 2048, 102).unwrap();
+        assert_eq!(n_discard, 1);
+    }
+
+    #[test]
+    fn zero_n_ctx_yields_none() {
+        assert!(reactive_roll_amounts(0, 0, 100).is_none());
+    }
+
+    #[test]
+    fn context_barely_over_keep_yields_none() {
+        // ctx_len <= n_keep + 1: nothing meaningful left to discard.
+        assert!(reactive_roll_amounts(100, 2048, 101).is_none());
+        assert!(reactive_roll_amounts(100, 2048, 100).is_none());
     }
 }

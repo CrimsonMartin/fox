@@ -109,7 +109,7 @@ Datacenter-scale features, outside fox's single-node niche.
 
 | Capability | vLLM | fox | Kind |
 |---|---|---|---|
-| OOM recovery (retry, degrade context) | ✅ | ✅ (0.16, batch-size-bisection retry) | fail-fast (queue-depth cap → 429) + retry a recoverable `llama_decode` failure by shrinking the batch; no reactive context-rolling beyond that |
+| OOM recovery (retry, degrade context) | ✅ | ✅ (0.16 batch-size-bisection retry + 0.18 reactive context-roll) | fail-fast (queue-depth cap → 429) + retry a recoverable `llama_decode` failure by shrinking the batch, then (0.18) one reactive context-roll on the remaining request before giving up — see `reactive-context-rolling.md` |
 | Backpressure / rate-limit / max-queue | ✅ | ✅ (0.16) | — |
 | Request priority (priority preemption) | ✅ | ⚠️ LIFO preemption only, no priority | achievable |
 | KV offload / swap to CPU | ✅ | ⚠️ `--swap-fraction` placeholder, unimplemented | achievable |
@@ -145,8 +145,21 @@ Shipped since this analysis was written:
   independently — llama.cpp's own documented mitigation for that code — recursing
   down to a single request before falling back to the existing `EngineError` path.
   Observable via `ferrumox_decode_bisection_retries_total` + a per-event
-  `tracing::warn!`. Reactive context-rolling as a further mitigation (once already
-  down to a single request) is still open.
+  `tracing::warn!`.
+- ✅ **Reactive context-rolling on OOM** (0.18) — once bisection retry bottoms out at a
+  single request and it still fails, `engine/run.rs` performs one targeted context roll
+  (reusing the existing `--context-shift` mechanism) on that request and retries the
+  whole batch once more before falling back to `EngineError`. A typed error
+  (`KvCacheFullAtMinimum`) carries the failing request id up from the model layer,
+  which has no scheduler/config access, to the engine layer that does. In practice a
+  narrow safety net — the existing proactive per-request threshold already prevents
+  most aggregate exhaustion under normal load. The same stress-testing also found and
+  fixed a more severe, unrelated bug: several requests' prefill chunks admitted into
+  one scheduler step could together exceed `n_batch`, which llama.cpp enforces via a
+  hard-abort `GGML_ASSERT` (no graceful return code, unlike `ret==1`) — a real
+  process-crash reachable by ordinary concurrent load under a small
+  `--max-context-len`, now capped before the call. See
+  `docs/design/reactive-context-rolling.md`.
 - ✅ **Hermes, Mistral, and Llama3 tool-call parsers** (0.16) — `tools` threaded into
   the Jinja render context, auto-detected from the model's own template
   (`--tool-call-parser auto\|generic\|hermes\|mistral\|llama3`). Mistral's parser
@@ -172,11 +185,8 @@ Shipped since this analysis was written:
   chunking, no prefix caching, no OOM bisection-retry on this path) — see
   `docs/design/vision-support.md` for why that scope was chosen.
 
-Still open, in priority order:
-
-1. **Reactive context-rolling as a further OOM mitigation** — 0.16's bisection retry
-   shrinks the batch on a recoverable failure; it doesn't roll a request's context
-   once already down to a single request that still can't decode.
+Nothing left open in this section — see §2's "beam search" row (under Advanced
+decoding) for the one other tracked gap.
 
 ## What NOT to chase (outside the niche)
 

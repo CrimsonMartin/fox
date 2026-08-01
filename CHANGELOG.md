@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Verified against real DeepSeek-V2-Lite (MLA) and Mamba (recurrent) models —
   both added to `registry.json`. See `docs/design/mla-recurrent-kv-sizing.md`.
 
+- **Reactive context-rolling on OOM** — closes the last item on the
+  vLLM-parity shortlist. When 0.16's decode-time bisection retry bottoms out
+  at a single request and it still can't decode, fox now attempts one
+  targeted context roll on that request (reusing the existing
+  `--context-shift` mechanism) and retries the whole batch once more before
+  giving up with `EngineError` — a "further degrade" step beyond just
+  shrinking the batch. A typed error carries the failing request id from the
+  model layer (which has no scheduler/config access) up to the engine layer
+  that does. In practice a narrow safety net for residual cases — verified
+  live that the existing proactive context-shift threshold already prevents
+  most contention under normal concurrent load. See
+  `docs/design/reactive-context-rolling.md`.
+
 ### Fixed
 
 - **`fox pull <name>` didn't actually use the curated registry it advertises** —
@@ -96,6 +109,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-GPU figure from startup, never subtracting what other loaded models
   already claim), so raising the default without that accounting would trade
   a churn footgun for a real OOM-crash footgun.
+
+- **A real server crash, found while verifying reactive context-rolling
+  against actual concurrent load** — several requests admitted into the same
+  prefill step each contributed their own chunk to one shared `llama_decode`
+  call, and their combined token count could exceed `n_batch`.
+  `--max-prefill-chunk` only capped one request's own chunk, not the sum
+  across several concurrently-admitted requests (also reachable with a
+  *single* request whenever `max_prefill_chunk` itself exceeds `n_batch` — a
+  small `--max-context-len` shrinks `n_batch` below the 512-token default).
+  Unlike `ret==1` ("no KV slot"), llama.cpp enforces this via a hard
+  `GGML_ASSERT` abort with no graceful return code — a full process crash,
+  not a per-request failure, reproduced live with 9 concurrent requests
+  against a deliberately small `--max-context-len`. Fixed by allocating the
+  real `n_batch` (queried via `llama_n_batch`) across requests in submission
+  order before ever building the batch; any request that doesn't fit this
+  step simply gets deferred to the next one, the same mechanism a single
+  request's own multi-step chunking already relied on. See
+  `docs/design/reactive-context-rolling.md`.
 
 ## [0.17.0]
 

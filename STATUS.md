@@ -109,9 +109,10 @@ to confirm are marked ❓.
 | ✅ | Prefix-cache block/seq_id leak on eviction | **resolved (0.12)** — was a suspected leak, closed by a dedicated stress test (`stress_prefix_cache_no_leak`) proving allocation returns to zero after draining; the original automated flag was a false positive |
 | ✅ | Multi-GPU (layer/row split, manual or auto tensor-split) | |
 | ✅ | MoE CPU offload (`--moe-cpu`) via expert-tensor regex | |
-| 🚧 | `--swap-fraction` | parsed but unused (placeholder) |
+| 🚧 | `--swap-fraction` | parsed but unused (placeholder — real CPU↔GPU KV swap blocked on a missing llama.cpp API). **0.18**: no longer silently ignored — warns at startup when set to a nonzero value |
 | ✅ | Backpressure / fail-fast (0.16) | `--max-queue-depth` rejects a full queue with HTTP 429 instead of queueing forever; a real engine failure gets a distinct `StopReason::EngineError` and an explicit terminal token instead of silently closing the response channel |
-| ✅ | OOM recovery — batch-size bisection retry (0.16) | `do_prefill`/`do_decode` distinguish `llama_decode`'s return codes (per `llama.h`) instead of treating any non-zero as fatal: `1` ("no KV slot for the batch") now retries by splitting the batch in half and decoding each half independently — llama.cpp's own documented mitigation — recursing down to a single request before giving up. `2`/`-1`/`< -1` stay immediately fatal (unchanged `EngineError` path). Observable via `ferrumox_decode_bisection_retries_total` + a `tracing::warn!` per retry. No reactive context-rolling on top of this — see known issue #8 |
+| ✅ | OOM recovery — batch-size bisection retry (0.16) + reactive context-roll (0.18) | `do_prefill`/`do_decode` distinguish `llama_decode`'s return codes (per `llama.h`) instead of treating any non-zero as fatal: `1` ("no KV slot for the batch") retries by splitting the batch in half, recursing down to a single request before giving up. **0.18** adds the "further degrade" step once bisection bottoms out: if that one remaining request has old context to discard, `engine/run.rs` performs one reactive context roll (reusing the existing `--context-shift` mechanism) and retries the whole batch once more before falling back to `EngineError`. See `docs/design/reactive-context-rolling.md`. Observable via `ferrumox_decode_bisection_retries_total` + `tracing::warn!`/`tracing::info!` per retry/roll |
+| ✅ | Prefill batch-size overflow no longer crashes the process (0.18) | A real, more severe bug found while verifying the above: several requests admitted into the same prefill step each contributed their own chunk to one shared `llama_decode` call, and their **sum** could exceed `n_batch` — llama.cpp aborts via `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` for this, a hard process crash with no graceful return code (unlike `ret==1`), reachable by ordinary concurrent load under a small `--max-context-len`. Fixed by capping the aggregate per-call submission against `llama_n_batch(ctx)` (`allocate_batch_budget`), spreading any excess to the next scheduler step. See `docs/design/reactive-context-rolling.md` |
 
 ## Model management / CLI
 
@@ -225,7 +226,7 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | 5 | ✅ Resolved (simple scope) | Footguns: `max_models=1`, silent multimodal drop, ignored `frequency/presence_penalty`, dead `swap_fraction` | Phase P4 — multimodal drop now warns (0.11), `frequency/presence_penalty` now applied (0.11). **0.18** — `max_models=1`'s trade-off is now stated explicitly at startup instead of silent (default itself intentionally unchanged — no cross-model VRAM accounting exists yet, a separate, larger follow-up); `--swap-fraction` now warns when set to a nonzero value instead of silently doing nothing (real CPU↔GPU swap remains blocked on a missing llama.cpp API, unchanged) |
 | 6 | ✅ Resolved | Prefix-cache eviction cleanup | **0.12** — stress test (`stress_prefix_cache_no_leak`) proved no leak; three *other* prefix-cache correctness bugs (unrelated to leak) were later found and fixed in 0.15.1 via real end-to-end testing |
 | 7 | ✅ Resolved | Chat templates not executed (no Jinja) → thinking + native tool-calling lost (Gemma 4, Qwen3, …) | **0.11 (`cc12851`)** — real Jinja via `minijinja`, `enable_thinking` threaded, per-model reasoning-marker detection. `tools` threading (needed for native tool-*calling* specifically) landed separately in **0.16**, tracked as item 9 below |
-| 8 | ✅ Resolved (simple scope) | No backpressure/OOM recovery — an admission-rejected or engine-crashed request silently closes its response channel (fake 200), and a real `llama_decode` failure always killed every request in the batch even when llama.cpp itself reports it as recoverable | **0.16** — `--max-queue-depth` limit + explicit error signaling + a distinct `StopReason::EngineError`, plus batch-size-bisection retry on `llama_decode` ret==1 ("no KV slot for batch"). Reactive context-rolling on top of bisection (further "degrade" beyond retrying with a smaller batch) is still open, see `docs/design/vllm-gap-analysis.md` |
+| 8 | ✅ Resolved | No backpressure/OOM recovery — an admission-rejected or engine-crashed request silently closes its response channel (fake 200), and a real `llama_decode` failure always killed every request in the batch even when llama.cpp itself reports it as recoverable | **0.16** — `--max-queue-depth` limit + explicit error signaling + a distinct `StopReason::EngineError`, plus batch-size-bisection retry on `llama_decode` ret==1 ("no KV slot for batch"). **0.18** — added reactive context-rolling as the further "degrade" step once bisection bottoms out (see `docs/design/reactive-context-rolling.md`), and, found by the same real-concurrent-load testing, fixed a more severe *process-crash* bug: aggregate prefill tokens across several same-step requests could exceed `n_batch`, which llama.cpp enforces via a hard `GGML_ASSERT` abort with no graceful return code — now capped before the call (`allocate_batch_budget`) |
 | 9 | ✅ Resolved | Tool calling was generic prompt-based only; native per-model formats were never exercised even though real Jinja rendering exists | **0.16** — Hermes, Mistral, and Llama3 parsers, `tools` threaded into the Jinja context. Llama3 is explicit-opt-in only (unreliable template auto-detection, see item above) |
 | 10 | ✅ Resolved (simple scope) | Draft-model speculative decoding (generalizes 0.15's n-gram win beyond repetitive/context-echoing output) | **0.16** — `Proposer` trait + `--draft-model`. Deliberately no eviction pairing/VRAM budgeting (operator sizes both models to fit) — see `docs/design/speculative-roadmap.md` Level 2 |
 
@@ -237,11 +238,13 @@ prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) a
 0.16's feature work, now landed, plus vision/multimodal (0.17, see
 `docs/design/vision-support.md`), LoRA adapters (0.18, see
 `docs/design/lora-support.md`), multiple completions per request (0.18, see
-`docs/design/n-best-of-support.md`), and MLA/recurrent KV sizing (0.18, see
-`docs/design/mla-recurrent-kv-sizing.md`). What's left clusters into genuine remaining
+`docs/design/n-best-of-support.md`), MLA/recurrent KV sizing (0.18, see
+`docs/design/mla-recurrent-kv-sizing.md`), and reactive context-rolling plus a
+process-crash fix in prefill batching (0.18, see
+`docs/design/reactive-context-rolling.md`). What's left clusters into genuine remaining
 correctness debt with no work scheduled (the `REASONING_FORMATS` registry's narrow
-coverage) and the feature gaps `docs/design/vllm-gap-analysis.md` still lists open
-(reactive context-rolling on top of bisection retry, beam search).
+coverage) and the one remaining feature gap `docs/design/vllm-gap-analysis.md` lists open
+(beam search).
 
 ---
 
@@ -266,13 +269,11 @@ context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes/Mistra
 tool-call parsers (0.16), OOM recovery via batch-size-bisection retry (0.16),
 vision/multimodal via `mtmd` (0.17, see `docs/design/vision-support.md`), single-base-model
 multi-LoRA via `--lora-modules` (0.18, see `docs/design/lora-support.md`), `n`/`best_of`
-multiple completions per request (0.18, see `docs/design/n-best-of-support.md`), and
-correct MLA/recurrent KV sizing (0.18, see `docs/design/mla-recurrent-kv-sizing.md`).
+multiple completions per request (0.18, see `docs/design/n-best-of-support.md`),
+correct MLA/recurrent KV sizing (0.18, see `docs/design/mla-recurrent-kv-sizing.md`), and
+reactive context-rolling on OOM (0.18, see `docs/design/reactive-context-rolling.md`).
 
-**Still open, in priority order** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
+**Still open** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
 
-1. Reactive context-rolling as a further OOM mitigation once a batch is already
-   bisected to a single request and still fails (0.16 only retries by shrinking the
-   batch, not by rolling context).
-2. Beam search — `n`/`best_of` are independent-sample fan-out (0.18), not a
+1. Beam search — `n`/`best_of` are independent-sample fan-out (0.18), not a
    beam-search decoding algorithm; no work scheduled.

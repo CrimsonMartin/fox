@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
 use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, PrefillStep};
+use crate::engine::model::{
+    InferenceRequestForModel, KvCacheFullAtMinimum, Logits, Model, PrefillStep,
+};
 
 use super::LlamaCppModel;
 
@@ -23,6 +25,28 @@ fn bisection_split(ret: i32, len: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Allocate an `n_batch` token budget across `desired_lens` (one per request,
+/// in submission order), returning each request's actually-allowed length.
+/// Once the budget is exhausted, later requests get `0` for this call — never
+/// partially over budget, and never negative. This exists because
+/// `llama_decode` aborts via `GGML_ASSERT(n_tokens_all <= cparams.n_batch)`
+/// with no graceful return code, unlike `ret==1` ("no KV slot"), so the
+/// aggregate submitted-token count must never be allowed to exceed `n_batch`
+/// in the first place — see the call site in `do_prefill_batch` for why this
+/// can happen even with `max_prefill_chunk` already capping each request's
+/// own desired length.
+fn allocate_batch_budget(desired_lens: &[usize], n_batch: usize) -> Vec<usize> {
+    let mut budget = n_batch;
+    desired_lens
+        .iter()
+        .map(|&desired| {
+            let allowed = desired.min(budget);
+            budget -= allowed;
+            allowed
+        })
+        .collect()
 }
 
 /// One group of requests sharing the same LoRA selection (by adapter name — see
@@ -165,9 +189,10 @@ impl LlamaCppModel {
                 .min(r.prompt_tokens.len())
         };
 
-        // End (exclusive) of this chunk: advance up to max_prefill_chunk tokens from
-        // prefill_pos (0 = unbounded / single-shot), clamped to the prompt length.
-        let chunk_end = |r: &InferenceRequestForModel| {
+        // Desired end (exclusive) of this chunk before the n_batch cap below: advance
+        // up to max_prefill_chunk tokens from prefill_pos (0 = unbounded / single-shot),
+        // clamped to the prompt length.
+        let desired_chunk_end = |r: &InferenceRequestForModel| {
             let start = r.prefill_pos.min(r.prompt_tokens.len());
             if max_prefill_chunk == 0 {
                 r.prompt_tokens.len()
@@ -175,6 +200,41 @@ impl LlamaCppModel {
                 (start + max_prefill_chunk).min(r.prompt_tokens.len())
             }
         };
+
+        // llama.cpp aborts via GGML_ASSERT(n_tokens_all <= cparams.n_batch) — unlike
+        // ret==1 ("no KV slot"), there is no graceful return code for this, so it must
+        // never be reached rather than retried. `max_prefill_chunk` alone doesn't
+        // guarantee this: it caps one request's own chunk, but several requests
+        // admitted into the same step each contribute their own chunk to the SAME
+        // batch, and their sum is what n_batch actually bounds (also possible with a
+        // single request if max_prefill_chunk itself exceeds n_batch — a small
+        // --max-context-len shrinks n_batch below the 512-token default). Allocate the
+        // n_batch budget across requests in submission order; once exhausted, later
+        // requests in this call submit zero tokens this step — their `prefill_pos`
+        // doesn't advance, so the scheduler re-offers them next step, exactly the
+        // existing mechanism a single request's own multi-step chunking already relies
+        // on (see the empty-`tokens_to_submit` handling below).
+        let n_batch = unsafe {
+            let ctx_guard = self
+                ._ctx
+                .lock()
+                .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+            ffi::llama_n_batch(ctx_guard.as_ptr() as *const _) as usize
+        };
+        let desired_lens: Vec<usize> = requests
+            .iter()
+            .map(|r| {
+                let start = r.prefill_pos.min(r.prompt_tokens.len());
+                desired_chunk_end(r).saturating_sub(start)
+            })
+            .collect();
+        let allowed_lens = allocate_batch_budget(&desired_lens, n_batch);
+        let chunk_ends: Vec<usize> = requests
+            .iter()
+            .zip(allowed_lens.iter())
+            .map(|(r, &allowed_len)| r.prefill_pos.min(r.prompt_tokens.len()) + allowed_len)
+            .collect();
+        let chunk_end = |i: usize| chunk_ends[i];
 
         // Copy cached prefix KV data into each request's sequence BEFORE building the
         // batch — but only on the request's FIRST chunk (prefill_pos == effective_skip),
@@ -213,7 +273,8 @@ impl LlamaCppModel {
         // This chunk submits prompt_tokens[prefill_pos .. chunk_end] for each request.
         let total_tokens: usize = requests
             .iter()
-            .map(|r| chunk_end(r).saturating_sub(r.prefill_pos.min(r.prompt_tokens.len())))
+            .enumerate()
+            .map(|(i, r)| chunk_end(i).saturating_sub(r.prefill_pos.min(r.prompt_tokens.len())))
             .sum();
 
         // Nothing left to submit (all requests already fully prefilled) — report
@@ -238,10 +299,10 @@ impl LlamaCppModel {
         // final prompt token), or -1 when this chunk doesn't reach the prompt's end.
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
 
-        for req in requests.iter() {
+        for (i, req) in requests.iter().enumerate() {
             let seq_id = req.kv_seq_id;
             let start = req.prefill_pos.min(req.prompt_tokens.len());
-            let end = chunk_end(req);
+            let end = chunk_end(i);
             let tokens_to_submit = &req.prompt_tokens[start..end];
             if tokens_to_submit.is_empty() {
                 batch_logits_indices.push(-1);
@@ -311,7 +372,7 @@ impl LlamaCppModel {
 
         for (i, &req_id) in req_ids.iter().enumerate() {
             let req = requests.get(i);
-            let new_pos = req.map(chunk_end).unwrap_or(0);
+            let new_pos = req.map(|_| chunk_end(i)).unwrap_or(0);
             let complete = req
                 .map(|r| new_pos >= r.prompt_tokens.len())
                 .unwrap_or(false);
@@ -512,6 +573,17 @@ impl LlamaCppModel {
                 let mut results = self.do_decode_batch(ids_a, req_a)?;
                 results.extend(self.do_decode_batch(ids_b, req_b)?);
                 return Ok(results);
+            }
+            // Bisection is exhausted (batch already at size 1) and it's
+            // specifically "no KV slot" (ret==1), not some other fatal code —
+            // signal which request this is so the engine layer (which owns
+            // the scheduler + context-shift config this layer doesn't have)
+            // can try one reactive context roll before giving up. See
+            // docs/design/reactive-context-rolling.md.
+            if ret == 1 && requests.len() == 1 {
+                return Err(anyhow::Error::new(KvCacheFullAtMinimum {
+                    req_id: req_ids[0],
+                }));
             }
             return Err(anyhow!(
                 "llama_decode failed: {} (batch size {})",
@@ -982,7 +1054,45 @@ impl LlamaCppModel {
 
 #[cfg(test)]
 mod tests {
-    use super::bisection_split;
+    use super::{allocate_batch_budget, bisection_split};
+
+    #[test]
+    fn allocate_batch_budget_grants_everyone_when_budget_is_ample() {
+        assert_eq!(allocate_batch_budget(&[10, 20, 5], 100), vec![10, 20, 5]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_starves_later_requests_when_exhausted() {
+        // 100 budget: req 0 gets all 60 it wants, req 1 gets only 40 of its 80,
+        // req 2 (already out of budget) gets 0 and must wait for the next step.
+        assert_eq!(allocate_batch_budget(&[60, 80, 30], 100), vec![60, 40, 0]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_caps_a_single_request_alone() {
+        // Confirms the fix also covers max_prefill_chunk itself exceeding
+        // n_batch with only one request in the call — no concurrency needed.
+        assert_eq!(allocate_batch_budget(&[512], 64), vec![64]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_zero_n_batch_starves_everyone() {
+        assert_eq!(allocate_batch_budget(&[10, 20], 0), vec![0, 0]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_empty_input() {
+        assert_eq!(allocate_batch_budget(&[], 100), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn allocate_batch_budget_never_exceeds_n_batch_in_aggregate() {
+        let allowed = allocate_batch_budget(&[36; 8], 64);
+        assert_eq!(allowed.iter().sum::<usize>(), 64);
+        // Exactly matches the crash this fix closes: 8 requests x 36 tokens
+        // (288) vs n_batch=64 — every allowed length together must total
+        // exactly the budget (fully used, never exceeded).
+    }
 
     #[test]
     fn ret_one_splits_a_batch_in_half() {

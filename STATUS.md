@@ -283,3 +283,21 @@ non-goal rather than a backlog item — see that doc for the full reasoning
 own fast serving path, and no major LLM API exposes real token-level beam search
 today; a naive fan-out approximation would just be a weaker, more expensive variant
 of the `n`/`best_of` already shipped in 0.18).
+
+**Closed as structural (2026-08-01):** head-to-head benchmarking against Ollama on
+this machine's actual target hardware (AMD Radeon 890M) found fox's ROCm build
+beats its own Vulkan build (~15%), matches Ollama at single-request concurrency,
+but trails at concurrency 4 (roughly half Ollama's aggregate throughput). Every
+layer fox owns was ruled out in turn: scheduler admission/pipelining (measured
+directly — realized decode batch width averages ~3.85 of a possible 4,
+identical on CPU and ROCm), `llama_batch` construction, llama.cpp's
+`split_equal`/`split_simple` ubatch-splitter selection (confirmed correct),
+ROCm library version, and an llama.cpp version/patch gap vs Ollama's build —
+none of these move the number. What's confirmed via `rocprofv3` profiling: the
+GPU kernel dispatch for the quantized decode-GEMV path (`mul_mat_vec_q`)
+averages only ~1.64 of that possible width of 4, even though the scheduler
+hands it a near-full batch — a gap inside llama.cpp's ggml-cuda/HIP backend,
+the same "fox rides llama.cpp's kernels" ceiling as PagedAttention and
+FlashAttention. Closed as **structural**, not fox backlog, in
+`docs/design/vllm-gap-analysis.md` §1 — see `docs/design/rocm-benchmarking-2026-08.md`
+for the full evidence chain.

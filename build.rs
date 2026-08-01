@@ -169,6 +169,13 @@ fn main() {
                                 );
                                 cmake_config.define("GGML_HIP", "ON");
                                 cmake_config.define("CMAKE_HIP_COMPILER", clang_path);
+                                // CMake's HIP language auto-detects the target
+                                // architecture by probing a visible GPU, which isn't
+                                // available in a build container/CI runner. Forward an
+                                // explicit target (e.g. AMDGPU_TARGETS=gfx1100) when set.
+                                if let Ok(targets) = env::var("AMDGPU_TARGETS") {
+                                    cmake_config.define("AMDGPU_TARGETS", &targets);
+                                }
                                 true
                             }
                             None => {

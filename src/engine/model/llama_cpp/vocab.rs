@@ -107,6 +107,17 @@ impl LlamaCppModel {
             .chat_env
             .get_or_init(|| {
                 let template = self.raw_chat_template()?;
+                // Some GGUF conversions store a legacy template NAME (e.g. "vicuna",
+                // "chatml") in `tokenizer.chat_template` instead of real Jinja source —
+                // a pre-Jinja convention meant for llama.cpp's own name-based classifier
+                // (see `apply_chat_template_impl` below, which correctly handles it).
+                // Trusting a bare name as Jinja doesn't error — minijinja renders any
+                // string with no `{{`/`{%` tags as literal text — so the entire prompt
+                // silently becomes that one word. Require actual template syntax before
+                // committing to the Jinja path.
+                if !template.contains("{{") && !template.contains("{%") {
+                    return None;
+                }
                 let mut env = Environment::new();
                 // Chat templates lean on Python string methods (.strip(), .split(), …).
                 env.set_unknown_method_callback(

@@ -135,3 +135,13 @@ post-roll continuation) fail on this specific model **with or without**
 `--mmproj` — confirmed by re-running the suite text-only. This model's very
 small trained context (2048) doesn't fit those checks' assumptions well; it's
 unrelated to vision and not something this session changed or fixed.
+
+**Re-verified the same day against `bartowski/google_gemma-4-E2B-it-GGUF`**
+(natively multimodal, 131K trained context) + its mmproj — a mainstream,
+recognizable model rather than an edge case: **24/24 e2e checks pass, zero
+failures**, including checks 9/10/11 above (confirming those were specific to
+moondream2's tiny context, not a fox bug) and check 14 (`Red`/`Blue` — exact,
+one-word-correct answers to both `image_url` and `images` inputs, prefix-cache
+isolation across different images holds). No fox changes were needed to make
+this model work — it's the `gemma4-e2b` registry entry (`registry.json`) and
+the recommended vision model for anyone validating this feature.

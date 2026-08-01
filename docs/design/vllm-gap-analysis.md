@@ -78,11 +78,11 @@ LoRA on top of *multiple different* base models concurrently remains ❌.
 |---|---|---|
 | Dense / GQA | ✅ | ✅ solid |
 | MoE (Mixtral, DeepSeek-MoE, Qwen-MoE) | ✅ optimized | ⚠️ loads + CPU offload, approximate sizing |
-| MLA / latent KV (DeepSeek V2/V3) | ✅ | ❌ positional sizing wrong |
+| MLA / latent KV (DeepSeek V2/V3) | ✅ | ✅ (0.18) correctly sized via empirical create-then-shrink retry (no per-token formula), verified against real DeepSeek-V2-Lite; see `mla-recurrent-kv-sizing.md`. Context-rolling for MLA is a real, separate llama.cpp-side gap (`DSV4` compressed-cache shift unimplemented upstream), not fox's |
 | Vision / multimodal (LLaVA, Qwen-VL) | ✅ | ✅ (0.17) via `mtmd` + `--mmproj`; base64 images only, see `vision-support.md` |
 | Embeddings (BERT, nomic) | ✅ | ✅ dim + pooling fixed (0.11); mean-pool only, CLS not auto-detected |
 | Encoder-decoder (T5) | ✅ | ❌ |
-| Recurrent / hybrid (Mamba, RWKV) | ✅ | ⚠️ detected, prefix-cache off |
+| Recurrent / hybrid (Mamba, RWKV) | ✅ | ✅ (0.18) correctly sized (same fix as MLA — no per-token formula applies); prefix caching correctly disabled via `llama_model_is_recurrent`/`llama_model_is_hybrid` (a real detection bug — the prior `llama_memory_can_shift`-based check silently returned the wrong answer for recurrent models — was found and fixed verifying against a real Mamba GGUF); see `mla-recurrent-kv-sizing.md` |
 
 See [`engine-capabilities-checklist.md`](engine-capabilities-checklist.md) §2 for the
 per-architecture detail and [`model-architecture-rework.md`](model-architecture-rework.md).

@@ -4,8 +4,8 @@ A living inventory of **everything fox does** and an honest assessment of **what
 and what doesn't**. Use it to decide what to fix, in what order, and to track progress
 per release.
 
-- **Tracks through:** 0.17 (feature branch, in progress); `main`/`develop` are at 0.13.0
-  as of this writing — 0.14 through 0.17 are done and closed but not yet merged up
+- **Tracks through:** 0.18 (feature branch, in progress); `main`/`develop` are at 0.13.0
+  as of this writing — 0.14 through 0.18 are done and closed but not yet merged up
   (deliberate, releases are being cut gradually). This file describes the code, not
   what's tagged.
 - **Last updated:** 2026-08-01
@@ -56,9 +56,9 @@ to confirm are marked ❓.
 | ✅ | `head_dim` from GGUF metadata (`<arch>.attention.key_length`) | **recently patched**; was `n_embd/n_head` (wrong for Gemma/MLA) |
 | ✅ | Flash attention = AUTO | **recently patched**; was forced ENABLED → Gemma softcap garbage on CUDA |
 | ✅ | `embedding_dim = n_embd` (read from `llama_model_n_embd`) | **fixed**; was `num_heads * head_dim` (wrong for Gemma/MLA + an out-of-bounds read). Stored on `ModelConfig.n_embd` |
-| ⚠️ | KV `bytes_per_token` still caps `n_ctx` in `load()` | the block **pool** now follows the backend's real `llama_n_ctx` (P2 — `KVCacheManager::from_kv_tokens`); dropping the `load()` n_ctx formula-cap is the remaining follow-up |
-| ❌ | Positional KV sizing applied to MLA & recurrent | MLA (DeepSeek latent KV) over-reserves; Mamba/RWKV have no per-token KV → risk of mismatch with llama.cpp's real `n_ctx` → `llama_decode failed`/hangs |
-| ✅ | Recurrent/hybrid detected (`llama_memory_can_shift`); prefix caching disabled for them | historic fix (v0.3.1) |
+| ✅ | `n_ctx` in `load()` no longer capped by a per-token formula | **0.18** — empirical create-then-shrink-on-failure retry loop (`shrink_n_ctx`) replaces the pre-creation byte-budget cap; the formula survives only as a soft first-guess ceiling under `--gpu-memory-fraction`. See `docs/design/mla-recurrent-kv-sizing.md` |
+| ✅ | MLA & recurrent KV sizing correctness | **0.18** — the fix above applies uniformly (no per-arch branching); verified against real DeepSeek-V2-Lite (MLA) and Mamba (recurrent) models. Lightweight `KvMemoryClass` (Standard/Latent/Recurrent) added to `ModelInfo`/`fox probe` for observability |
+| ✅ | Recurrent/hybrid detected (`llama_model_is_recurrent`/`llama_model_is_hybrid`); prefix caching disabled for them | historic fix (v0.3.1), **fixed again in 0.18** — the v0.3.1 implementation used `llama_memory_can_shift`, which real-model testing proved returns `true` for recurrent memory too ("trivial to shift", not "safe for fox's prefix cache"); silently enabled prefix caching for recurrent models until caught by testing a real Mamba GGUF end-to-end |
 | ⚠️❓ | `n_ctx`/`n_batch`/`n_seq` heuristic | `.max(effective_ctx)` may size the pool for ~1 sequence while `n_seq_max=32` → possible tightness under concurrency; unconfirmed |
 
 ## Inference correctness (prefill / decode / sampling / output)
@@ -219,7 +219,7 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | # | Severity | Issue | Resolved by |
 |---|----------|-------|-------------|
 | 1 | ✅ Landed | `embedding_dim`→`n_embd`, embeddings pooling, KV pool follows `llama_n_ctx` | `ModelInfo` §4.1 + `fox probe` + golden tests (feature/0.11) |
-| 2 | High | Positional KV sizing applied to MLA/recurrent → instability in those families | `KvModel` per architecture §4.2 — **still open**, no work scheduled |
+| 2 | ✅ Resolved | Positional KV sizing applied to MLA/recurrent → instability in those families | **0.18** — §4.2's "ask llama.cpp, don't predict" applied via an empirical create-then-shrink retry loop at context creation (no per-arch formula, no per-arch branching); lightweight `KvMemoryClass` added for observability. Verified against real DeepSeek-V2-Lite (MLA) and Mamba (recurrent) models — also surfaced and fixed a real, separate bug where recurrent detection (`llama_memory_can_shift`) had been silently wrong since an upstream llama.cpp change. See `docs/design/mla-recurrent-kv-sizing.md` |
 | 3 | ⚠️ Partial | Hardcoded control/think literals + thinking heuristic ("whack-a-mole") | Capabilities from model §4.3 — real Jinja detection + `REASONING_FORMATS` landed (0.11), but the registry covers only one non-default family; still whack-a-mole for the rest |
 | 4 | ✅ Resolved | Sampling defaults diverge between APIs | **0.11 (P4)** — turned out to be a documentation/duplication problem, not a bug; centralized + the divergence is now intentional and test-locked |
 | 5 | ⚠️ Partial | Footguns: `max_models=1`, silent multimodal drop, ignored `frequency/presence_penalty`, dead `swap_fraction` | Phase P4 — multimodal drop now warns (0.11), `frequency/presence_penalty` now applied (0.11); `max_models=1` default and dead `swap_fraction` are **still open** |
@@ -236,12 +236,12 @@ defect — real Jinja execution, centralized sampling defaults, fixed embeddings
 prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) are
 0.16's feature work, now landed, plus vision/multimodal (0.17, see
 `docs/design/vision-support.md`), LoRA adapters (0.18, see
-`docs/design/lora-support.md`), and multiple completions per request (0.18, see
-`docs/design/n-best-of-support.md`). What's left clusters into genuine remaining
-correctness debt with no work scheduled (MLA/recurrent KV sizing, the
-`REASONING_FORMATS` registry's narrow coverage) and the feature gaps
-`docs/design/vllm-gap-analysis.md` still lists open (reactive context-rolling on top of
-bisection retry, beam search).
+`docs/design/lora-support.md`), multiple completions per request (0.18, see
+`docs/design/n-best-of-support.md`), and MLA/recurrent KV sizing (0.18, see
+`docs/design/mla-recurrent-kv-sizing.md`). What's left clusters into genuine remaining
+correctness debt with no work scheduled (the `REASONING_FORMATS` registry's narrow
+coverage) and the feature gaps `docs/design/vllm-gap-analysis.md` still lists open
+(reactive context-rolling on top of bisection retry, beam search).
 
 ---
 
@@ -266,13 +266,13 @@ context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes/Mistra
 tool-call parsers (0.16), OOM recovery via batch-size-bisection retry (0.16),
 vision/multimodal via `mtmd` (0.17, see `docs/design/vision-support.md`), single-base-model
 multi-LoRA via `--lora-modules` (0.18, see `docs/design/lora-support.md`), `n`/`best_of`
-multiple completions per request (0.18, see `docs/design/n-best-of-support.md`).
+multiple completions per request (0.18, see `docs/design/n-best-of-support.md`), and
+correct MLA/recurrent KV sizing (0.18, see `docs/design/mla-recurrent-kv-sizing.md`).
 
 **Still open, in priority order** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
 
 1. Reactive context-rolling as a further OOM mitigation once a batch is already
    bisected to a single request and still fails (0.16 only retries by shrinking the
    batch, not by rolling context).
-2. MLA/recurrent correct KV sizing — real gap, no work scheduled yet.
-3. Beam search — `n`/`best_of` are independent-sample fan-out (0.18), not a
+2. Beam search — `n`/`best_of` are independent-sample fan-out (0.18), not a
    beam-search decoding algorithm; no work scheduled.

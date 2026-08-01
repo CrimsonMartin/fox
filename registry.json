@@ -129,6 +129,22 @@
       "description": "Google Gemma 4 E2B (vision) — natively multimodal flagship-family model, 131K context, verified end-to-end (24/24 e2e checks incl. image_url/images/prefix-cache isolation, 2026-08-01). Pull both files (`fox pull gemma4-e2b` then `fox pull bartowski/google_gemma-4-E2B-it-GGUF --filename mmproj-google_gemma-4-E2B-it-f16.gguf`), then serve with `--mmproj mmproj-google_gemma-4-E2B-it-f16`",
       "size_gb": 3.85,
       "tags": ["chat", "vision", "reasoning"]
+    },
+    "mamba-130m": {
+      "aliases": ["mamba", "mamba130m"],
+      "repo": "Felladrin/gguf-mamba-130m-hf",
+      "recommended": "mamba-130m-hf.Q8_0.gguf",
+      "description": "Mamba 130M — tiny recurrent/hybrid state-space model (no per-token KV cache; prefix caching and context-shift are unsupported for this architecture, by design). Used to verify KV/state sizing correctness for recurrent models (`fox probe` reports `KV memory class: recurrent`) — see docs/design/mla-recurrent-kv-sizing.md. Not instruction-tuned; a raw completion model, not a chat model.",
+      "size_gb": 0.16,
+      "tags": ["recurrent", "completion", "tiny"]
+    },
+    "deepseek-v2-lite": {
+      "aliases": ["deepseek-v2", "deepseek2-lite"],
+      "repo": "mradermacher/DeepSeek-V2-Lite-GGUF",
+      "recommended": "DeepSeek-V2-Lite.Q4_K_M.gguf",
+      "description": "DeepSeek-V2-Lite 16B (2.4B active, MoE) — the smallest real Multi-head Latent Attention (MLA) model available in GGUF; DeepSeek-V2/V3 compress KV into a small latent vector, far smaller than fox's positional KV formula assumes. Used to verify KV sizing correctness for MLA models (`fox probe` reports `KV memory class: latent (MLA)`) — see docs/design/mla-recurrent-kv-sizing.md. Large download (~10GB at the recommended quant).",
+      "size_gb": 9.66,
+      "tags": ["chat", "moe", "mla", "reasoning"]
     }
   }
 }

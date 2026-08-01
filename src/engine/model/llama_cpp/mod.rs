@@ -237,6 +237,22 @@ pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32)
     user_limit.unwrap_or(model_train_ctx)
 }
 
+/// Halve `current` toward `floor` for a context-creation OOM retry. `None`
+/// once no further shrinking is possible (already at or below `floor`) — the
+/// caller should treat that as a genuine, unrecoverable failure rather than
+/// retry again. Mirrors `batch.rs`'s `bisection_split` shape: fox doesn't
+/// predict whether `n_ctx` tokens fit in memory (no formula is correct across
+/// architectures — see `docs/design/mla-recurrent-kv-sizing.md`), it asks
+/// llama.cpp by trying, and shrinks only on a real, observed failure.
+#[cfg(not(fox_stub))]
+pub(crate) fn shrink_n_ctx(current: u32, floor: u32) -> Option<u32> {
+    if current <= floor {
+        None
+    } else {
+        Some((current / 2).max(floor))
+    }
+}
+
 /// Human description of the active compute backend, read from the ggml devices
 /// registered by `ggml_backend_load_all`. Prefers a GPU/iGPU device (that is where
 /// inference runs when one is present); otherwise reports CPU. Shown at startup so
@@ -524,24 +540,36 @@ impl LlamaCppModel {
             );
         }
 
-        // Cap total KV context to fit in available GPU (or RAM) memory.
-        // Query FREE memory now (after model weights are loaded) so we don't OOM.
-        // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
+        // fox does not predict KV/state memory usage — no formula is correct across
+        // architectures (MLA's latent KV is far smaller than the positional formula
+        // below assumes; recurrent/hybrid models have no per-token KV at all, so the
+        // formula's inputs aren't even meaningful — see
+        // docs/design/mla-recurrent-kv-sizing.md). Instead: ask llama.cpp by trying.
+        //
+        // The positional formula below still computes a soft *ceiling* — it keeps
+        // `--gpu-memory-fraction`'s documented meaning (don't be needlessly greedy on
+        // constrained hardware) as a first-guess upper bound, not a precise
+        // prediction. Real correctness comes from the retry loop: attempt the full
+        // desired n_ctx, and only shrink in response to an actual `llama_init_from_model`
+        // failure (mirrors the decode-time OOM bisection retry in `batch.rs` — same
+        // "observe real failure, retry smaller" philosophy, one layer earlier).
         let free_bytes = query_gpu_free_bytes()
             .unwrap_or((gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize);
         let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
         // bytes_per_token = 2 (K+V) * n_head_kv * head_dim * 2 (fp16) * n_layer
         let bytes_per_token = 2 * n_head_kv * head_dim * 2 * n_layer;
-        let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
+        let ceiling_tokens = if bytes_per_token > 0 && budget_bytes > 0 {
             (budget_bytes / bytes_per_token) as u32
         } else {
             effective_max_ctx * n_seq
         };
-        // Honour the effective_max_ctx per sequence, but don't exceed memory budget.
-        let n_ctx = (effective_max_ctx * n_seq)
-            .min(max_tokens_by_mem)
+        // Honour the effective_max_ctx per sequence as a floor — never shrink below
+        // what a single sequence needs, since that would silently truncate the
+        // user's requested context length rather than fail loudly.
+        let desired_n_ctx = (effective_max_ctx * n_seq)
+            .min(ceiling_tokens)
             .max(effective_max_ctx);
-        ctx_params.n_ctx = n_ctx;
+
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
@@ -554,11 +582,39 @@ impl LlamaCppModel {
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
 
-        let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
-        let ctx = NonNull::new(ctx).ok_or_else(|| {
-            unsafe { ffi::llama_model_free(model.as_ptr()) };
-            anyhow!("llama_init_from_model failed")
-        })?;
+        let mut n_ctx_candidate = desired_n_ctx;
+        let ctx = loop {
+            ctx_params.n_ctx = n_ctx_candidate;
+            let raw = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
+            if let Some(ctx) = NonNull::new(raw) {
+                if n_ctx_candidate != desired_n_ctx {
+                    tracing::info!(
+                        requested = desired_n_ctx,
+                        allocated = n_ctx_candidate,
+                        "context created at a smaller n_ctx after retrying — the initial size didn't fit"
+                    );
+                }
+                break ctx;
+            }
+            match shrink_n_ctx(n_ctx_candidate, effective_max_ctx) {
+                Some(next) => {
+                    tracing::warn!(
+                        attempted = n_ctx_candidate,
+                        retrying_at = next,
+                        "llama_init_from_model failed (likely OOM) — retrying with a smaller n_ctx"
+                    );
+                    n_ctx_candidate = next;
+                }
+                None => {
+                    unsafe { ffi::llama_model_free(model.as_ptr()) };
+                    return Err(anyhow!(
+                        "llama_init_from_model failed even at the minimum viable context \
+                         ({effective_max_ctx} tokens) — not enough memory for this model at \
+                         this context length"
+                    ));
+                }
+            }
+        };
 
         // Vision/multimodal: load the paired mmproj GGUF via mtmd, if given. A bad
         // pairing (wrong architecture, corrupt file) fails loudly here rather than
@@ -925,24 +981,37 @@ impl Model for LlamaCppModel {
     }
 
     fn supports_seq_copy(&self) -> bool {
-        let ctx_guard = match self._ctx.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
+        // NOT `llama_memory_can_shift` — verified against a real Mamba model
+        // (2026-08-01) that it returns `true` for recurrent memory too
+        // ("shifting the pos is trivial for recurrent models",
+        // `llama-memory-recurrent.cpp`), the opposite of what this method
+        // needs. `llama_model_is_recurrent`/`llama_model_is_hybrid` are the
+        // model-level, architecture-authoritative answer to what this method
+        // actually asks: does fox's block-level KV copy-on-write (the prefix
+        // cache's mechanism) apply to this model at all. See
+        // docs/design/mla-recurrent-kv-sizing.md.
         unsafe {
-            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
-            if mem.is_null() {
-                return false;
-            }
-            // llama_memory_can_shift returns true for standard attention KV caches
-            // (which also support seq_cp).  Recurrent/hybrid models return false.
-            ffi::llama_memory_can_shift(mem)
+            let model = self._model.as_ptr();
+            !ffi::llama_model_is_recurrent(model) && !ffi::llama_model_is_hybrid(model)
         }
     }
 
     fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {
         if n_discard == 0 {
             return Ok(());
+        }
+        // Recurrent/hybrid models have no per-token positional KV to drop/shift at
+        // all (a fixed-size state, not growing blocks) — `llama_memory_can_shift`
+        // alone is not a reliable guard here (it reports `true` for recurrent
+        // memory, since repositioning is a cheap no-op for it, not because fox's
+        // seq_rm/seq_add-based rolling is meaningful for it). Checked in addition
+        // to, not instead of, the existing can_shift check below.
+        if unsafe { ffi::llama_model_is_recurrent(self._model.as_ptr()) }
+            || unsafe { ffi::llama_model_is_hybrid(self._model.as_ptr()) }
+        {
+            return Err(anyhow!(
+                "context rolling is not supported for recurrent/hybrid models"
+            ));
         }
         let ctx_guard = self
             ._ctx
@@ -954,9 +1023,7 @@ impl Model for LlamaCppModel {
                 return Err(anyhow!("no memory backend for context roll"));
             }
             if !ffi::llama_memory_can_shift(mem) {
-                return Err(anyhow!(
-                    "KV cache is not shiftable (recurrent/hybrid model)"
-                ));
+                return Err(anyhow!("KV cache is not shiftable"));
             }
             let keep = n_keep as i32;
             let discard = n_discard as i32;
@@ -1053,8 +1120,13 @@ impl Model for LlamaCppModel {
             .unwrap_or_else(|| "unknown".to_string());
         let has_chat_template =
             unsafe { !ffi::llama_model_chat_template(model, std::ptr::null()).is_null() };
+        let supports_seq_copy = self.supports_seq_copy();
 
         ModelInfo {
+            kv_memory_class: crate::engine::model::model_info::classify_kv_memory(
+                &arch_name,
+                supports_seq_copy,
+            ),
             arch_name,
             backend: self.active_backend(),
             n_embd: self.config.n_embd,
@@ -1068,7 +1140,7 @@ impl Model for LlamaCppModel {
             eos_token_id: self.eos_token,
             has_chat_template,
             supports_thinking: self.supports_thinking(),
-            supports_seq_copy: self.supports_seq_copy(),
+            supports_seq_copy,
             stop_token_count: self.stop_tokens().len(),
             recommended_sampling: self.recommended_sampling(),
         }
@@ -1081,7 +1153,29 @@ impl Model for LlamaCppModel {
 
 #[cfg(all(test, not(fox_stub)))]
 mod tests {
-    use super::resolve_context_len;
+    use super::{resolve_context_len, shrink_n_ctx};
+
+    #[test]
+    fn shrink_n_ctx_halves_toward_floor() {
+        assert_eq!(shrink_n_ctx(8192, 2048), Some(4096));
+        assert_eq!(shrink_n_ctx(4096, 2048), Some(2048));
+    }
+
+    #[test]
+    fn shrink_n_ctx_clamps_at_floor_not_below() {
+        // 2048/2=1024, which is below the 2048 floor — clamp up to the floor.
+        assert_eq!(shrink_n_ctx(3000, 2048), Some(2048));
+    }
+
+    #[test]
+    fn shrink_n_ctx_none_once_at_floor() {
+        assert_eq!(shrink_n_ctx(2048, 2048), None);
+    }
+
+    #[test]
+    fn shrink_n_ctx_none_below_floor() {
+        assert_eq!(shrink_n_ctx(1000, 2048), None);
+    }
 
     #[test]
     fn auto_uses_model_trained_ctx() {

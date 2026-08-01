@@ -510,8 +510,11 @@ pub trait Model: Send + Sync {
     /// embedded-template presence) instead of the reconstructed values.
     fn model_info(&self) -> ModelInfo {
         let c = self.model_config();
+        let arch_name = "unknown".to_string();
+        let supports_seq_copy = self.supports_seq_copy();
         ModelInfo {
-            arch_name: "unknown".to_string(),
+            kv_memory_class: model_info::classify_kv_memory(&arch_name, supports_seq_copy),
+            arch_name,
             backend: self.active_backend(),
             n_embd: self.embedding_dim(),
             n_head: c.num_heads,
@@ -524,7 +527,7 @@ pub trait Model: Send + Sync {
             eos_token_id: self.eos_token_id(),
             has_chat_template: false,
             supports_thinking: self.supports_thinking(),
-            supports_seq_copy: self.supports_seq_copy(),
+            supports_seq_copy,
             stop_token_count: self.stop_tokens().len(),
             recommended_sampling: self.recommended_sampling(),
         }

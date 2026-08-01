@@ -47,6 +47,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beam search itself remains unimplemented. See
   `docs/design/n-best-of-support.md`.
 
+- **Correct KV sizing for MLA and recurrent/hybrid models** — the context's
+  `n_ctx` was still capped at load time by a hand-rolled positional formula
+  (`n_head_kv * head_dim * n_layer`), wrong for MLA (DeepSeek-V2/V3, whose
+  compressed latent KV the formula massively over-estimates) and meaningless
+  for recurrent/hybrid (Mamba, RWKV, Jamba — no per-token KV at all). Replaced
+  with an empirical create-then-shrink-on-failure retry loop: attempt the full
+  desired context, halve and retry only on a real `llama_init_from_model`
+  failure — the same "observe real failure, retry smaller" approach 0.16
+  already shipped for decode-time OOM, applied one layer earlier, uniformly
+  across every architecture. Added a lightweight `KvMemoryClass`
+  (Standard/Latent/Recurrent) to `ModelInfo`/`fox probe` for observability.
+  Verified against real DeepSeek-V2-Lite (MLA) and Mamba (recurrent) models —
+  both added to `registry.json`. See `docs/design/mla-recurrent-kv-sizing.md`.
+
+### Fixed
+
+- **Recurrent/hybrid models were silently getting prefix caching enabled**
+  when it should have been disabled — found while verifying the KV-sizing fix
+  above against a real Mamba model. The existing detection
+  (`llama_memory_can_shift`) has, since an upstream llama.cpp change, returned
+  `true` for recurrent memory too ("shifting the pos is trivial" for it — a
+  cheap-operation signal, not a "safe for fox's block-copy prefix cache"
+  signal), silently defeating the v0.3.1 fix this was supposed to be. Replaced
+  with `llama_model_is_recurrent`/`llama_model_is_hybrid` — the direct,
+  architecture-level llama.cpp APIs for the question actually being asked.
+
 ## [0.17.0]
 
 fox gets **vision/multimodal input** — the top feature-gap item for the LatAm

@@ -1,6 +1,6 @@
 # Design — Vision / multimodal support
 
-Status: **Shipped (0.16)**
+Status: **Shipped (0.17)**
 
 > Current per-feature status lives in [`STATUS.md`](../../STATUS.md); the
 > comparison vs Ollama/vLLM lives in

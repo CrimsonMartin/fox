@@ -694,6 +694,45 @@ needs a profiler; `perf` is unusable on this machine (installed, but no
 build for kernel 6.17.0-1028 — needs `linux-tools-6.17.0-1028-oem`, which
 requires root).
 
+### Recovering most of it: `FOX_CPU_ALL_VARIANTS=1`
+
+The portability/performance trade-off above turns out not to be forced.
+`GGML_CPU_ALL_VARIANTS` builds the CPU backend once per instruction-set tier
+as separate `.so` files and lets ggml pick the best the host supports at
+runtime — and it **requires** `GGML_BACKEND_DL`, which fox already sets. One
+portable binary, still gets AVX-512.
+
+Added as an opt-in build flag (`build.rs`): `FOX_CPU_ALL_VARIANTS=1 cargo
+build --release`. It produces 15 `libggml-cpu-*.so` on x86 (x64, sse42,
+haswell, skylakex, zen4, sapphirerapids, …); on this Ryzen AI 9 HX 370 the
+runtime picks `libggml-cpu-zen4.so` (AVX-512 + VBMI + VNNI + BF16, matching
+`/proc/cpuinfo` exactly), confirmed via `FOX_LLAMA_LOG=1`:
+
+```
+load_backend: loaded CPU backend from .../libggml-cpu-zen4.so
+```
+
+Measured back-to-back, same session (moving the variant `.so` files aside to
+force the generic build, since a stale variant in `target/release` is picked
+up regardless of what was just compiled):
+
+| build | TTFT (1-token) | throughput |
+|---|---|---|
+| generic (default) | 51.4 ms | 115.8 t/s |
+| zen4 (round 1) | 39.7 ms | 125.2 t/s |
+| zen4 (round 2) | 42.2 ms | 118.8 t/s |
+
+**TTFT improves ~20% consistently.** Throughput improves too but the ranges
+overlap, so treat +3-8% as suggestive rather than established. Build time
+goes 12s → 45s for the llama.cpp step, which is why it is opt-in: on a
+GPU-backed deployment the CPU backend barely runs, so most users should not
+pay it.
+
+**Caution when measuring this**: absolute numbers drift substantially across
+a long benchmarking session (this machine's generic build measured 35.9 ms
+early on and 51.4 ms hours later, unchanged). Only same-session,
+back-to-back A/B comparisons mean anything here.
+
 **One dead end worth recording** so nobody re-walks it: `sample_token`'s
 no-truncation path (the OpenAI defaults `top_k=0`/`top_p=1.0`) looked like an
 obvious culprit and a fast path for it measured **3.21 ms → 0.69 ms per call,

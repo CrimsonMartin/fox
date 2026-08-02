@@ -79,9 +79,22 @@ fn main() {
         // Each backend (.so) is dlopen-ed at runtime — zero CUDA dep in the binary.
         .define("GGML_BACKEND_DL", "ON")
         // GGML_NATIVE (CPU arch-specific optimizations) is incompatible with GGML_BACKEND_DL.
-        // The CPU backend is selected generically; GGML_CPU_ALL_VARIANTS would build
-        // arch-specific variants as separate .so files (optional future improvement).
+        // Without it the CPU backend is built for a generic baseline — no AVX2/AVX-512 —
+        // which measurably costs latency on the CPU backend (~4.4ms of a 35.9ms
+        // single-request TTFT on a Zen 5 box; see
+        // docs/design/rocm-benchmarking-2026-08.md).
         .define("GGML_NATIVE", "OFF")
+        // ...but the portability/performance trade-off above is not actually forced.
+        // GGML_CPU_ALL_VARIANTS builds the CPU backend once per instruction-set tier
+        // (x64, sse42, haswell, skylakex, zen4, ...) as separate .so files and lets
+        // ggml pick the best one the host supports at runtime — it *requires*
+        // GGML_BACKEND_DL, which fox already sets. That keeps one portable binary and
+        // still gets AVX-512 where available.
+        //
+        // Off by default because it multiplies CPU-backend compile time by the number
+        // of tiers (~14 on x86), which is a poor trade for a GPU-backed build where
+        // the CPU backend barely runs. Opt in with FOX_CPU_ALL_VARIANTS=1 — worth it
+        // for CPU-only deployments and for distributing a single optimised binary.
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_TOOLS", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
@@ -99,6 +112,13 @@ fn main() {
         .define("LLAMA_USE_PREBUILT_UI", "OFF")
         .define("LLAMA_BUILD_WEBUI", "OFF") // legacy name, harmless on newer trees
         .profile("Release");
+
+    // See the GGML_NATIVE comment above: opt-in multi-tier CPU backend.
+    println!("cargo:rerun-if-env-changed=FOX_CPU_ALL_VARIANTS");
+    if env::var("FOX_CPU_ALL_VARIANTS").is_ok_and(|v| v != "0" && !v.is_empty()) {
+        cmake_config.define("GGML_CPU_ALL_VARIANTS", "ON");
+        println!("cargo:warning=building all CPU backend variants (FOX_CPU_ALL_VARIANTS) — slower build, faster CPU inference");
+    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 

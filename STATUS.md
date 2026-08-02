@@ -343,7 +343,11 @@ fixes.
    per-stream ceiling when others are idle. This also retires the crashing
    `llama_memory_seq_cp` migration approach as unnecessary — and, incidentally,
    would have unblocked it, since same-stream `seq_cp` supports partial
-   ranges where cross-stream does not.
+   ranges where cross-stream does not. Architecture coverage verified
+   2026-08-02 across the shapes a KV-layout change could plausibly break —
+   dense (llama-3.2), recurrent/SSM (mamba-130m), SWA (Gemma-3 `n_swa=512`,
+   Gemma-4) and MLA (DeepSeek-V2-Lite) — single and 4-way concurrent on
+   each.
 Full evidence chain, including the abandoned "structural" theory, this
 limitation, and the new `scripts/repeat_bench.sh` (multi-repetition,
 warmup, alternating-order, error-discarding — built after single ad-hoc

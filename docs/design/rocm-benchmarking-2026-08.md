@@ -530,10 +530,49 @@ unblocked it anyway, since the `GGML_ASSERT(is_full)` that killed it only
 guards the *cross-stream* path; with `n_stream = 1` every `seq_cp` is
 same-stream, where partial ranges are supported.
 
-**Not verified**: whether `kv_unified` interacts badly with models fox
-hasn't exercised here (SWA/sliding-window architectures, recurrent/hybrid
-models). The e2e suite and golden tests only cover Llama-family GGUFs on
-this machine.
+### Architecture coverage (verified 2026-08-02)
+
+The concern with a unified KV cache is that it changes the KV buffer's
+*shape*, so architectures that don't use a plain dense per-sequence KV are
+where it would break. Each was run under `kv_unified` with a single request
+plus 4 concurrent ones (the multi-sequence path the change actually
+affects):
+
+| Model | Architecture | Result |
+|---|---|---|
+| `llama-3.2-1b-instruct-q8_0` | dense, no SWA | OK — incl. a 7378-token prompt, correctly recalling a fact from it |
+| `mamba-130m-hf.Q8_0` | recurrent / SSM (no KV cache at all) | OK — 4/4 concurrent |
+| `Gemma-3-1B-it-…_Q4_k_m` | SWA (`n_swa = 512`) | OK — 4/4 concurrent |
+| `gemma-4-E2B-it-Q4_K_M` | SWA | OK — 4/4 concurrent |
+| `DeepSeek-V2-Lite.Q4_K_M` | MLA (latent KV) | OK — 4/4 concurrent |
+
+**One pre-existing failure found, not caused by this change**: the Gemma-3
+model above returns `completion_tokens = 1` (empty content) for the same
+7378-token prompt that llama-3.2 handles correctly. Reproduced identically
+on a build with `kv_unified` removed, so it predates this work — see
+"Pre-existing issues found while verifying" below.
+
+## Pre-existing issues found while verifying (neither caused by this work)
+
+Both were confirmed to reproduce on a build with the `kv_unified` change
+removed, i.e. they predate it. Recorded here because this is where they
+surfaced, not because they belong to this investigation.
+
+1. **Long prompts on Gemma-3 return a single token.** A 7378-token prompt
+   to `Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m`
+   yields `completion_tokens = 1` and empty content, while short prompts to
+   the same model work fine and the same prompt on `llama-3.2-1b` returns a
+   correct 15-token answer. llama.cpp logs no error. Unclear whether it's
+   fox, llama.cpp's SWA handling, or this particular community merge —
+   undiagnosed. Reproduce with the request body used above (400 `Fact N:`
+   lines, `max_tokens = 150`, `temperature = 0`).
+2. **A golden test fails on the 1B model.**
+   `golden_chunked_prefill_matches_single_shot` panics with `non-empty
+   logits` (`golden.rs:201`) under
+   `FOX_GOLDEN_MODEL=llama-3.2-1b-instruct-q8_0.gguf`. The other 11 golden
+   tests pass. Possibly the test assumes a different model (its own header
+   suggests a Gemma GGUF), possibly a real chunked-prefill bug —
+   undiagnosed.
 
 ## `n_batch`/`n_ubatch` experiment (tried, reverted, unrelated finding)
 

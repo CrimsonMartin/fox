@@ -677,9 +677,13 @@ Two candidate explanations were tested:
 - **`GGML_NATIVE=OFF`** — fox *must* build with it, since it is incompatible
   with `GGML_BACKEND_DL` (`build.rs`), which is what lets one binary carry
   every backend. Rebuilt `llama-server` with fox's exact flags: its
-  single-request latency goes **24.4 ms → 28.8 ms**. So roughly **4.4 ms of
-  the 11.5 ms gap is the price of fox's portable-binary architecture**, not a
-  defect.
+  single-request latency goes **24.4 ms → 28.8 ms**, suggesting ~4.4 ms of
+  the gap is the price of the portable-binary architecture. **Treat this as
+  unconfirmed**: a later alternating A/B (see "Recovering most of it" below)
+  showed fox's default CPU backend performs the same as a hand-tuned
+  AVX-512 variant on this host, so `GGML_NATIVE=OFF` evidently does not cost
+  what a single before/after pair implied. Both numbers here came from
+  non-alternating runs, which this session repeatedly proved unreliable.
 
 Notably this flag costs *latency* but barely any *throughput*: the same
 `GGML_NATIVE=OFF` build still sustains 151.1 t/s (range [144.2, 152.7])
@@ -712,26 +716,46 @@ runtime picks `libggml-cpu-zen4.so` (AVX-512 + VBMI + VNNI + BF16, matching
 load_backend: loaded CPU backend from .../libggml-cpu-zen4.so
 ```
 
-Measured back-to-back, same session (moving the variant `.so` files aside to
-force the generic build, since a stale variant in `target/release` is picked
-up regardless of what was just compiled):
+**On this machine it is not measurably faster than fox's existing default.**
+A first comparison suggested ~20% (generic 51.4 ms vs zen4 39.7 ms), but that
+compared runs taken at different times. Redone properly — one binary, only
+the available `.so` swapped between arms, alternating, same session:
 
-| build | TTFT (1-token) | throughput |
+| round | default (`libggml-cpu.so`) | zen4 |
 |---|---|---|
-| generic (default) | 51.4 ms | 115.8 t/s |
-| zen4 (round 1) | 39.7 ms | 125.2 t/s |
-| zen4 (round 2) | 42.2 ms | 118.8 t/s |
+| 1 | 39.4 ms | 40.5 ms |
+| 2 | 40.4 ms | 37.3 ms |
+| 3 | 40.8 ms | 39.1 ms |
 
-**TTFT improves ~20% consistently.** Throughput improves too but the ranges
-overlap, so treat +3-8% as suggestive rather than established. Build time
-goes 12s → 45s for the llama.cpp step, which is why it is opt-in: on a
-GPU-backed deployment the CPU backend barely runs, so most users should not
-pay it.
+~3% apart with fully overlapping values: **no effect**. The earlier 51.4 ms
+figure was drift, not the generic backend being slow.
+
+**Why it still exists**: the instruction tier genuinely matters — the same
+A/B against the *baseline* `x64` variant is stark and perfectly consistent:
+
+| round | `x64` (pure baseline) | zen4 |
+|---|---|---|
+| 1 | 107.8 ms | 40.6 ms |
+| 2 | 105.9 ms | 38.3 ms |
+| 3 | 108.8 ms | 37.4 ms |
+
+**2.7× .** So the useful correction is this: *`GGML_NATIVE=OFF` does not mean
+fox falls back to that baseline*. Whatever CMake selects by default for
+`libggml-cpu.so` already performs like the tuned variant on this CPU, so the
+"~4.4 ms is the price of the portable binary" reading from the section above
+overstates it — that difference is something else, still unexplained. The
+flag remains available for hosts where the default build *does* land on a
+poor tier (worth checking with `FOX_LLAMA_LOG=1`, which prints the loaded
+`.so`), but it should not be enabled expecting a win.
+
+Build time goes 12s → 45s for the llama.cpp step, which is the other reason
+it is opt-in.
 
 **Caution when measuring this**: absolute numbers drift substantially across
-a long benchmarking session (this machine's generic build measured 35.9 ms
-early on and 51.4 ms hours later, unchanged). Only same-session,
-back-to-back A/B comparisons mean anything here.
+a long session (this machine's default build read 35.9 ms early in the day
+and 51.4 ms hours later, unchanged). Only alternating, same-session A/B
+comparisons mean anything here — a single before/after pair is worthless, as
+this section's own first attempt demonstrates.
 
 **One dead end worth recording** so nobody re-walks it: `sample_token`'s
 no-truncation path (the OpenAI defaults `top_k=0`/`top_p=1.0`) looked like an

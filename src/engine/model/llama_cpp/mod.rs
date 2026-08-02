@@ -440,24 +440,44 @@ impl LlamaCppModel {
             let text = unsafe { std::ffi::CStr::from_ptr(text) };
             eprint!("{}", text.to_string_lossy());
         }
-        let forward_llama_log = std::env::var_os("FOX_LLAMA_LOG").is_some_and(|v| v != "0");
-        unsafe {
-            if forward_llama_log {
-                ffi::llama_log_set(Some(passthrough_log), std::ptr::null_mut())
-            } else {
-                ffi::llama_log_set(Some(noop_log), std::ptr::null_mut())
+        // Process-global llama.cpp/ggml initialisation — must run exactly once,
+        // NOT once per model load.
+        //
+        // `ggml_backend_load_all_from_path` appends to a global
+        // `std::vector<ggml_backend_reg_entry>` inside libggml with no internal
+        // locking. Two threads loading two models at the same time can therefore
+        // reallocate that vector concurrently and corrupt it: observed as an
+        // intermittent SIGSEGV (~1 run in 15) in the golden suite, caught under
+        // gdb in `_M_realloc_insert<ggml_backend_reg_entry>` while other threads
+        // were inside `llama_model_load_from_file`. `llama_backend_init` is
+        // likewise a once-per-process call per llama.cpp's own API contract.
+        //
+        // `ModelRegistry::get_or_load` happens to serialise its loads behind
+        // `load_lock`, which is why this never surfaced in the server — but that
+        // is the registry's single-flight policy, not a guarantee this layer can
+        // rely on: any other caller loading two models concurrently (tests,
+        // a draft model, future callers) would hit it.
+        static LLAMA_GLOBAL_INIT: std::sync::Once = std::sync::Once::new();
+        LLAMA_GLOBAL_INIT.call_once(|| {
+            let forward_llama_log = std::env::var_os("FOX_LLAMA_LOG").is_some_and(|v| v != "0");
+            unsafe {
+                if forward_llama_log {
+                    ffi::llama_log_set(Some(passthrough_log), std::ptr::null_mut())
+                } else {
+                    ffi::llama_log_set(Some(noop_log), std::ptr::null_mut())
+                }
+            };
+
+            // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
+            // Passing null searches the executable's directory and cwd — fox ships
+            // libggml-cuda.so and libggml-cpu.so next to the binary.
+            // On non-DL builds this is a no-op (backends are statically linked).
+            unsafe { ffi::ggml_backend_load_all_from_path(std::ptr::null()) };
+
+            unsafe {
+                ffi::llama_backend_init();
             }
-        };
-
-        // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
-        // Passing null searches the executable's directory and cwd — fox ships
-        // libggml-cuda.so and libggml-cpu.so next to the binary.
-        // On non-DL builds this is a no-op (backends are statically linked).
-        unsafe { ffi::ggml_backend_load_all_from_path(std::ptr::null()) };
-
-        unsafe {
-            ffi::llama_backend_init();
-        }
+        });
 
         use std::ffi::CString;
         let path_cstr = model_path

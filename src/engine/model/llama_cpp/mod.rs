@@ -457,6 +457,7 @@ impl LlamaCppModel {
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
         lora_modules: &[(String, std::path::PathBuf, f32)],
+        reranking: bool,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -687,6 +688,14 @@ impl LlamaCppModel {
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
+        if reranking {
+            // Must be set explicitly. A reranker GGUF does NOT necessarily carry a
+            // `<arch>.pooling_type` key — jina-reranker-v1-tiny-en, for one, has none —
+            // so llama.cpp's UNSPECIFIED fallback resolves to NONE and there is no
+            // sequence score to read. llama-server sets it the same way, from
+            // `--reranking` (arg.cpp:3067-3070), rather than trusting metadata.
+            ctx_params.pooling_type = ffi::llama_pooling_type_LLAMA_POOLING_TYPE_RANK;
+        }
 
         let mut n_ctx_candidate = desired_n_ctx;
         let ctx = loop {

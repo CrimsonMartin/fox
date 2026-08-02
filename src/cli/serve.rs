@@ -80,6 +80,14 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_REPEAT_LAST_N, env = "FOX_REPEAT_LAST_N")]
     pub repeat_last_n: i32,
 
+    /// Load the model as a reranker: create its context with RANK pooling so
+    /// `POST /rerank` can read the relevance head. Required — a reranker GGUF does not
+    /// reliably declare its pooling type, so fox cannot detect it (llama-server takes a
+    /// flag for the same reason). A model loaded this way scores query/document pairs;
+    /// it does not generate text.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, env = "FOX_RERANKING")]
+    pub reranking: bool,
+
     /// Keep a finished request's KV cache resident so a later prompt sharing a prefix
     /// with it skips re-prefilling that much. Each sequence remembers the tokens it
     /// holds — prompt *and* generated reply — so the next turn of a conversation
@@ -457,6 +465,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         max_prefill_chunk: args.max_prefill_chunk,
         context_shift: args.context_shift,
         context_keep: args.context_keep,
+        reranking: args.reranking,
         kv_reuse: args.kv_reuse,
         slot_prompt_similarity: args.slot_prompt_similarity,
         speculative: args.speculative,

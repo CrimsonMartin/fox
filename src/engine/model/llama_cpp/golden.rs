@@ -38,8 +38,9 @@ fn golden_model() -> Option<LlamaCppModel> {
         0,
         &[],
         false,
-        None, // mmproj_path
-        &[],  // lora_modules
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — golden tests exercise generation
     )
     .expect("FOX_GOLDEN_MODEL failed to load");
     Some(model)
@@ -662,8 +663,9 @@ fn golden_draft_model_speculative_matches_greedy() {
         0,
         &[],
         false,
-        None, // mmproj_path
-        &[],  // lora_modules
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — golden tests exercise generation
     )
     .expect("draft (self-speculation) load failed");
 

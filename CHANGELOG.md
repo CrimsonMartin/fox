@@ -83,16 +83,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly.
 
 - **`POST /rerank` and `/v1/rerank`** — score documents against a query with a
-  reranker model. Accepts both the Jina/Cohere (`documents`) and TEI (`texts`)
-  spellings, plus `top_n` and `return_text`, and preserves each result's original
-  index across sorting. No new flag was needed: fox never sets `pooling_type`, so
-  llama.cpp resolves it from the model's own metadata — `RANK` for a reranker,
-  `NONE` for anything else — and a `NULL` from `llama_get_embeddings_seq` is
-  exactly the signal that the model has no relevance head, which is rejected with
-  a clear error instead of a score invented from a mean-pooled vector.
-  **Partially verified**: the rejection path is confirmed against a real
-  non-reranker model, but a *successful* rerank has not been run, because no
-  reranker GGUF was available locally.
+  reranker model, plus **`--reranking`** to load one. Accepts both the Jina/Cohere
+  (`documents`) and TEI (`texts`) spellings, plus `top_n` and `return_text`, and
+  preserves each result's original index across sorting.
+
+  `--reranking` creates the model's context with `RANK` pooling, which is what
+  makes the relevance head readable. **This cannot be auto-detected**: a reranker
+  GGUF does not reliably carry a `<arch>.pooling_type` key — `jina-reranker-v1-tiny-en`
+  has none — so llama.cpp's `UNSPECIFIED` fallback resolves to `NONE`. llama-server
+  takes a flag for exactly the same reason (`arg.cpp:3067-3070`). Without it,
+  `llama_get_embeddings_seq` returns `NULL`, and that `NULL` is the signal used to
+  reject the request rather than answer it with a number derived from a mean-pooled
+  vector, which would look like a ranking and rank nothing.
+
+  Verified end to end against a real reranker: querying "What is the capital of
+  France?" over four documents ranked Paris first, the Eiffel Tower second and
+  bananas last, with original indices preserved; `top_n` and the TEI spelling both
+  behave.
 
 - **`POST /tokenize`, `/detokenize`, `/apply-template`** — llama-server's tokenizer
   utilities (`server-context.cpp:4899-4956, 4846-4856`). No inference involved, just

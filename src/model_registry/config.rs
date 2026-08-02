@@ -30,6 +30,11 @@ pub struct RegistryConfig {
     /// it can skip re-prefilling that much (`--kv-reuse`). False restores the
     /// pre-0.19 behaviour: every sequence cleared on completion, every prompt
     /// prefilled from token 0.
+    /// Create the context with RANK pooling so `/rerank` can read the model's
+    /// relevance head (`--reranking`). A reranker GGUF does not reliably declare its
+    /// pooling type, so this cannot be auto-detected; llama-server takes a flag for
+    /// the same reason. A model loaded this way is a reranker, not a generator.
+    pub reranking: bool,
     pub kv_reuse: bool,
     /// Minimum fraction of an incoming prompt that must already be resident in an idle
     /// slot before that slot's KV is inherited (`--slot-prompt-similarity`).

@@ -6,11 +6,15 @@
 // classification head. That head is what makes it work, and it is also what most
 // models do not have.
 //
-// fox never sets `pooling_type`, so it stays UNSPECIFIED and llama.cpp resolves it from
-// the model's own metadata (llama-context.cpp:182-188) — RANK for a reranker, NONE for
-// everything else. Under NONE there is no sequence score to read, and the request is
-// rejected rather than answered with a number derived from a mean-pooled vector, which
-// would look like a ranking and rank nothing.
+// Reading that head requires the context to be created with RANK pooling, which is what
+// `--reranking` does. It cannot be auto-detected: a reranker GGUF does not reliably
+// carry a `<arch>.pooling_type` key (jina-reranker-v1-tiny-en has none), so llama.cpp's
+// UNSPECIFIED fallback resolves to NONE. llama-server takes a flag for the same reason
+// (arg.cpp:3067-3070).
+//
+// Without RANK pooling `llama_get_embeddings_seq` returns NULL, and that NULL is the
+// signal used to reject the request rather than answer it with a number derived from a
+// mean-pooled vector — which would look like a ranking and rank nothing.
 
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -121,9 +125,11 @@ pub async fn rerank(
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 return AppError::BadRequest(format!(
-                    "model '{model_name}' cannot rerank: {e}. /rerank needs a reranker \
-                     model (bge-reranker, jina-reranker, mxbai-rerank, …); an embedding \
-                     or chat model has no relevance head to read."
+                    "model '{model_name}' cannot rerank: {e}. Two things are needed: a \
+                     reranker model (bge-reranker, jina-reranker, mxbai-rerank, …), and \
+                     the server started with `--reranking true` so its context is \
+                     created with RANK pooling. fox cannot infer the second — reranker \
+                     GGUFs do not reliably declare their pooling type."
                 ))
                 .into_response()
             }

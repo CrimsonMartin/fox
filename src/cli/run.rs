@@ -209,8 +209,9 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
-        None, // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
-        &[],  // lora_modules — same: fox run has no --lora-modules flag yet
+        None,  // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
+        &[],   // lora_modules — same: fox run has no --lora-modules flag yet
+        false, // reranking — benches generate, never score
     )?;
     spinner.finish_and_clear();
     theme::print_success("Model loaded.");

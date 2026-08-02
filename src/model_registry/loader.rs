@@ -47,8 +47,9 @@ async fn load_draft_model(
             split_mode,
             &tensor_split,
             moe_offload_cpu,
-            None, // mmproj_path — draft models are text-only speculation proposers
-            &[],  // lora_modules — adapters apply to the primary model, not the draft
+            None,  // mmproj_path — draft models are text-only speculation proposers
+            &[],   // lora_modules — adapters apply to the primary model, not the draft
+            false, // reranking — a draft model only ever proposes tokens
         )
     })
     .await
@@ -114,6 +115,7 @@ pub(super) async fn load_model(
 
     tracing::info!(model = %name, path = ?path, "loading model");
 
+    let reranking = cfg.reranking;
     let model = tokio::task::spawn_blocking(move || {
         LlamaCppModel::load(
             &path,
@@ -129,6 +131,7 @@ pub(super) async fn load_model(
             moe_offload_cpu,
             mmproj.as_deref(),
             &lora_modules,
+            reranking,
         )
     })
     .await

@@ -119,8 +119,9 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
-        None, // mmproj_path
-        &[],  // lora_modules
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — benches generate, never score
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();

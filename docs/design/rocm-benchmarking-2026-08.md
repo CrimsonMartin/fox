@@ -587,6 +587,10 @@ SMT siblings share execution units and 24 threads measurably regresses.
 | CPU | ~79 t/s | **121.5 t/s** (range [119.8, 124.7]) |
 | ROCm | 158.2 t/s | 158.6 t/s (unchanged) |
 
+(For what fox's 121.5 t/s should be compared against, see "Where the TTFT gap
+actually is" below — the fair reference is a `GGML_NATIVE=OFF` build of
+`llama-server` at 151.1 t/s, not the 153.4 t/s natively-optimised one.)
+
 ROCm being flat is expected — compute runs on the GPU there. This is a
 CPU-backend fix, and CPU-only users were the ones silently paying for it.
 
@@ -626,11 +630,13 @@ right). Splitting it by concurrency localises it:
 | gap | **4.9%** | **11.1%** | **+18 ms** |
 
 So roughly half of it (~5%) is a flat per-request/per-token cost already
-present with a single stream — fox's sampling, the mpsc token channel, the
-SSE layer — and the other half only appears under concurrency, consistent
-with the measured 3.90/4 average ubatch width (not 4.00) plus per-step
-scheduling overhead. The near-doubled TTFT points at admission latency: a
-request waits for a scheduler tick before prefill starts.
+present with a single stream, and the other half only appears under
+concurrency, consistent with the measured 3.90/4 average ubatch width (not
+4.00) plus per-step scheduling overhead. The flat half was investigated
+directly and is **not** where it looked: see "Where the TTFT gap actually
+is" below — it is not admission latency, not the HTTP layer and not
+sampling, but `llama_decode` itself plus the cost of fox's portable-binary
+build flags.
 
 None of these are defects like the ones above; they are the structural cost
 of fox having its own scheduling layer. Closing them is fine-grained
@@ -639,6 +645,63 @@ profiling work with much lower return than the fixes in this document.
 Incidentally, `llama-server`'s log reports `n_threads = 12 (n_threads_batch
 = 12) / 24` — the same physical-core count fox now derives, independently
 confirming the heuristic in the section above.
+
+## Where the TTFT gap actually is (2026-08-02)
+
+The `llama-server` comparison above showed fox's TTFT at 42 ms vs 24 ms
+(ROCm) / 35.9 ms vs 24.4 ms (CPU), and the obvious suspicion was fox's own
+request lifecycle — HTTP parsing, chat templating, scheduler admission
+latency. **Measured, and it is not.** Temporary `Instant`-based phase logs in
+`chat_completions` and `run_loop` (reverted, never committed), CPU backend,
+22-token prompt, `max_tokens=1`:
+
+| phase | cumulative |
+|---|---|
+| model resolved | 110 µs |
+| chat template + tokenize | 270 µs |
+| submitted to scheduler | **290 µs** |
+| `run_prefill` returns | ~32 000 µs |
+| first token at the handler | ~34 000 µs |
+
+**99.1% of the time is inside `run_prefill`** — i.e. one `llama_decode` of a
+22-token prompt. Everything fox owns above the engine costs 290 µs combined.
+Scheduler admission specifically is ~24 µs (visible in ordinary INFO logs:
+"request admitted to waiting queue" → "request admitted to batch").
+
+Two candidate explanations were tested:
+
+- **KV cache size** — fox sizes its context for `n_seq_max` sequences
+  (`4096 × 33 = 135168` cells) where `llama-server` uses 16384. Re-ran with
+  `--max-batch-size 4` (so `4096 × 5`): `run_prefill` unchanged at 32-35 ms.
+  **Not the cause.**
+- **`GGML_NATIVE=OFF`** — fox *must* build with it, since it is incompatible
+  with `GGML_BACKEND_DL` (`build.rs`), which is what lets one binary carry
+  every backend. Rebuilt `llama-server` with fox's exact flags: its
+  single-request latency goes **24.4 ms → 28.8 ms**. So roughly **4.4 ms of
+  the 11.5 ms gap is the price of fox's portable-binary architecture**, not a
+  defect.
+
+Notably this flag costs *latency* but barely any *throughput*: the same
+`GGML_NATIVE=OFF` build still sustains 151.1 t/s (range [144.2, 152.7])
+versus 153.4 with `NATIVE=ON`. So the corrected apples-to-apples CPU
+comparison is **fox 121.5 vs llama-server 151.1 t/s** — the earlier
+"121.5 vs 153.4" slightly overstated the gap by comparing against a
+natively-optimised build fox cannot ship.
+
+**Remaining unexplained: ~7 ms**, inside `llama_decode` itself, with fox and
+`llama-server` running the same commit and the same flags. Localising that
+needs a profiler; `perf` is unusable on this machine (installed, but no
+build for kernel 6.17.0-1028 — needs `linux-tools-6.17.0-1028-oem`, which
+requires root).
+
+**One dead end worth recording** so nobody re-walks it: `sample_token`'s
+no-truncation path (the OpenAI defaults `top_k=0`/`top_p=1.0`) looked like an
+obvious culprit and a fast path for it measured **3.21 ms → 0.69 ms per call,
+4.6×**, in an isolated probe. End-to-end throughput before/after: **121.5 →
+120.3 t/s**, i.e. nothing. The probe's synthetic logits were unrepresentative
+— with real model logits the adaptive candidate pool exits on its first
+iteration, so the expensive branch is almost never taken. Reverted rather
+than shipped: it also changed which token a fixed seed draws.
 
 ## Pre-existing issues found while verifying (neither caused by this work)
 

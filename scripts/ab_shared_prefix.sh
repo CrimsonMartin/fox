@@ -20,9 +20,22 @@
 #   than duplicating the buffer, so a request may copy from a sibling that is already
 #   decoding. The shared prompt is prefilled once.
 #
-# That predicts a large cold-burst TTFT gap and near-parity once warm. If the warm
-# numbers do NOT converge, the hypothesis is wrong and something else is being
-# measured.
+# That predicts a large cold-burst TTFT gap and near-parity once warm. Measured, 3
+# rounds, 8 clients, 1856-token shared prompt, Radeon 890M / Vulkan, both servers from
+# the same vendored llama.cpp:
+#
+#   COLD  TTFT p50   fox  1129 ms   llama-server  4550 ms   fox 4.0x   ranges disjoint
+#         wall       fox  2.65 s    llama-server  8.82 s
+#         cached_tokens  fox 12908 (= 7 x 1844: seven of eight copied)   ls 0
+#   WARM  TTFT p50   fox    50 ms   llama-server   190 ms   fox 3.8x   ranges disjoint
+#         cached_tokens  fox 14840   ls 14840  (both reuse; this is the fair floor)
+#
+# A NOTE ON HOW THIS WAS NEARLY GOT WRONG. The first run of this benchmark reported the
+# opposite cold result — llama-server 1.40x ahead, fox cached_tokens 0 — and was written
+# up as refuting the hypothesis. The fox binary under test was a prebuilt bundle from 31
+# minutes before the feature was committed. The benchmark was correct; it was measuring a
+# build that did not contain what was being measured. If an arm shows no effect at all,
+# check the binary's timestamp against the commit before believing the result.
 #
 # Discipline is inherited from scripts/ab_bench.sh and is not optional: ggml's thread
 # pool spin-waits, so an idle second server still burns cores and skews the arm under

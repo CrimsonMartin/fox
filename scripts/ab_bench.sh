@@ -132,16 +132,17 @@ start_arm() {
     fi
     # FOX_LLAMA_LOG surfaces llama.cpp's own startup lines, which is how we can
     # tell which backend .so actually got loaded (hazard 3).
-    # setsid puts the arm in its own process group so cleanup() can kill the whole
-    # group. Without that, $! is the wrapper shell's pid and killing it leaves the
-    # actual server running — that silently breaks the one-server-at-a-time
-    # guarantee this script exists to provide (observed: four fox processes alive
-    # at once, each distorting the others).
+    # Process-group handling, twice-burned:
+    #   - plain `bash -c "$cmd" &` makes $! the wrapper's pid, so killing it left
+    #     the real server running (observed: four fox processes alive at once).
+    #   - `setsid bash -c ...` forks, so $! became setsid's pid, which exits
+    #     immediately — the server was orphaned and cleanup hung waiting on it.
+    # `setsid --wait` keeps the launcher alive for the child's lifetime, so $! is
+    # a pid worth waiting on AND leads a killable process group.
     #
-    # No `exec` here: it would break commands that carry env assignments, e.g.
-    # `FOX_N_THREADS=8 ./target/release/fox serve ...`, which is a normal way to
-    # express an arm.
-    FOX_LLAMA_LOG=1 setsid bash -c "$cmd" > "$log" 2>&1 &
+    # No `exec`: it breaks arms written as `FOX_N_THREADS=8 ./target/release/fox
+    # serve ...`, which is a normal way to express one.
+    FOX_LLAMA_LOG=1 setsid --wait bash -c "$cmd" > "$log" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 "$READY_TIMEOUT"); do
         port_busy && return 0
@@ -173,7 +174,9 @@ measure_ttft() {
 }
 
 measure_throughput() {
-    "$BENCH_BIN" --url "$URL" --model "$MODEL" --concurrency "$CONCURRENCY" \
+    # Bounded: a hung bench used to stall the whole comparison indefinitely,
+    # with no output and no timeout to break it.
+    timeout 600 "$BENCH_BIN" --url "$URL" --model "$MODEL" --concurrency "$CONCURRENCY" \
         --requests "$REQUESTS" --max-tokens "$MAX_TOKENS" 2>/dev/null \
         | awk '/Throughput/ {print $3}'
 }

@@ -1011,3 +1011,72 @@ retracted in `e3b447a`) — it was drift, and an alternating A/B shows no effect
 | Scheduler admission order (verified correct — ~3.85/4 batch width) | `src/scheduler/schedule.rs`, `src/engine/run.rs` (`run_loop`) |
 | llama.cpp's split selection and its `sequential`/ascending-seq_id requirement | `vendor/llama.cpp/src/llama-kv-cache.cpp:725`, `vendor/llama.cpp/src/llama-batch.cpp` (`split_equal`) |
 | llama.cpp's async decode + deferred sync | `vendor/llama.cpp/src/llama-context.cpp` (`decode()`, `graph_compute()`, `llama_get_logits_ith()`) |
+
+---
+
+# Vulkan follow-up (2026-08-02): fox vs llama-server, after the 0.19 work
+
+The measurements above are ROCm and predate 0.19's KV-reuse rework. This section
+re-measures on **Vulkan** (Radeon 890M, RADV GFX1150) against `llama-server` built
+from the **same vendored llama.cpp** with the **same toolchain**
+(`Dockerfile.vulkan` and `Dockerfile.llama-server-vulkan`, both Ubuntu 24.04 +
+glslc + SPIRV-Headers), so what is left is the serving layer rather than a version
+or compiler difference. Model: `llama-3.2-1b-instruct-q8_0`, 4 concurrent clients,
+16 requests × 128 tokens, one server at a time, arms alternated.
+
+## The first number was wrong, and this document had already said why
+
+The first run used `fox-bench`, which cannot set `top_k`. So fox ran at its OpenAI
+default of `top_k = 0` while `llama-server` ran at its own default of `40` — the
+exact asymmetry "The real root cause: fox's own sampling defaults" above documents.
+That is not two speeds for the same work; it is two different amounts of work. It
+produced **90%**, and it was reported before the asymmetry was noticed.
+
+Re-run with the byte-identical request body posted to both:
+
+| | fox | llama-server | fox / llama-server |
+|---|---|---|---|
+| `top_k = 0` | 161.1 t/s | 187.4 t/s | **86%** |
+| `top_k = 40` | **175.1 t/s** | 181.9 t/s | **96%** |
+
+Medians of 3 alternating rounds; fox's ranges at the two settings are disjoint
+([160.4, 161.7] vs [173.6, 175.4]).
+
+**So the gap is 4%, not 10%.** Six of those ten points were the benchmark comparing
+two different workloads.
+
+## What the two settings say
+
+- **fox gains 8.7% moving from `top_k = 0` to `40`.** That is the residual cost of
+  softmaxing 128,256 entries instead of 40, *after* the adaptive-candidate fix above
+  already removed the full sort. The fix bounded the cost; it did not eliminate it.
+- **`llama-server` *loses* ~3% at `top_k = 40`** (187.4 → 181.9). Its untruncated path
+  is the faster one, which is where fox's remaining 4% lives: llama.cpp handles the
+  no-truncation case better than fox does, not the truncated one.
+
+Two candidates for that 4%, neither profiled — stated as hypotheses so nobody mistakes
+them for findings:
+
+1. `sampling.rs`'s `let mut logits = logits.to_vec()` copies the full 512 KB logit
+   vector per token per request. `needs_logits` already avoids a *second* copy for the
+   logprobs path, but this one is unconditional.
+2. fox samples on the host; llama.cpp can sample on the backend. On unified iGPU memory
+   this matters less than on a discrete GPU, but it is still a round trip per token.
+
+Both weigh more on the `top_k = 0` path, which is consistent with where the gap sits.
+**Profile before acting on either** — everything in this document that was fixed by
+guessing first had to be retracted later.
+
+## Practical reading
+
+fox is also markedly steadier: its three rounds spanned 1.6 t/s against
+`llama-server`'s 12.3. And none of 0.19's work shows up in this benchmark at all — it
+is single-turn decode with a short prompt, while 0.19 improved prefill and KV reuse
+(34× mean / 94× p90 on a multi-conversation working set, 3.4× on `n=4`). The honest
+summary is that decode throughput was already where it was, and 0.19 did not cost any
+of it.
+
+The `top_k = 0` default remains **deliberate** (`/v1/*` mirrors OpenAI, which has no
+`top_k`). It costs 8.7% for callers who do not set it. Changing the default would alter
+output for every existing caller silently, so it is documented rather than changed.
+

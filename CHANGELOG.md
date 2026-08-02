@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A model loaded from outside `models_dir` was unreachable by its own name.**
+  `--model-path` pointing anywhere other than `models_dir` produced a server that
+  advertised the model in `/health` and `/props` under a name every request path
+  then answered `404` for. Two things combined: `resolve_model_name` only ever
+  scans `models_dir`, and `get_or_load` resolved *before* checking what was already
+  resident — so a model that was loaded and serving could not vouch for its own
+  name.
+
+  The registry now records where each model it loads came from and consults that
+  right after alias resolution, before the directory scan. Deliberately not
+  forgotten on unload: the path is still the right answer for that stem, and
+  dropping it would make an evicted `--model-path` model unreachable again at the
+  first keep-alive expiry — the same bug, resurfacing later and harder to attribute.
+
 - **`/api/show` answered from the filename, not the model.** `parameters` and
   `template` were empty strings and `parameter_size` was the literal `"unknown"`,
   because every field was parsed out of the file stem. When the model is resident it

@@ -37,6 +37,13 @@ pub struct ModelRegistry {
     /// `llama_set_adapters_lora`, so overriding what gets copied into it is the whole
     /// mechanism.
     pub(crate) lora_scale_override: DashMap<String, f32>,
+    /// Where each model fox has loaded actually came from, keyed by stem.
+    ///
+    /// `resolve_model_name` otherwise only knows about files inside `models_dir`, so a
+    /// model pre-loaded with `--model-path` pointing anywhere else resolved to a 404
+    /// on the request path even while it was resident and serving — its own `/health`
+    /// reported it by a name nothing would accept.
+    pub(crate) known_paths: DashMap<String, PathBuf>,
     config: RegistryConfig,
     aliases: HashMap<String, String>,
     /// Serializes model loading so two concurrent requests for the same cold model
@@ -55,6 +62,7 @@ impl ModelRegistry {
             last_used: DashMap::new(),
             keep_alive_override: DashMap::new(),
             lora_scale_override: DashMap::new(),
+            known_paths: DashMap::new(),
             config,
             aliases,
             load_lock: tokio::sync::Mutex::new(()),
@@ -142,6 +150,12 @@ impl ModelRegistry {
         let entry =
             Arc::new(load_model(&stem, &path, &self.config, draft, mmproj, lora_modules).await?);
         self.engines.insert(stem.clone(), entry.clone());
+        // Remember where it came from, so it stays reachable by name even when its
+        // file lives outside `models_dir`. Deliberately NOT removed on unload: the
+        // path is still the right answer for that stem, and forgetting it would make
+        // an evicted `--model-path` model unreachable again — the exact bug this
+        // fixes, resurfacing after the first keep-alive expiry.
+        self.known_paths.insert(stem.clone(), path.clone());
         self.last_used.insert(stem.clone(), Instant::now());
         if let Ok(mut lru) = self.lru.lock() {
             lru.put(stem, ());
@@ -351,6 +365,18 @@ impl ModelRegistry {
 
         let resolved = self.aliases.get(name).map(String::as_str).unwrap_or(name);
 
+        // Step 1.5: a model fox has already loaded is servable under its stem no
+        // matter where its file lives. Checked before the directory scan, which only
+        // ever sees `models_dir` — that gap is what made a `--model-path` model
+        // outside it unreachable by name.
+        if let Some(entry) = self
+            .known_paths
+            .iter()
+            .find(|e| e.key().eq_ignore_ascii_case(resolved))
+        {
+            return Ok((entry.key().clone(), entry.value().clone()));
+        }
+
         let entries = list_models(&self.config.models_dir)?;
         let lower = resolved.to_lowercase();
 
@@ -391,6 +417,13 @@ impl ModelRegistry {
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl ModelRegistry {
+    /// Register where a model came from, so `resolve_model_name` can find it by stem
+    /// even though it lives outside `models_dir`. Used by the startup pre-load path
+    /// and by tests.
+    pub fn remember_path(&self, stem: impl Into<String>, path: PathBuf) {
+        self.known_paths.insert(stem.into(), path);
+    }
+
     /// Inject a pre-built engine entry without touching the filesystem (for tests).
     pub fn preload_for_test(&self, name: impl Into<String>, entry: Arc<EngineEntry>) {
         let name = name.into();
@@ -405,8 +438,36 @@ impl ModelRegistry {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::collections::HashMap;
+
+    /// A model outside `models_dir` must still resolve by its stem once fox knows it.
+    ///
+    /// Regression: `--model-path` pointing anywhere else produced a server whose own
+    /// `/health` advertised a name that every request path then 404'd on.
+    #[test]
+    fn a_model_outside_models_dir_resolves_by_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let model = elsewhere.path().join("Far-Away-Model.gguf");
+        std::fs::write(&model, b"").unwrap();
+
+        let reg = ModelRegistry::new(minimal_cfg(dir.path(), 1, 0), HashMap::new());
+
+        // Before fox knows about it, only the literal path works.
+        assert!(reg.resolve_model_name("Far-Away-Model").is_err());
+        assert!(reg.resolve_model_name(model.to_str().unwrap()).is_ok());
+
+        reg.remember_path("Far-Away-Model", model.clone());
+        let (stem, path) = reg
+            .resolve_model_name("Far-Away-Model")
+            .expect("a loaded model must be reachable by name");
+        assert_eq!(stem, "Far-Away-Model");
+        assert_eq!(path, model);
+        // Case-insensitive, like the models_dir lookup it sits beside.
+        assert!(reg.resolve_model_name("far-away-model").is_ok());
+    }
 
     fn minimal_cfg(
         dir: &std::path::Path,

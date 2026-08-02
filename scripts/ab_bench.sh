@@ -176,6 +176,7 @@ echo "=== ab_bench.sh ==="
 echo "  A: $A_LABEL"
 echo "  B: $B_LABEL"
 echo "  Metric: $METRIC   Rounds: $ROUNDS   URL: $URL"
+printf '%s\n%s\n' "$A_CMD" "$B_CMD" > "$LOGDIR/cmds"
 echo "  One server at a time; arms alternate to cancel drift."
 echo
 
@@ -213,10 +214,13 @@ lower_is_better = metric == "ttft"
 for label, v in ((a, va), (b, vb)):
     print(f"  {label:12s} median={statistics.median(v):8.2f} {unit}  range=[{min(v):.2f}, {max(v):.2f}]  n={len(v)}")
 
-# Hazard 3: if both arms fingerprint identically, the change under test never
-# applied and any difference is pure noise.
+# Hazard 3: if both arms fingerprint identically AND run the same command, the
+# change under test never applied. Identical fingerprints with *different*
+# commands are expected (e.g. the arms differ by an env var, not by backend),
+# so that case is not flagged — a warning that cries wolf gets ignored.
 fa, fb = set(fps(a)), set(fps(b))
-if fa == fb:
+same_cmd = open(f"{logdir}/cmds").read().splitlines()
+if fa == fb and len(set(same_cmd)) == 1:
     print(f"\n  WARNING: both arms loaded the same thing ({' / '.join(sorted(fa))}).")
     print("  The change under test did not apply — this comparison measures nothing.")
 
@@ -228,6 +232,15 @@ for label, v in ((a, va), (b, vb)):
         if spread > 0.10:
             print(f"\n  WARNING: '{label}' varies {spread*100:.0f}% against itself across rounds.")
             print("  The machine is not stable right now; treat any small difference as noise.")
+
+# With fewer than 2 measurements per arm a "range" is a single point, so any two
+# arms are trivially disjoint and the disjointness test below would declare a
+# winner from one sample each. Refuse instead.
+if len(va) < 2 or len(vb) < 2:
+    print()
+    print(f"  VERDICT: INCONCLUSIVE — only {min(len(va), len(vb))} measurement(s) per arm.")
+    print("  A single measurement has no range to compare. Use --rounds 3 or more.")
+    raise SystemExit(0)
 
 # Hazard 4: overlapping ranges prove nothing, regardless of medians.
 overlap = not (max(va) < min(vb) or max(vb) < min(va))

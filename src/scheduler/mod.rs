@@ -712,6 +712,58 @@ mod tests {
         );
     }
 
+    /// The burst case from `scripts/ab_shared_prefix.sh`: every client arrives before
+    /// the scheduler has run even once. Measured on a real server this produced
+    /// `cached_tokens = 0` for all eight, i.e. eight full prefills of the same prompt.
+    /// This reproduces the arrival pattern to find out where the donor path is lost.
+    #[test]
+    fn simultaneous_burst_behind_one_prompt_reuses_it() {
+        let kv = test_kv(64);
+        let sched = Scheduler::new(kv, 8);
+        let shared: Vec<i32> = (1..=60).collect();
+
+        // All eight submitted before any schedule_step — no sequence exists yet.
+        let mut _keep = Vec::new();
+        for i in 0..8u64 {
+            let mut prompt = shared.clone();
+            prompt.extend([i as i32 + 500, i as i32 + 900]);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            _keep.push(rx);
+            sched
+                .submit(InferenceRequest::new(
+                    i + 1,
+                    prompt,
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+        }
+
+        let first = sched.schedule_step();
+        assert_eq!(
+            first.prefill.len(),
+            1,
+            "only the first can prefill; the rest have a donor that is not ready yet: {first:?}"
+        );
+
+        // Let the first reach Decoding, then drain the deferred arrivals.
+        sched.update_after_token(first.prefill[0], 99, true);
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let donor = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
+        let copied = running
+            .iter()
+            .filter(|r| r.id != 1 && r.prefix_seq_id == Some(donor))
+            .count();
+        let admitted = running.len();
+        assert!(
+            copied + 1 == admitted && admitted > 1,
+            "every later arrival must copy the live prefix: {copied} of {admitted} did"
+        );
+    }
+
     /// Concurrent requests behind one system prompt must share its KV, not each hold
     /// a copy. This is the case `select` cannot serve: when they arrive together no
     /// slot is idle, so nothing is inheritable — but a *live* sequence can be copied.

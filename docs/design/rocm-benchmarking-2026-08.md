@@ -17,9 +17,13 @@ A follow-up caveat — that the fix held only for low-prefix-cache-reuse
 traffic, and degraded back toward baseline under a shared system prompt —
 was **also fixed since** (2026-08-01, third pass), by switching to a
 unified KV cache: **median 158.2 t/s, range [155.0, 158.9]**, above
-Ollama's 144-155 and at ~91% of `llama-server`. See "Known limitation" (now
-resolved), "Attempted fix" (the ruled-out repair), and "The fix that
-actually closed it: `kv_unified`" below.
+Ollama's 144-155. See "Known limitation" (now resolved), "Attempted fix"
+(the ruled-out repair), and "The fix that actually closed it: `kv_unified`"
+below. Since measured directly against vanilla `llama-server` on the same
+hardware (178.1 t/s): fox is at **89% of it, an 11.1% remaining gap**, now
+localised to fox's own request lifecycle rather than to batching — see
+"Verified against vanilla `llama-server`". A separate `n_threads` fix found
+along the way is worth **+54% on the CPU backend** (neutral on ROCm).
 
 ## Why this exists
 
@@ -39,11 +43,13 @@ packages installed outside containers):
 - **fox:rocm** — new `Dockerfile.rocm`, `rocm/dev-ubuntu-24.04` base so
   `hipcc`/clang are present at build time. Pinned to ROCm 7.2 (see Results).
 - **ollama:rocm** — official `ollama/ollama:rocm` image.
-- **llamaserver-bench** — a throwaway image (never committed, built from a
-  scratch Dockerfile) compiling vanilla `llama.cpp`'s own `llama-server`
-  binary from the **exact same vendored commit fox uses**, with ROCm/HIP —
-  used to isolate "is this fox's code or llama.cpp's" (see below). Not part
-  of the repo.
+- **llamacpp:rocm** — `Dockerfile.llama-server-rocm` (committed), compiling
+  vanilla `llama.cpp`'s own `llama-server` from the **exact same vendored
+  commit fox uses** and with the **same ggml/HIP flags `build.rs` sets**, so
+  a comparison against it differs only in the serving layer. Used to isolate
+  "is this fox's code or llama.cpp's" (see below). Earlier passes used a
+  throwaway version of this image; it is committed now precisely so the
+  reference number stops being folklore.
 
 The 890M is `gfx1150` (RDNA 3.5), not in ROCm's supported-device list for
 any of these engines. All three need `HSA_OVERRIDE_GFX_VERSION=11.0.0` to
@@ -552,6 +558,88 @@ model above returns `completion_tokens = 1` (empty content) for the same
 on a build with `kv_unified` removed, so it predates this work — see
 "Pre-existing issues found while verifying" below.
 
+## `n_threads`: fox was inheriting llama.cpp's 4-thread default (2026-08-02)
+
+Found while chasing the residual gap to `llama-server`. fox never set
+`llama_context_params::n_threads`, so it inherited `GGML_DEFAULT_N_THREADS`
+= 4 — a value `ggml.h` itself marks `// TODO: better default` — on every
+machine regardless of core count. `llama-server` does not inherit it; it
+resolves `n_threads` from `common_cpu_get_num_math()`.
+
+Sweep on this 24-logical-core box (concurrency 4, 40 requests, 128 max
+tokens, one server at a time):
+
+| threads | t/s |
+|---|---|
+| 4 (the inherited default) | 80.7 |
+| 8 | 123.4 |
+| 12 (physical cores) | 123.2 |
+| 24 (logical cores) | 103.4 |
+
+Fixed in `cf5cd47` by resolving to *physical* cores, mirroring
+`common_cpu_get_num_physical_cores()` (count distinct `thread_siblings`
+masks on Linux). Physical rather than logical is what the sweep supports —
+SMT siblings share execution units and 24 threads measurably regresses.
+`FOX_N_THREADS` overrides it.
+
+| backend | before | after |
+|---|---|---|
+| CPU | ~79 t/s | **121.5 t/s** (range [119.8, 124.7]) |
+| ROCm | 158.2 t/s | 158.6 t/s (unchanged) |
+
+ROCm being flat is expected — compute runs on the GPU there. This is a
+CPU-backend fix, and CPU-only users were the ones silently paying for it.
+
+**Methodology warning, learned the hard way**: benchmark only ONE server at
+a time. ggml's thread pool spin-waits rather than sleeping, so an *idle*
+second server still burns cores, and the distortion scales with each
+server's thread count — i.e. it punishes exactly the variable under test.
+A head-to-head with both up read fox 79.2 vs llama-server 151.2; measuring
+each alone gave 121.5 vs 153.4. The first measurement after this fix looked
+like a *regression* (76.6 t/s) purely because of this.
+
+## Verified against vanilla `llama-server` on ROCm (2026-08-02)
+
+Earlier passes cited "173 t/s" for `llama-server` as the ceiling without
+this session having measured it. Now measured directly, with
+`Dockerfile.llama-server-rocm` (committed): upstream's own server built from
+**the same vendored llama.cpp commit** with **the same ggml/HIP flags
+`build.rs` uses**, so the comparison differs only in the serving layer.
+Confirmed on-GPU via its own log (`ROCm0 — AMD Radeon 890M`, layers assigned
+to ROCm0) — necessary, because with `GGML_BACKEND_DL` a `libggml-hip.so`
+that fails to dlopen falls back to CPU silently.
+
+Each measured alone, `scripts/repeat_bench.sh`, 5 repetitions:
+
+| | median | range |
+|---|---|---|
+| `llama-server` | 178.1 t/s | [177.7, 182.1] |
+| fox | 158.3 t/s | [157.6, 161.6] |
+
+**Real remaining gap: 11.1%** (the previously-cited ~9% was approximately
+right). Splitting it by concurrency localises it:
+
+| | concurrency 1 | concurrency 4 | TTFT (P50) |
+|---|---|---|---|
+| fox | 52.8 t/s | 158.3 t/s | 42 ms |
+| `llama-server` | 55.5 t/s | 178.1 t/s | 24 ms |
+| gap | **4.9%** | **11.1%** | **+18 ms** |
+
+So roughly half of it (~5%) is a flat per-request/per-token cost already
+present with a single stream — fox's sampling, the mpsc token channel, the
+SSE layer — and the other half only appears under concurrency, consistent
+with the measured 3.90/4 average ubatch width (not 4.00) plus per-step
+scheduling overhead. The near-doubled TTFT points at admission latency: a
+request waits for a scheduler tick before prefill starts.
+
+None of these are defects like the ones above; they are the structural cost
+of fox having its own scheduling layer. Closing them is fine-grained
+profiling work with much lower return than the fixes in this document.
+
+Incidentally, `llama-server`'s log reports `n_threads = 12 (n_threads_batch
+= 12) / 24` — the same physical-core count fox now derives, independently
+confirming the heuristic in the section above.
+
 ## Pre-existing issues found while verifying (neither caused by this work)
 
 Both were confirmed to reproduce on a build with the `kv_unified` change
@@ -601,19 +689,18 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
    that actually closed it: `kv_unified`" above. The other two alternatives
    (skip-cache-on-stale-id, full-buffer copy) are moot and were never
    implemented.
-2. Close the remaining gap to `llama-server`'s 173 t/s (fox is at ~91% of it
-   now, up from ~30-35% before these fixes, and now *under sustained
-   prefix-cache reuse*, not just the easy case) — no longer suggests an
-   upstream ceiling, so this is exploratory rather than a known lead: fox's
-   own request-lifecycle overhead (HTTP/streaming layers, scheduler tick
-   overhead) is the more likely place to look next, not llama.cpp internals.
-   Note the decode ubatch width is now 3.90/4, not 4.00 — the residual is
-   the expected prefill-step gap when a finished request is replaced, so
-   there is little left to win at the batching layer specifically.
-3. Profile Ollama/`llama-server` itself with `rocprofv3` (its minimal image
-   ships no profiling tools — would need building or copying in a
-   profiling-capable image) to directly confirm it's hitting `ncols_dst=4`
-   consistently, as a sanity check against fox's now-fixed dispatch pattern.
+2. Close the remaining **11.1%** gap to `llama-server` (178.1 vs 158.3 t/s,
+   both measured directly — see "Verified against vanilla `llama-server`"
+   above). Now localised: ~5% is a flat per-request cost visible even at
+   concurrency 1, the rest appears only under concurrency, and TTFT is
+   +18 ms. So the leads are fox's own request lifecycle — sampling, the mpsc
+   token channel, SSE, and scheduler admission latency — not llama.cpp
+   internals and not the batching layer (ubatch width is already 3.90/4).
+3. Profile `llama-server` itself with `rocprofv3` to confirm it hits
+   `ncols_dst=4` consistently, as a sanity check against fox's now-fixed
+   dispatch pattern. This is now much easier: `Dockerfile.llama-server-rocm`
+   builds it from a ROCm dev base that can host the profiler, unlike
+   Ollama's minimal image which ships none.
 4. Re-run a `rocprofv3` capture on fox's own fixed build to directly
    confirm `ncols_dst=4` now dominates (this doc's fix is verified via
    aggregate throughput; a kernel-level reconfirmation would be the last
@@ -646,6 +733,8 @@ kept demonstrating.
 |---|---|
 | `AMDGPU_TARGETS` passthrough | `build.rs` (ROCm/HIP auto-detection block) |
 | ROCm Docker build | `Dockerfile.rocm` |
+| **Reference `llama-server`** — same vendored commit, same ggml/HIP flags | `Dockerfile.llama-server-rocm` |
+| **Thread count** — never inherit ggml's 4-thread default | `src/engine/model/llama_cpp/mod.rs` (`resolve_n_threads`, `FOX_N_THREADS`) |
 | Repeated/statistically-sound benchmarking | `scripts/repeat_bench.sh` |
 | **The main fix** — dense/ascending `seq_id` allocation | `src/scheduler/mod.rs` (`seq_id_pool`, now a min-heap) |
 | **The main fix** — batch emitted in ascending `seq_id` order | `src/engine/model/llama_cpp/batch.rs` (`do_decode_batch`) |

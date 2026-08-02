@@ -219,6 +219,13 @@ pub struct InferenceRequestForModel {
     pub frequency_penalty: f32,
     /// OpenAI-style presence penalty (additive; 0 = disabled).
     pub presence_penalty: f32,
+    /// Trailing window the penalties look at, in generated tokens (llama.cpp
+    /// `repeat_last_n`): `-1` = whole history, `0` = disabled, `n` = last `n`.
+    pub repeat_last_n: i32,
+    /// Top-nσ logit cutoff in standard deviations (0 = disabled).
+    pub top_n_sigma: f32,
+    /// Floor on candidates left by any truncation step (0 = just the top one).
+    pub min_keep: usize,
     /// RNG seed for reproducible sampling (None = random).
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).

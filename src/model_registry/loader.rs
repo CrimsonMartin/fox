@@ -166,11 +166,10 @@ pub(super) async fn load_model(
         })
     };
 
-    let scheduler = Arc::new(Scheduler::with_max_queue_depth(
-        kv_cache.clone(),
-        max_batch_size,
-        max_queue_depth,
-    ));
+    let scheduler = Arc::new(
+        Scheduler::with_max_queue_depth(kv_cache.clone(), max_batch_size, max_queue_depth)
+            .with_kv_reuse(cfg.kv_reuse, cfg.slot_prompt_similarity),
+    );
     let engine = Arc::new(InferenceEngine::new(
         model,
         scheduler,

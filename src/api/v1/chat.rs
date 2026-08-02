@@ -27,6 +27,17 @@ use crate::api::types::{
 use crate::engine::model::MEDIA_MARKER;
 use crate::scheduler::{InferenceRequest, SamplingParams, Token};
 
+/// One fully-buffered generation branch: `(text, completion_tokens, stop_reason,
+/// logprobs, cached_prompt_tokens)`. Named because `n`/`best_of` fan-out collects a
+/// `Vec` of these in three separate places.
+type BufferedBranch = (
+    String,
+    u32,
+    Option<crate::scheduler::StopReason>,
+    Vec<ChatLogprobEntry>,
+    u32,
+);
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
@@ -175,6 +186,33 @@ pub async fn chat_completions(
         None => None,
     };
 
+    // Raw GBNF (`grammar`), a fox extension mirroring llama-server's field. The engine
+    // has had full GBNF support since 0.14; until now the only way to reach it was
+    // `response_format`/`format`, which can only express JSON. Setting both is an
+    // error rather than a silent precedence rule — a caller who sends two conflicting
+    // constraints has a bug, and picking one for them hides it.
+    let grammar = match (&grammar, req.grammar.as_ref()) {
+        (Some(_), Some(_)) => {
+            return AppError::BadRequest(
+                "`grammar` and `response_format` are mutually exclusive".to_string(),
+            )
+            .into_response()
+        }
+        (None, Some(g)) if !g.trim().is_empty() => Some(std::sync::Arc::from(g.as_str())),
+        _ => grammar,
+    };
+
+    // `stream_options.include_usage` was previously parsed and ignored — usage always
+    // rode the final chunk. Honour an explicit `false` (OpenAI's semantics: usage is
+    // opt-in on streams); with `stream_options` absent, keep fox's historical
+    // always-attach behaviour, which is a harmless superset and breaks no existing
+    // caller.
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .and_then(|o| o.include_usage)
+        .unwrap_or(true);
+
     // Per-token logprobs: OpenAI caps top_logprobs at 20.
     let want_logprobs = req.logprobs == Some(true);
     let logprobs_top_n = req.top_logprobs.unwrap_or(0).min(20);
@@ -203,6 +241,7 @@ pub async fn chat_completions(
         presence_penalty: req
             .presence_penalty
             .unwrap_or(defaults::openai::PRESENCE_PENALTY),
+        repeat_last_n: req.repeat_last_n.unwrap_or(state.repeat_last_n),
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
@@ -216,6 +255,8 @@ pub async fn chat_completions(
         },
         min_p: req.min_p.unwrap_or(0.0).clamp(0.0, 1.0),
         min_tokens: req.min_tokens.unwrap_or(0),
+        top_n_sigma: req.top_n_sigma.unwrap_or(0.0).max(0.0),
+        min_keep: req.min_keep.unwrap_or(0),
         logit_bias,
     };
 
@@ -308,37 +349,37 @@ pub async fn chat_completions(
             // tool-call responses.) stream: true guarantees best_of == n
             // (enforced in ChatCompletionRequest::validate()), so every
             // submitted branch is returned — no ranking needed here.
-            let branches: Vec<(
-                String,
-                u32,
-                Option<crate::scheduler::StopReason>,
-                Vec<ChatLogprobEntry>,
-            )> = futures::future::join_all(branch_rxs.iter_mut().map(buffer_tokens)).await;
+            let branches: Vec<BufferedBranch> =
+                futures::future::join_all(branch_rxs.iter_mut().map(buffer_tokens)).await;
             let n_branches = branches.len();
+            // Shared prompt across branches — see the non-streaming path.
+            let tool_cached_tokens = branches.first().map(|b| b.4).unwrap_or(0);
 
             let mut completion_tokens_total = 0u32;
             let parsed: Vec<(String, Option<Vec<ToolCall>>, String)> = branches
                 .into_iter()
-                .map(|(full_content, completion_tokens, stop_reason, _lp)| {
-                    completion_tokens_total += completion_tokens;
-                    let (content, mut tool_calls) =
-                        parse_tool_call(&full_content, eff_tools, tool_parser);
-                    if !allow_parallel {
-                        if let Some(ref mut calls) = tool_calls {
-                            calls.truncate(1);
+                .map(
+                    |(full_content, completion_tokens, stop_reason, _lp, _cached)| {
+                        completion_tokens_total += completion_tokens;
+                        let (content, mut tool_calls) =
+                            parse_tool_call(&full_content, eff_tools, tool_parser);
+                        if !allow_parallel {
+                            if let Some(ref mut calls) = tool_calls {
+                                calls.truncate(1);
+                            }
                         }
-                    }
-                    let finish_reason = if tool_calls.is_some() {
-                        "tool_calls".to_string()
-                    } else {
-                        stop_reason
-                            .as_ref()
-                            .map(finish_reason_str)
-                            .unwrap_or("stop")
-                            .to_string()
-                    };
-                    (content, tool_calls, finish_reason)
-                })
+                        let finish_reason = if tool_calls.is_some() {
+                            "tool_calls".to_string()
+                        } else {
+                            stop_reason
+                                .as_ref()
+                                .map(finish_reason_str)
+                                .unwrap_or("stop")
+                                .to_string()
+                        };
+                        (content, tool_calls, finish_reason)
+                    },
+                )
                 .collect();
 
             tracing::info!(
@@ -421,10 +462,12 @@ pub async fn chat_completions(
                             finish_reason: Some(finish_reason),
                             logprobs: None,
                         }],
-                        usage: is_last.then(|| Usage {
-                            prompt_tokens: prompt_tokens_u32,
-                            completion_tokens: completion_tokens_total,
-                            total_tokens: prompt_tokens_u32 + completion_tokens_total,
+                        usage: (is_last && include_usage).then(|| {
+                            Usage::new(
+                                prompt_tokens_u32,
+                                completion_tokens_total,
+                                tool_cached_tokens,
+                            )
                         }),
                         system_fingerprint: None,
                     };
@@ -463,7 +506,11 @@ pub async fn chat_completions(
             let mut first_chunk = vec![true; n_branches];
             let mut completion_tokens = vec![0u32; n_branches];
             let mut done_count = 0usize;
+            // Carried on every token; the prompt is shared, so any branch reports the
+            // same value and the last write wins harmlessly.
+            let mut stream_cached_tokens;
             while let Some((branch_idx, token)) = merged.next().await {
+                stream_cached_tokens = token.cached_tokens;
                 let is_done = token.stop_reason.is_some();
                 let finish_reason = token.stop_reason.as_ref().map(finish_reason_str).map(str::to_string);
                 completion_tokens[branch_idx] += 1;
@@ -482,10 +529,12 @@ pub async fn chat_completions(
                 }
 
                 // Summed usage attaches once, on the very last chunk overall.
-                let usage = (is_done && done_count == n_branches).then(|| Usage {
-                    prompt_tokens: log_prompt as u32,
-                    completion_tokens: completion_tokens.iter().sum(),
-                    total_tokens: log_prompt as u32 + completion_tokens.iter().sum::<u32>(),
+                let usage = (is_done && done_count == n_branches && include_usage).then(|| {
+                    Usage::new(
+                        log_prompt as u32,
+                        completion_tokens.iter().sum(),
+                        stream_cached_tokens,
+                    )
                 });
 
                 // First chunk of each branch carries role; subsequent chunks carry content.
@@ -533,12 +582,12 @@ pub async fn chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let mut branches: Vec<(
-            String,
-            u32,
-            Option<crate::scheduler::StopReason>,
-            Vec<ChatLogprobEntry>,
-        )> = futures::future::join_all(branch_rxs.iter_mut().map(buffer_tokens)).await;
+        let mut branches: Vec<BufferedBranch> =
+            futures::future::join_all(branch_rxs.iter_mut().map(buffer_tokens)).await;
+        // Every branch shares one prompt, so its cached-prefix count is a property of
+        // the request, not of a branch. Branch 0 is the canonical one (with n == 1,
+        // the overwhelmingly common case, it is the only one).
+        let cached_tokens = branches.first().map(|b| b.4).unwrap_or(0);
 
         // best_of > n: rank by total log-likelihood (sum of per-token
         // logprobs) and keep only the top n. A no-op when best_of == n.
@@ -552,7 +601,7 @@ pub async fn chat_completions(
 
         let mut completion_tokens_total = 0u32;
         let mut choices = Vec::with_capacity(branches.len());
-        for (index, (full_content, completion_tokens, stop_reason, logprob_entries)) in
+        for (index, (full_content, completion_tokens, stop_reason, logprob_entries, _cached)) in
             branches.into_iter().enumerate()
         {
             completion_tokens_total += completion_tokens;
@@ -619,11 +668,11 @@ pub async fn chat_completions(
             created,
             model: req.model,
             choices,
-            usage: Some(Usage {
-                prompt_tokens: prompt_tokens_len as u32,
-                completion_tokens: completion_tokens_total,
-                total_tokens: prompt_tokens_len as u32 + completion_tokens_total,
-            }),
+            usage: Some(Usage::new(
+                prompt_tokens_len as u32,
+                completion_tokens_total,
+                cached_tokens,
+            )),
             system_fingerprint: None,
         })
         .into_response()
@@ -639,22 +688,17 @@ fn select_best_of<T>(mut candidates: Vec<(f32, T)>, n: usize) -> Vec<T> {
     candidates.into_iter().map(|(_, item)| item).collect()
 }
 
-/// Buffer all tokens from the receiver into `(text, count, stop_reason, logprobs)`.
+/// Buffer all tokens from the receiver into a [`BufferedBranch`].
 /// `logprobs` is empty unless the request asked for them.
-async fn buffer_tokens(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Token>,
-) -> (
-    String,
-    u32,
-    Option<crate::scheduler::StopReason>,
-    Vec<ChatLogprobEntry>,
-) {
+async fn buffer_tokens(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Token>) -> BufferedBranch {
     let mut text = String::new();
     let mut count = 0u32;
     let mut stop_reason = None;
     let mut logprobs = Vec::new();
+    let mut cached_tokens = 0u32;
     while let Some(token) = rx.recv().await {
         text.push_str(&token.text);
+        cached_tokens = token.cached_tokens;
         count += 1;
         if let Some(lp) = token.logprob {
             logprobs.push(lp.into());
@@ -664,7 +708,7 @@ async fn buffer_tokens(
             break;
         }
     }
-    (text, count, stop_reason, logprobs)
+    (text, count, stop_reason, logprobs, cached_tokens)
 }
 
 #[cfg(test)]
@@ -928,6 +972,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
+            -1,
         );
         let body = serde_json::json!({
             "model": "stub",
@@ -1023,6 +1068,121 @@ mod tests {
         });
         let resp = post_json(app, "/v1/chat/completions", body).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn usage_reports_cached_tokens_after_a_kv_reuse_hit() {
+        // The second identical request inherits the first's resident sequence, so
+        // `usage.prompt_tokens_details.cached_tokens` is how a client sees that.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let body = || {
+            serde_json::json!({
+                "model": "stub",
+                "messages": [{"role": "user", "content": "A reasonably long prompt to reuse"}],
+                "stream": false,
+                "max_tokens": 3,
+            })
+        };
+
+        // First request: nothing resident yet, so the field is omitted entirely
+        // (rather than reported as a misleading zero).
+        let v1: serde_json::Value = serde_json::from_slice(
+            &body_bytes(post_json(make_router(&state), "/v1/chat/completions", body()).await).await,
+        )
+        .unwrap();
+        assert!(
+            v1["usage"]["prompt_tokens_details"].is_null(),
+            "nothing should be cached on the first request: {v1}"
+        );
+
+        // Second, identical request: the sequence parked by the first is reused.
+        let v2: serde_json::Value = serde_json::from_slice(
+            &body_bytes(post_json(make_router(&state), "/v1/chat/completions", body()).await).await,
+        )
+        .unwrap();
+        let cached = v2["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        assert!(cached > 0, "the repeated prompt should report reuse: {v2}");
+        assert!(
+            cached < v2["usage"]["prompt_tokens"].as_u64().unwrap(),
+            "one token is always left to decode ([TAG_PROMPT_LOGITS]): {v2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_gbnf_grammar_is_accepted() {
+        // The engine has had GBNF support since 0.14; until now the only door was
+        // `response_format`, which can only describe JSON.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 4,
+            "grammar": "root ::= \"yes\" | \"no\""
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn grammar_and_response_format_together_are_rejected() {
+        // Two conflicting constraints is a caller bug; silently picking one hides it.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "grammar": "root ::= \"x\"",
+            "response_format": {"type": "json_object"}
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn stream_options_include_usage_is_honoured() {
+        // Regression: this field was parsed and ignored — usage always rode the last
+        // chunk regardless.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+
+        let chunks_for = |include: Option<bool>| {
+            let state = state.clone();
+            async move {
+                let mut body = serde_json::json!({
+                    "model": "stub",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": true,
+                    "max_tokens": 3,
+                });
+                if let Some(v) = include {
+                    body["stream_options"] = serde_json::json!({ "include_usage": v });
+                }
+                let resp = post_json(make_router(&state), "/v1/chat/completions", body).await;
+                assert_eq!(resp.status(), 200);
+                String::from_utf8(body_bytes(resp).await.to_vec()).unwrap()
+            }
+        };
+
+        assert!(
+            chunks_for(Some(true)).await.contains("\"usage\""),
+            "include_usage:true must attach usage"
+        );
+        assert!(
+            !chunks_for(Some(false)).await.contains("\"usage\":{"),
+            "include_usage:false must suppress usage"
+        );
+        // Absent stream_options keeps fox's historical always-attach behaviour.
+        assert!(
+            chunks_for(None).await.contains("\"usage\""),
+            "omitting stream_options must not change existing behaviour"
+        );
     }
 
     #[tokio::test]

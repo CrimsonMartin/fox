@@ -180,14 +180,15 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
-        // Effective start of a request's FIRST prefill chunk: one token before
-        // skip_prefix_tokens so the prefix-cache boundary position is always freshly
-        // computed (see seq_cp comment below). For a non-hit request this is 0.
-        let effective_skip = |r: &InferenceRequestForModel| {
-            r.skip_prefix_tokens
-                .saturating_sub(1)
-                .min(r.prompt_tokens.len())
-        };
+        // Start of a request's FIRST prefill chunk. `skip_prefix_tokens` is already the
+        // exact count of resident tokens the scheduler guaranteed: it applies
+        // llama-server's [TAG_PROMPT_LOGITS] guard at admission (stepping back one
+        // token when the prompt is *entirely* resident, so at least one token still
+        // decodes and produces logits) and trims the sequence to exactly that point
+        // via `ScheduledBatch::kv_trims`. No extra `-1` here — that adjustment used to
+        // live in three separate places and each had to agree with the others.
+        let effective_skip =
+            |r: &InferenceRequestForModel| r.skip_prefix_tokens.min(r.prompt_tokens.len());
 
         // Desired end (exclusive) of this chunk before the n_batch cap below: advance
         // up to max_prefill_chunk tokens from prefill_pos (0 = unbounded / single-shot),
@@ -236,10 +237,17 @@ impl LlamaCppModel {
             .collect();
         let chunk_end = |i: usize| chunk_ends[i];
 
-        // Copy cached prefix KV data into each request's sequence BEFORE building the
+        // Copy a sibling sequence's KV into this request's sequence BEFORE building the
         // batch — but only on the request's FIRST chunk (prefill_pos == effective_skip),
-        // so a chunked prefill never re-copies. We copy positions 0..skip-1 (exclusive
-        // of the last "cached" position) so the last prefix token is re-submitted below.
+        // so a chunked prefill never re-copies. Copies exactly positions
+        // `[0, skip_prefix_tokens)`, matching what `effective_skip` then declines to
+        // resubmit; the scheduler already guaranteed `skip_prefix_tokens` leaves at
+        // least one token to decode.
+        //
+        // Currently unreachable (`prefix_seq_id` is always `None`) — a request inherits
+        // its predecessor's seq_id outright rather than copying out of it. Kept for the
+        // shared-prefill fork of `n>1`/`best_of`, which needs a copy because the source
+        // is a *live* sibling. See docs/design/llama-server-gap-analysis.md §0.3.
         {
             let ctx_guard = self
                 ._ctx
@@ -260,7 +268,7 @@ impl LlamaCppModel {
                                 // Not the first chunk — the copy already happened.
                                 continue;
                             }
-                            let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
+                            let copy_end = req.skip_prefix_tokens as i32;
                             if copy_end > 0 {
                                 ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
                             }
@@ -705,6 +713,9 @@ impl LlamaCppModel {
             repetition_penalty: req.repetition_penalty,
             frequency_penalty: req.frequency_penalty,
             presence_penalty: req.presence_penalty,
+            repeat_last_n: req.repeat_last_n,
+            top_n_sigma: req.top_n_sigma,
+            min_keep: req.min_keep,
             logit_bias: req.logit_bias.as_deref(),
             generated_ids: generated,
             seed: req.seed,

@@ -33,6 +33,10 @@ pub struct SamplingParams {
     pub frequency_penalty: f32,
     /// OpenAI-style presence penalty (additive, applied once per seen token; 0 = disabled).
     pub presence_penalty: f32,
+    /// How far back the three penalties above look, in generated tokens
+    /// (llama.cpp `repeat_last_n`): `-1` = whole history, `0` = disabled, `n` = last `n`.
+    /// Defaults to `-1`, which is fox's historical behaviour.
+    pub repeat_last_n: i32,
     /// Optional RNG seed for reproducible sampling.
     pub seed: Option<u64>,
     /// Stop generation when the output ends with any of these strings.
@@ -65,6 +69,11 @@ pub struct SamplingParams {
     /// Suppress end-of-generation tokens until at least this many tokens are generated
     /// (0 = disabled).
     pub min_tokens: usize,
+    /// Top-nσ: keep only tokens whose logit is within `n` standard deviations of the
+    /// top logit (0 = disabled). Temperature-invariant, unlike top-p.
+    pub top_n_sigma: f32,
+    /// Floor on how few candidates any truncation step may leave (0 = just the top one).
+    pub min_keep: usize,
     /// Additive per-token logit bias (OpenAI `logit_bias`). `Arc` so per-step request
     /// clones stay cheap.
     pub logit_bias: Option<std::sync::Arc<std::collections::HashMap<i32, f32>>>,
@@ -79,6 +88,7 @@ impl Default for SamplingParams {
             repetition_penalty: 1.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            repeat_last_n: -1,
             seed: None,
             stop: None,
             show_thinking: false,
@@ -88,6 +98,8 @@ impl Default for SamplingParams {
             logprobs: None,
             min_p: 0.0,
             min_tokens: 0,
+            top_n_sigma: 0.0,
+            min_keep: 0,
             logit_bias: None,
         }
     }
@@ -105,6 +117,14 @@ pub struct Token {
     /// Per-token log-probabilities, populated only when the request asked for them
     /// (`SamplingParams.logprobs`). `None` on EOS/empty tokens and unconstrained requests.
     pub logprob: Option<TokenLogprob>,
+    /// How many of this request's prompt tokens were already resident in the KV cache
+    /// and so were never re-prefilled — the request's `skip_prefix_tokens`.
+    ///
+    /// Carried on every token (it is a `u32`, and the alternative is a first-token-only
+    /// convention every consumer has to remember). Surfaces as OpenAI's
+    /// `usage.prompt_tokens_details.cached_tokens`, which is how a client sees the KV
+    /// reuse benefit at all.
+    pub cached_tokens: u32,
 }
 
 /// Log-probability detail for one generated token (OpenAI `logprobs`).
@@ -322,6 +342,19 @@ pub struct ScheduledBatch {
     pub decode: Vec<u64>,
     /// Sequence IDs whose KV cache must be cleared (request was preempted this step).
     pub preempted_seq_ids: Vec<i32>,
+    /// `(seq_id, keep_from)` pairs: drop every KV position `>= keep_from` for that
+    /// sequence before the next prefill writes there.
+    ///
+    /// Emitted when an admitted request inherits an idle slot's KV: only the common
+    /// prefix is valid, and anything the previous occupant left beyond the divergence
+    /// point would collide with this request's own positions. The scheduler has no
+    /// model handle, so it records the intent here and `run_loop` applies it —
+    /// **before** `run_prefill`, never after. Mirrors llama-server's
+    /// `common_context_seq_rm(ctx, slot.id, p0, -1)` (`server-context.cpp:3392-3399`).
+    pub kv_trims: Vec<(i32, usize)>,
+    /// Sequence IDs whose KV must be wiped entirely: a finished request whose state
+    /// was not safe to reuse, or an idle slot reclaimed to free blocks.
+    pub kv_clears: Vec<i32>,
 }
 
 impl ScheduledBatch {

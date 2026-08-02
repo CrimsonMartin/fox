@@ -72,6 +72,19 @@ impl InferenceEngine {
                 engine.model.clear_sequence(*seq_id);
             }
 
+            // Apply the scheduler's KV bookkeeping BEFORE any prefill runs this step.
+            // The scheduler has no model handle, so it records intent and we execute
+            // it here. Ordering is load-bearing: a request that inherited an idle
+            // slot's KV must have everything past its divergence point dropped before
+            // it writes its own tokens there, or the stale tail silently corrupts its
+            // context (the failure mode is garbage output, not a crash).
+            for seq_id in &batch.kv_clears {
+                engine.model.clear_sequence(*seq_id);
+            }
+            for (seq_id, keep_from) in &batch.kv_trims {
+                engine.model.trim_sequence(*seq_id, *keep_from);
+            }
+
             if batch.is_empty() {
                 engine.scheduler.wait_for_work().await;
                 continue;
@@ -110,6 +123,7 @@ impl InferenceEngine {
                                 is_eos: true,
                                 stop_reason: Some(StopReason::EngineError),
                                 logprob: None,
+                                cached_tokens: 0,
                             });
                             // Clear KV before the seq_id returns to the pool — a failed
                             // llama_decode leaves partial cells that poison the next occupant.
@@ -165,6 +179,7 @@ impl InferenceEngine {
                                 is_eos: true,
                                 stop_reason: Some(StopReason::EngineError),
                                 logprob: None,
+                                cached_tokens: 0,
                             });
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
@@ -325,6 +340,9 @@ impl InferenceEngine {
                 repetition_penalty: r.sampling.repetition_penalty,
                 frequency_penalty: r.sampling.frequency_penalty,
                 presence_penalty: r.sampling.presence_penalty,
+                repeat_last_n: r.sampling.repeat_last_n,
+                top_n_sigma: r.sampling.top_n_sigma,
+                min_keep: r.sampling.min_keep,
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: r.skip_prefix_tokens,
@@ -340,11 +358,6 @@ impl InferenceEngine {
             })
             .collect();
 
-        let prefix_cleanup: Vec<i32> = model_requests
-            .iter()
-            .filter_map(|r| r.prefix_seq_id)
-            .collect();
-
         let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
         let max_chunk = self.max_prefill_chunk;
@@ -354,10 +367,12 @@ impl InferenceEngine {
         .await
         .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
 
-        for prefix_seq_id in prefix_cleanup {
-            self.model.clear_sequence(prefix_seq_id);
-            self.scheduler.return_prefix_seq_id(prefix_seq_id);
-        }
+        // NOTE: `prefix_seq_id` (a source sequence to `seq_cp` from before prefill) is
+        // currently never set — a request now inherits its predecessor's seq_id
+        // directly instead of copying out of it, so no post-prefill cleanup is needed.
+        // The field and its handler in `llama_cpp/batch.rs` stay for the shared-prefill
+        // fork of `n>1`/`best_of`, where the source is a *live* sibling slot that must
+        // NOT be cleared here. See docs/design/llama-server-gap-analysis.md §0.3.
 
         // Advance each request's prefill cursor. A request only carries `logits` (and a
         // non-zero `tokens_in_kv`) on its FINAL chunk; intermediate chunks just move the
@@ -427,6 +442,9 @@ impl InferenceEngine {
                 repetition_penalty: r.sampling.repetition_penalty,
                 frequency_penalty: r.sampling.frequency_penalty,
                 presence_penalty: r.sampling.presence_penalty,
+                repeat_last_n: r.sampling.repeat_last_n,
+                top_n_sigma: r.sampling.top_n_sigma,
+                min_keep: r.sampling.min_keep,
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: 0,

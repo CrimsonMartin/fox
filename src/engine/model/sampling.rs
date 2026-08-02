@@ -54,6 +54,27 @@ pub(crate) fn apply_frequency_presence_penalty(
     }
 }
 
+/// Slice the trailing window of generated tokens the penalties may look at.
+///
+/// Mirrors llama.cpp's `repeat_last_n` semantics (`common/sampling.h`):
+/// `-1` = the whole history, `0` = penalties disabled, `n > 0` = the last `n`
+/// tokens. Without a window, both penalty passes scan every token generated so
+/// far on *every* step, which is `O(generated²)` per request and — with the
+/// Ollama surface's `repeat_penalty = 1.1` default — keeps penalising tokens
+/// from thousands of positions back, degrading long outputs.
+///
+/// Deliberate divergence from llama.cpp: fox's window covers only *generated*
+/// tokens, while llama.cpp's spans prompt+generated. fox has never penalised
+/// prompt tokens and changing that would silently alter output for every
+/// caller, so the window narrows an existing behaviour rather than redefining it.
+pub(crate) fn penalty_window(generated_ids: &[i32], repeat_last_n: i32) -> &[i32] {
+    match repeat_last_n {
+        0 => &[],
+        n if n < 0 => generated_ids,
+        n => &generated_ids[generated_ids.len().saturating_sub(n as usize)..],
+    }
+}
+
 /// Parameters for the full stochastic sampler.
 pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
@@ -65,6 +86,16 @@ pub(crate) struct SamplerParams<'a> {
     pub(crate) repetition_penalty: f32,
     pub(crate) frequency_penalty: f32,
     pub(crate) presence_penalty: f32,
+    /// How far back the three penalties above may look, in generated tokens.
+    /// `-1` = whole history, `0` = disabled, `n` = last `n`. See [`penalty_window`].
+    pub(crate) repeat_last_n: i32,
+    /// Top-nσ: keep only tokens whose logit is within `n` standard deviations of the
+    /// highest logit (`<= 0` disables). Unlike top-p, the cutoff is computed on the
+    /// raw logit *scale*, so it does not shift as temperature changes.
+    pub(crate) top_n_sigma: f32,
+    /// Floor on how few candidates any truncation step (min-p, top-p, top-nσ) may
+    /// leave. `0`/`1` behave identically — one candidate is always kept regardless.
+    pub(crate) min_keep: usize,
     /// Additive per-token bias applied to the raw logits (OpenAI `logit_bias`).
     pub(crate) logit_bias: Option<&'a std::collections::HashMap<i32, f32>>,
     pub(crate) generated_ids: &'a [i32],
@@ -85,6 +116,9 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         repetition_penalty,
         frequency_penalty,
         presence_penalty,
+        repeat_last_n,
+        top_n_sigma,
+        min_keep,
         logit_bias,
         generated_ids,
         seed,
@@ -102,14 +136,15 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         }
     }
 
-    // 1. Repetition + frequency/presence penalties
-    if repetition_penalty != 1.0 && !generated_ids.is_empty() {
-        apply_repetition_penalty(&mut logits, generated_ids, repetition_penalty);
+    // 1. Repetition + frequency/presence penalties, over the trailing window only.
+    let penalised = penalty_window(generated_ids, repeat_last_n);
+    if repetition_penalty != 1.0 && !penalised.is_empty() {
+        apply_repetition_penalty(&mut logits, penalised, repetition_penalty);
     }
-    if !generated_ids.is_empty() {
+    if !penalised.is_empty() {
         apply_frequency_presence_penalty(
             &mut logits,
-            generated_ids,
+            penalised,
             frequency_penalty,
             presence_penalty,
         );
@@ -199,6 +234,10 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         .map(|&i| (i, (logits[i] - max_l).exp() / exp_sum))
         .collect();
 
+    // Every truncation below keeps at least one candidate, and at least `min_keep`
+    // when the caller asked for a floor.
+    let floor = min_keep.max(1);
+
     // 5b. Min-P: drop tokens whose probability is below `min_p × max_prob`. Probs are
     // sorted descending, so keep the leading run above the threshold (at least the top).
     if min_p > 0.0 && !probs.is_empty() {
@@ -207,8 +246,33 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
             .iter()
             .take_while(|(_, p)| *p >= threshold)
             .count()
-            .max(1);
+            .max(floor);
         probs.truncate(keep);
+    }
+
+    // 5c. Top-nσ: keep tokens within `n` standard deviations of the top logit.
+    //
+    // The statistics are taken over the WHOLE vocabulary, not the candidate pool —
+    // a pool-local σ would shrink as the pool shrinks and the cutoff would drift.
+    //
+    // Note this is invariant under temperature: scaling every logit by `1/temperature`
+    // scales `max_l` and `σ` identically, so `logit >= max_l - n·σ` selects the same
+    // set before and after step 3. That is why it can safely be applied here, after
+    // scaling, rather than needing its own pass over the raw logits.
+    if top_n_sigma > 0.0 && !probs.is_empty() {
+        let n = logits.len() as f32;
+        let mean = logits.iter().sum::<f32>() / n;
+        let variance = logits.iter().map(|l| (l - mean) * (l - mean)).sum::<f32>() / n;
+        let sigma = variance.sqrt();
+        if sigma.is_finite() && sigma > 0.0 {
+            let threshold = max_l - top_n_sigma * sigma;
+            let keep = probs
+                .iter()
+                .take_while(|(i, _)| logits[*i] >= threshold)
+                .count()
+                .max(floor);
+            probs.truncate(keep);
+        }
     }
 
     // 6. Top-P nucleus truncation
@@ -222,7 +286,7 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
                 break;
             }
         }
-        probs.truncate(end);
+        probs.truncate(end.max(floor).min(probs.len()));
     }
 
     // 7. Weighted random draw
@@ -356,6 +420,9 @@ mod tests {
                 top_k: 0,
                 min_p: 0.0,
                 repetition_penalty: 1.0,
+                repeat_last_n: -1,
+                top_n_sigma: 0.0,
+                min_keep: 0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 logit_bias: None,
@@ -378,6 +445,9 @@ mod tests {
                 top_k: 0,
                 min_p: 0.0,
                 repetition_penalty: 1.0,
+                repeat_last_n: -1,
+                top_n_sigma: 0.0,
+                min_keep: 0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 logit_bias: None,
@@ -402,6 +472,9 @@ mod tests {
             top_k: 0,
             min_p: 0.0,
             repetition_penalty: 1.0,
+            repeat_last_n: -1,
+            top_n_sigma: 0.0,
+            min_keep: 0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             logit_bias: None,
@@ -430,6 +503,9 @@ mod tests {
                     top_k: 2,
                     min_p: 0.0,
                     repetition_penalty: 1.0,
+                    repeat_last_n: -1,
+                    top_n_sigma: 0.0,
+                    min_keep: 0,
                     frequency_penalty: 0.0,
                     presence_penalty: 0.0,
                     logit_bias: None,
@@ -461,6 +537,9 @@ mod tests {
                     top_k: 0,
                     min_p: 0.0,
                     repetition_penalty: 1.0,
+                    repeat_last_n: -1,
+                    top_n_sigma: 0.0,
+                    min_keep: 0,
                     frequency_penalty: 0.0,
                     presence_penalty: 0.0,
                     logit_bias: None,
@@ -489,6 +568,9 @@ mod tests {
                 top_k: 0,
                 min_p: 0.0,
                 repetition_penalty: 10.0,
+                repeat_last_n: -1,
+                top_n_sigma: 0.0,
+                min_keep: 0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 logit_bias: None,
@@ -500,6 +582,192 @@ mod tests {
         assert_eq!(token, 1, "penalised token 0 should lose to token 1");
     }
 
+    // top_n_sigma / min_keep
+
+    fn sigma_params<'a>(top_n_sigma: f32, min_keep: usize) -> SamplerParams<'a> {
+        SamplerParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_p: 0.0,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            repeat_last_n: -1,
+            top_n_sigma,
+            min_keep,
+            logit_bias: None,
+            generated_ids: &[],
+            seed: Some(7),
+            token_count: 0,
+        }
+    }
+
+    #[test]
+    fn top_n_sigma_excludes_far_below_the_top() {
+        // One dominant logit and a long flat tail: a tight sigma cutoff must leave
+        // only the dominant token, so every draw returns it.
+        let mut logits = vec![0.0f32; 64];
+        logits[5] = 30.0;
+        for i in 0..200 {
+            let mut p = sigma_params(0.5, 0);
+            p.token_count = i;
+            assert_eq!(sample_token(&logits, p), 5);
+        }
+    }
+
+    #[test]
+    fn top_n_sigma_zero_is_disabled() {
+        // With the cutoff off, the flat tail is reachable — proving the previous
+        // test measured the cutoff and not just the logit gap.
+        let mut logits = vec![0.0f32; 64];
+        logits[5] = 3.0;
+        let mut seen_other = false;
+        for i in 0..200 {
+            let mut p = sigma_params(0.0, 0);
+            p.token_count = i;
+            if sample_token(&logits, p) != 5 {
+                seen_other = true;
+                break;
+            }
+        }
+        assert!(
+            seen_other,
+            "with top_n_sigma disabled the tail must be reachable"
+        );
+    }
+
+    #[test]
+    fn top_n_sigma_is_temperature_invariant() {
+        // Scaling every logit by 1/temperature scales max and sigma identically, so
+        // the surviving set must not depend on temperature. Greedy would hide this,
+        // so compare the full candidate outcome across many seeds.
+        let mut logits = vec![0.0f32; 64];
+        logits[5] = 30.0;
+        logits[9] = 29.0;
+        for i in 0..100 {
+            let mut hot = sigma_params(1.0, 0);
+            hot.temperature = 2.0;
+            hot.token_count = i;
+            let mut cold = sigma_params(1.0, 0);
+            cold.temperature = 0.5;
+            cold.token_count = i;
+            // Both must stay within the surviving {5, 9} set.
+            assert!(matches!(sample_token(&logits, hot), 5 | 9));
+            assert!(matches!(sample_token(&logits, cold), 5 | 9));
+        }
+    }
+
+    #[test]
+    fn min_keep_floors_an_aggressive_truncation() {
+        // min_p = 1.0 would normally leave exactly the top token; min_keep = 3 must
+        // keep three candidates alive, so a run of draws hits more than one.
+        let logits = vec![10.0f32, 9.5, 9.0, 1.0];
+        let mut distinct = std::collections::HashSet::new();
+        for i in 0..300 {
+            let mut p = sigma_params(0.0, 3);
+            p.min_p = 1.0;
+            p.token_count = i;
+            distinct.insert(sample_token(&logits, p));
+        }
+        assert!(
+            distinct.len() > 1,
+            "min_keep must prevent the truncation collapsing to one token, saw {distinct:?}"
+        );
+        assert!(
+            !distinct.contains(&3),
+            "min_keep is a floor, not a bypass — the 4th token must stay excluded"
+        );
+    }
+
+    // penalty_window
+
+    #[test]
+    fn penalty_window_negative_is_whole_history() {
+        let ids = [1, 2, 3, 4, 5];
+        assert_eq!(penalty_window(&ids, -1), &ids[..]);
+        // Any negative value means "all", matching llama.cpp.
+        assert_eq!(penalty_window(&ids, -64), &ids[..]);
+    }
+
+    #[test]
+    fn penalty_window_zero_disables_penalties() {
+        let ids = [1, 2, 3];
+        assert!(penalty_window(&ids, 0).is_empty());
+    }
+
+    #[test]
+    fn penalty_window_takes_the_trailing_n() {
+        let ids = [1, 2, 3, 4, 5];
+        assert_eq!(penalty_window(&ids, 2), &[4, 5]);
+        assert_eq!(penalty_window(&ids, 5), &ids[..]);
+    }
+
+    #[test]
+    fn penalty_window_larger_than_history_does_not_panic() {
+        // saturating_sub keeps this in bounds instead of underflowing.
+        let ids = [1, 2];
+        assert_eq!(penalty_window(&ids, 1000), &ids[..]);
+        assert!(penalty_window(&[], 64).is_empty());
+    }
+
+    #[test]
+    fn repeat_last_n_zero_matches_no_history() {
+        // A window of 0 must be indistinguishable from having generated nothing:
+        // this is what makes `--repeat-last-n 0` a true kill switch.
+        let logits = vec![5.0f32, 3.0];
+        let with_window_off = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                repetition_penalty: 10.0,
+                repeat_last_n: 0,
+                top_n_sigma: 0.0,
+                min_keep: 0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                logit_bias: None,
+                generated_ids: &[0],
+                seed: None,
+                token_count: 1,
+            },
+        );
+        assert_eq!(
+            with_window_off, 0,
+            "with the window disabled the penalty must not fire"
+        );
+    }
+
+    #[test]
+    fn repeat_last_n_excludes_tokens_outside_the_window() {
+        // Token 0 was generated long ago; a window of 1 only sees token 1, so the
+        // heavy penalty must land on token 1 and leave token 0 the winner.
+        let logits = vec![5.0f32, 6.0];
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                repetition_penalty: 10.0,
+                repeat_last_n: 1,
+                top_n_sigma: 0.0,
+                min_keep: 0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                logit_bias: None,
+                generated_ids: &[0, 1],
+                seed: None,
+                token_count: 2,
+            },
+        );
+        assert_eq!(token, 0, "only the last token should have been penalised");
+    }
+
     fn greedy_params<'a>(
         logit_bias: Option<&'a std::collections::HashMap<i32, f32>>,
     ) -> SamplerParams<'a> {
@@ -509,6 +777,9 @@ mod tests {
             top_k: 0,
             min_p: 0.0,
             repetition_penalty: 1.0,
+            repeat_last_n: -1,
+            top_n_sigma: 0.0,
+            min_keep: 0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             logit_bias,
@@ -549,6 +820,9 @@ mod tests {
                     top_k: 0,
                     min_p: 0.5,
                     repetition_penalty: 1.0,
+                    repeat_last_n: -1,
+                    top_n_sigma: 0.0,
+                    min_keep: 0,
                     frequency_penalty: 0.0,
                     presence_penalty: 0.0,
                     logit_bias: None,

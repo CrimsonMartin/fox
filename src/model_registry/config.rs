@@ -26,6 +26,14 @@ pub struct RegistryConfig {
     pub context_shift: bool,
     /// Tokens preserved at the front (BOS + system prompt) when context rolling fires.
     pub context_keep: usize,
+    /// Keep a finished request's KV resident so a later prompt sharing a prefix with
+    /// it can skip re-prefilling that much (`--kv-reuse`). False restores the
+    /// pre-0.19 behaviour: every sequence cleared on completion, every prompt
+    /// prefilled from token 0.
+    pub kv_reuse: bool,
+    /// Minimum fraction of an incoming prompt that must already be resident in an idle
+    /// slot before that slot's KV is inherited (`--slot-prompt-similarity`).
+    pub slot_prompt_similarity: f32,
     /// Enable n-gram / prompt-lookup speculative decoding for single-request decode steps.
     pub speculative: bool,
     /// Suffix length matched against history when speculating.

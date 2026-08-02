@@ -678,6 +678,45 @@ for await (const chunk of stream) {
 
 ---
 
+## Tokenizer utilities
+
+Three endpoints that run no inference — they only need the loaded model's vocabulary
+and chat template. Useful for counting tokens before sending a request, and for
+debugging why a chat template renders the way it does. Ported from `llama-server`.
+
+### `POST /tokenize`
+
+```json
+{ "model": "llama3.2", "content": "Hello world", "with_pieces": false }
+```
+
+Returns `{"tokens": [15339, 1917]}`. With `"with_pieces": true`, each entry becomes
+`{"id": 15339, "piece": "Hello"}`. A token that holds only part of a multi-byte
+codepoint (half an emoji, split across two BPE tokens) has no valid UTF-8 piece and
+is reported as `{"id": ..., "bytes": [...]}` instead — decoding it lossily would
+misrepresent the vocabulary.
+
+### `POST /detokenize`
+
+```json
+{ "model": "llama3.2", "tokens": [15339, 1917] }
+```
+
+Returns `{"content": "Hello world"}`. Piece bytes are joined *before* decoding, so a
+codepoint split across two tokens round-trips correctly.
+
+### `POST /apply-template`
+
+```json
+{ "model": "llama3.2", "messages": [{"role": "user", "content": "Hi"}] }
+```
+
+Returns `{"prompt": "..."}` — the fully rendered prompt, produced through the same
+path a real request takes and then detokenized. What you get back is literally what
+the model would receive, control tokens included.
+
+---
+
 ## Error responses
 
 | HTTP status | Meaning |

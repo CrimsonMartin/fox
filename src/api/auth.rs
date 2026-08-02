@@ -64,6 +64,8 @@ mod tests {
                     max_prefill_chunk: 0,
                     context_shift: false,
                     context_keep: 0,
+                    kv_reuse: true,
+                    slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
                     speculative: false,
                     spec_ngram: 2,
                     spec_draft_len: 4,
@@ -94,6 +96,7 @@ mod tests {
             hf_token: None,
             api_key: api_key.map(str::to_string),
             tool_call_parser: "auto".to_string(),
+            repeat_last_n: -1,
         }
     }
 

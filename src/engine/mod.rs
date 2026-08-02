@@ -137,6 +137,29 @@ impl InferenceEngine {
         self.model.tokenize(text)
     }
 
+    /// Turn token ids back into text.
+    ///
+    /// Concatenates the raw piece bytes before decoding, rather than decoding each
+    /// token separately: a multi-byte codepoint (emoji, CJK) is routinely split
+    /// across two BPE tokens, and per-token decoding would turn each half into a
+    /// replacement character. Same reason the streaming path buffers bytes.
+    /// `U+2581` is mapped back to a space, matching the generation path.
+    pub fn detokenize(&self, tokens: &[i32]) -> String {
+        let mut bytes = Vec::new();
+        for &t in tokens {
+            bytes.extend_from_slice(&self.model.token_to_piece_bytes(t));
+        }
+        String::from_utf8_lossy(&bytes).replace(SPM_SPACE, " ")
+    }
+
+    /// The single piece text for one token, without the cross-token byte joining
+    /// above — for `/tokenize`'s `with_pieces`, where per-token output is the point.
+    /// Invalid UTF-8 (a token holding half a codepoint) is reported as raw bytes by
+    /// the caller rather than lossily decoded here.
+    pub fn token_piece_bytes(&self, token: i32) -> Vec<u8> {
+        self.model.token_to_piece_bytes(token)
+    }
+
     pub fn embedding_dim(&self) -> usize {
         self.model.embedding_dim()
     }

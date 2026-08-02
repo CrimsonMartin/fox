@@ -31,6 +31,8 @@ pub fn make_test_registry(
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
+        kv_reuse: true,
+        slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
         speculative: false,
         spec_ngram: 2,
         spec_draft_len: 4,
@@ -70,6 +72,7 @@ pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<Engi
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
+        repeat_last_n: -1,
     };
     (state, entry)
 }
@@ -94,6 +97,8 @@ pub fn make_test_state_with_queue_depth(
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
+        kv_reuse: true,
+        slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
         speculative: false,
         spec_ngram: 2,
         spec_draft_len: 4,
@@ -127,6 +132,7 @@ pub fn make_test_state_with_queue_depth(
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
+        repeat_last_n: -1,
     };
     (state, entry)
 }
@@ -146,6 +152,8 @@ pub fn make_test_state_speculative(
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
+        kv_reuse: true,
+        slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
         speculative: true,
         spec_ngram: 2,
         spec_draft_len: 4,
@@ -179,6 +187,7 @@ pub fn make_test_state_speculative(
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
+        repeat_last_n: -1,
     };
     (state, entry)
 }
@@ -196,6 +205,8 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
+        kv_reuse: true,
+        slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
         speculative: false,
         spec_ngram: 2,
         spec_draft_len: 4,
@@ -232,6 +243,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
+        repeat_last_n: -1,
     };
     (state, entry)
 }
@@ -247,6 +259,7 @@ pub fn make_router(state: &AppState) -> Router {
         state.hf_token.clone(),
         state.api_key.clone(),
         state.tool_call_parser.clone(),
+        state.repeat_last_n,
     )
 }
 

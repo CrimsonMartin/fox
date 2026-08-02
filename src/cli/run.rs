@@ -61,6 +61,11 @@ pub struct RunArgs {
     #[arg(long, default_value = "1.0")]
     pub repetition_penalty: f32,
 
+    /// How far back the penalties look, in generated tokens: -1 = whole history,
+    /// 0 = disabled, n = last n.
+    #[arg(long, default_value = "-1")]
+    pub repeat_last_n: i32,
+
     /// RNG seed for reproducible output
     #[arg(long)]
     pub seed: Option<u64>,
@@ -597,6 +602,7 @@ fn build_sampling_params(
         repetition_penalty: args.repetition_penalty,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        repeat_last_n: args.repeat_last_n,
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
@@ -606,6 +612,8 @@ fn build_sampling_params(
         logprobs: None,
         min_p: 0.0,
         min_tokens: 0,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         logit_bias: None,
     }
 }

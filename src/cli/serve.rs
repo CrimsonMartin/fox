@@ -17,6 +17,8 @@ const DEFAULT_MAX_MODELS: &str = "1";
 const DEFAULT_KEEP_ALIVE_SECS: &str = "300";
 const DEFAULT_TYPE_KV: &str = "f16";
 const DEFAULT_TOOL_CALL_PARSER: &str = "auto";
+const DEFAULT_REPEAT_LAST_N: &str = "-1";
+const DEFAULT_SLOT_PROMPT_SIMILARITY: &str = "0.1";
 
 use anyhow::Result;
 use clap::Parser;
@@ -67,6 +69,34 @@ pub struct ServeArgs {
     /// Tokens preserved at the front (BOS + system prompt) when the context is rolled.
     #[arg(long, default_value = "0", env = "FOX_CONTEXT_KEEP")]
     pub context_keep: usize,
+
+    /// How far back the repetition, frequency and presence penalties look, counted in
+    /// generated tokens: `-1` = the whole history, `0` = penalties disabled, `n` = the
+    /// last `n`. Requests may override it per call (`repeat_last_n` / `options.repeat_last_n`).
+    ///
+    /// Defaults to `-1`, fox's historical behaviour. llama.cpp defaults to 64; a bounded
+    /// window both stops penalising tokens from thousands of positions back and turns the
+    /// per-step penalty pass from O(generated) into O(window).
+    #[arg(long, default_value = DEFAULT_REPEAT_LAST_N, env = "FOX_REPEAT_LAST_N")]
+    pub repeat_last_n: i32,
+
+    /// Keep a finished request's KV cache resident so a later prompt sharing a prefix
+    /// with it skips re-prefilling that much. Each sequence remembers the tokens it
+    /// holds — prompt *and* generated reply — so the next turn of a conversation
+    /// matches well past where the previous prompt ended.
+    ///
+    /// Pass `--kv-reuse false` to restore the previous behaviour (every sequence
+    /// cleared on completion, every prompt prefilled from token 0). That is also the
+    /// baseline arm when A/B-measuring this with `scripts/ab_bench.sh`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, env = "FOX_KV_REUSE")]
+    pub kv_reuse: bool,
+
+    /// Minimum fraction of an incoming prompt that must already be resident in an idle
+    /// sequence before that sequence's KV is inherited rather than started fresh
+    /// (0.0–1.0). Mirrors llama-server's `--slot-prompt-similarity`. Ignored when
+    /// `--kv-reuse false`.
+    #[arg(long, default_value = DEFAULT_SLOT_PROMPT_SIMILARITY, env = "FOX_SLOT_PROMPT_SIMILARITY")]
+    pub slot_prompt_similarity: f32,
 
     /// Enable n-gram / prompt-lookup speculative decoding — verify several guessed tokens
     /// per forward pass for single-request decode steps. Output is unchanged; only speed.
@@ -427,6 +457,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         max_prefill_chunk: args.max_prefill_chunk,
         context_shift: args.context_shift,
         context_keep: args.context_keep,
+        kv_reuse: args.kv_reuse,
+        slot_prompt_similarity: args.slot_prompt_similarity,
         speculative: args.speculative,
         spec_ngram: args.spec_ngram,
         spec_draft_len: args.spec_draft_len,
@@ -500,6 +532,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         args.hf_token,
         args.api_key,
         args.tool_call_parser,
+        args.repeat_last_n,
     )
     .layer(tower_http::cors::CorsLayer::permissive());
 

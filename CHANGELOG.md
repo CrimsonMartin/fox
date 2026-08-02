@@ -9,7 +9,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **JSON-Schema→GBNF dropped optional properties.** A schema like
+  `{properties: {a, b}, required: [a]}` produced a grammar that *forbade* `b`
+  entirely, so guided decoding could never emit a declared optional field. This
+  was a correctness bug, not the documented "simplification": the grammar was not
+  merely stricter than the schema, it contradicted it. Optional properties are now
+  emitted as genuinely optional members. Two limits stay, both documented at the
+  call site: optional properties may only appear in declaration order (modelling
+  every permutation is exponential; llama.cpp's own converter has the same
+  limitation), and an *absent* `required` still means "all properties required".
+  An explicitly empty `"required": []` is now honoured literally, so an
+  all-optional object is expressible — previously the two were collapsed.
+
+- **`/v1/completions` ignored almost every parameter and returned the wrong
+  shape.** The handler hard-coded `None` for `top_p`, `top_k`, `stop`, `seed`,
+  `logprobs`, `logit_bias` and both penalties, so they were accepted and silently
+  did nothing; and it returned a `chat.completion` object, while clients of the
+  legacy endpoint read `choices[].text`. (`CompletionResponse`/`CompletionChoice`
+  were declared in the types module and never constructed.) All sampling
+  parameters are now threaded through, and the response — streaming and
+  non-streaming — is rewritten to the `text_completion` shape. `echo` and
+  `suffix` are rejected with a 400 rather than silently ignored, since a caller
+  cannot otherwise detect that they had no effect.
+
+- **Ollama responses reported no prefill/decode split.** `load_duration` and
+  `prompt_eval_duration` were the literal constant `0`, and `total_duration` and
+  `eval_duration` were the same wall clock, on both `/api/generate` and
+  `/api/chat`, streaming and not. All four are now measured: model-load time,
+  submission-to-first-token, and first-token-to-last. `prompt_eval_duration`
+  includes scheduler queueing as well as prefill compute — real latency the
+  client paid, and fox has no cheaper place to separate the two. The same split
+  is now in the per-request `done` log line (`prefill_ms`, `decode_ms`).
+
+- **`stream_options.include_usage` was parsed and ignored** — usage always rode
+  the final chunk. An explicit `false` now suppresses it. Omitting
+  `stream_options` keeps the previous always-attach behaviour, so no existing
+  caller changes.
+
 ### Added
+
+- **`POST /tokenize`, `/detokenize`, `/apply-template`** — llama-server's tokenizer
+  utilities (`server-context.cpp:4899-4956, 4846-4856`). No inference involved, just
+  the loaded model's vocabulary and chat template; clients use them to count tokens
+  before sending a request and to debug template rendering. fox already had every
+  underlying piece (`InferenceEngine::tokenize`, `build_prompt_tokens`) and simply
+  never routed them. `/tokenize` supports `with_pieces`, reporting raw bytes for a
+  token that holds only part of a multi-byte codepoint rather than lossily decoding
+  it. `/apply-template` renders through the *same* path a real request takes and
+  then detokenizes, so what it returns is literally what the model would receive,
+  control tokens included.
+
+- **Raw GBNF `grammar` request field** on `/v1/chat/completions` and
+  `/v1/completions`, mirroring llama-server. The engine has had full GBNF support
+  since 0.14, but the only way to reach it was `response_format`/`format`, which can
+  only describe JSON. Setting both `grammar` and `response_format` is a 400 rather
+  than a silent precedence rule.
+
+- **`usage.prompt_tokens_details.cached_tokens`** on the OpenAI surface — how many
+  prompt tokens were served from resident KV instead of being re-prefilled. This is
+  the only way a client can observe the KV-reuse rework. The field is omitted
+  entirely when nothing was cached, so responses are unchanged when there is nothing
+  to report.
+
+- **`top_n_sigma` and `min_keep` samplers**, on both API surfaces (and
+  `/v1/completions`). `top_n_sigma` keeps only tokens within N standard
+  deviations of the top logit — unlike `top_p` the cutoff lives on the logit
+  scale, so it is invariant under `temperature` (there is a test for exactly
+  that). `min_keep` floors how few candidates any truncation step may leave.
+  Both default to off. `typical_p`, `mirostat`, XTC and DRY remain unimplemented:
+  they need distribution-wide state that conflicts with fox's adaptive candidate
+  pool, which is a design question rather than a missing line of code — see
+  `docs/design/llama-server-gap-analysis.md` §3.
+
+- **`repeat_last_n` on the Ollama surface** (`options.repeat_last_n`), which
+  upstream Ollama supports and fox previously dropped silently.
+
+### Changed
+
+- **KV reuse reworked: sequences now remember what they hold** (`--kv-reuse`,
+  `--slot-prompt-similarity`). fox's prefix cache was a `LruCache` of donated
+  whole-block prompt prefixes, and it had three structural limits: it held
+  `max_batch_size/4` entries (**8** at defaults, with no flag to raise it); reuse
+  was aligned to `block_size`, so a prompt matching 31 of 32 tokens reused 16;
+  and **only the prompt was cached — the generated reply was always discarded**,
+  which is why multi-turn chat, whose next prompt contains the previous reply,
+  could never hit past the previous prompt's end.
+
+  Replaced with llama-server's slot model (`server-context.cpp:1586-1694`,
+  `:3166-3243`): every sequence permanently records the tokens resident in its
+  KV, prompt *and* generation. A finished request parks its sequence instead of
+  freeing it, admission picks the sequence sharing the longest common prefix with
+  the incoming prompt, and reuse is token-exact. Idle sequences are reclaimed
+  LRU under block pressure — not preemption: they belong to requests that already
+  finished and whose output the client already has, and `Busy` slots are never
+  touched, so the never-preempt-on-admission invariant is unchanged.
+
+  Measured on CPU/zen4 with llama-3.2-1b-instruct-q8_0, alternating arms, one
+  server at a time. Reuse on vs off, repeated ~3.5k-token prompt: **6.1×** median
+  TTFT (4760 → 782 ms, disjoint ranges). Old build vs new on a 12-conversation
+  working set — bigger than the old 8-entry cache, smaller than the new 32-slot
+  table: median 52.1 → 37.6 ms, but the real number is the **tail**, mean
+  1247.6 → 36.3 ms (**34×**) and p90 3650.5 → 38.7 ms (**94×**), because the old
+  cache evicted a third of the working set every pass and each eviction cost a
+  full re-prefill. See `docs/design/llama-server-gap-analysis.md`.
+
+  `--kv-reuse false` restores the previous behaviour exactly, and is the baseline
+  arm for reproducing the measurement.
+
+  **Known consequence: greedy output drifts more often under concurrent load.**
+  Measured at `temperature: 0`, 4 concurrent clients, 10 rounds against a sequential
+  baseline: 2/10 rounds differed with `--kv-reuse false`, 10/10 with it on. The
+  nondeterminism is **pre-existing** — the control arm has reuse disabled and still
+  drifts, because concurrent requests are batched together by arrival timing and
+  llama.cpp does not guarantee bit-identical logits across batch compositions. Reuse
+  amplifies it by collapsing prefill, so requests spend far more of their life
+  decoding alongside each other. It is **not** incorrect KV: *sequential* reuse is
+  byte-identical across repeats (verified with `cached_tokens` up to 396), which is
+  the same code path with the same cache state. A caller needing reproducible greedy
+  output needs a serialised request stream — `seed` does not help, since the variation
+  is in the forward pass rather than the sampler. See
+  `docs/design/llama-server-gap-analysis.md` §1, which also records a single
+  unreproduced `make e2e` failure (1 in ~52 runs, zero in the 51 since) whose cause
+  remains unknown and which the drift above is the wrong magnitude to explain.
+
+### Added
+
+- **`--repeat-last-n` / `FOX_REPEAT_LAST_N` — bounded penalty window.** The
+  repetition, frequency and presence penalties previously scanned *every* token
+  generated so far on every sampling step. Two consequences, both fixed by
+  bounding the window: `apply_frequency_presence_penalty` rebuilt a full
+  `HashMap` over the whole history per token, making the penalty pass
+  `O(generated²)` per request; and the Ollama surface's `repeat_penalty = 1.1`
+  default kept penalising tokens from thousands of positions back, degrading
+  long outputs. Semantics follow llama.cpp's `repeat_last_n`: `-1` = whole
+  history, `0` = disabled, `n` = last `n`. Overridable per request via
+  `repeat_last_n` (`/v1/*`, a fox extension) and `options.repeat_last_n`
+  (`/api/*`, which upstream Ollama supports and fox previously dropped
+  silently). **Defaults to `-1`, so output is bit-identical to before unless
+  the knob is set** — llama.cpp defaults to `64`, but adopting that would have
+  silently changed output for every existing caller. One deliberate divergence
+  from llama.cpp, documented at the call site: fox's window covers only
+  *generated* tokens, never the prompt, which is what fox has always done.
 
 - **LoRA adapter support** (`--lora-modules <name>=<path>[:<scale>][,...]` /
   `FOX_LORA_MODULES`) — loads one or more named LoRA adapters onto the primary

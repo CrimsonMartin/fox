@@ -251,6 +251,7 @@ async fn multi_model_each_request_routes_to_correct_engine() {
         None,
         None,
         "auto".to_string(),
+        -1,
     );
 
     let resp_a = post_json(
@@ -990,9 +991,106 @@ async fn test_v1_completions() {
 
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
-    // /v1/completions delegates to chat_completions → same response shape
-    assert_eq!(v["object"], "chat.completion");
+    // Legacy shape, NOT chat.completion: clients of this endpoint read
+    // `choices[].text`. Generation still delegates to chat_completions, but the
+    // response is rewritten on the way out.
+    assert_eq!(v["object"], "text_completion");
+    assert!(
+        v["choices"][0]["text"].is_string(),
+        "legacy completions must expose `text`, got: {v}"
+    );
+    assert!(
+        v["choices"][0].get("message").is_none(),
+        "chat-shaped `message` must not leak into the legacy response: {v}"
+    );
     assert!(v["choices"][0]["finish_reason"].as_str().is_some());
+    assert!(
+        v["usage"]["total_tokens"].is_number(),
+        "usage must survive: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_completions_threads_sampling_params() {
+    // Regression: this endpoint used to hard-code every sampling field to None, so
+    // `top_p`/`stop`/`seed`/`logit_bias`/penalties were accepted and silently ignored.
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "model": "stub",
+            "prompt": "Once upon a time",
+            "max_tokens": 4,
+            "top_p": 0.5,
+            "top_k": 10,
+            "seed": 42,
+            "stop": ["END"],
+            "frequency_penalty": 0.5,
+            "presence_penalty": 0.25,
+            "min_p": 0.05,
+            "stream": false,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200, "sampling params must be accepted");
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(v["object"], "text_completion");
+}
+
+#[tokio::test]
+async fn test_v1_completions_rejects_unsupported_echo_and_suffix() {
+    // Better a loud 400 than silently returning a completion without the echoed
+    // prompt, which the caller cannot detect.
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+
+    for body in [
+        serde_json::json!({"model": "stub", "prompt": "x", "echo": true}),
+        serde_json::json!({"model": "stub", "prompt": "x", "suffix": "tail"}),
+    ] {
+        let app = make_router(&state);
+        let resp = post_json(app, "/v1/completions", body.clone()).await;
+        assert_eq!(resp.status(), 400, "should reject {body}");
+    }
+}
+
+#[tokio::test]
+async fn test_v1_completions_stream_uses_legacy_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "model": "stub",
+            "prompt": "Once upon a time",
+            "max_tokens": 4,
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let text = String::from_utf8(body_bytes(resp).await.to_vec()).unwrap();
+    assert!(
+        text.contains("\"text\""),
+        "stream must carry `text`: {text}"
+    );
+    assert!(
+        !text.contains("\"delta\""),
+        "chat-shaped `delta` must not leak into the stream: {text}"
+    );
+    assert!(
+        text.contains("data: [DONE]"),
+        "stream must terminate: {text}"
+    );
 }
 
 #[tokio::test]

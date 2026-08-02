@@ -126,6 +126,18 @@ pub struct OllamaOptions {
     pub min_p: Option<f32>,
     #[serde(default)]
     pub repeat_penalty: Option<f32>,
+    /// How far back `repeat_penalty` (and fox's frequency/presence penalties) look,
+    /// in generated tokens: `-1` = whole history, `0` = disabled, `n` = last `n`.
+    /// Mirrors upstream Ollama. Falls back to the server's `--repeat-last-n`.
+    #[serde(default)]
+    pub repeat_last_n: Option<i32>,
+    /// Keep only tokens within N standard deviations of the top logit (0 = disabled).
+    /// llama.cpp's `top_n_sigma`; upstream Ollama has no equivalent.
+    #[serde(default)]
+    pub top_n_sigma: Option<f32>,
+    /// Floor on candidates left by any truncation step.
+    #[serde(default)]
+    pub min_keep: Option<usize>,
     #[serde(default)]
     pub seed: Option<u64>,
     /// Maximum tokens to generate (equivalent to max_tokens).

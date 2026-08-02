@@ -188,6 +188,26 @@ pub struct ChatCompletionRequest {
     /// Penalize tokens that already appear in the output (1.0 = disabled).
     #[serde(default)]
     pub repetition_penalty: Option<f32>,
+    /// fox extension mirroring llama-server's `grammar`: a raw GBNF grammar
+    /// constraining generation. More expressive than `response_format`, which can
+    /// only describe JSON. Mutually exclusive with it.
+    #[serde(default)]
+    pub grammar: Option<String>,
+    /// fox extension: keep only tokens whose logit is within N standard deviations
+    /// of the top logit (0 = disabled). Unlike `top_p`, the cutoff is on the logit
+    /// scale, so it does not shift as `temperature` changes.
+    #[serde(default)]
+    pub top_n_sigma: Option<f32>,
+    /// fox extension: floor on how few candidates any truncation step (`min_p`,
+    /// `top_p`, `top_n_sigma`) may leave.
+    #[serde(default)]
+    pub min_keep: Option<usize>,
+    /// fox extension (OpenAI has no equivalent): how far back the repetition,
+    /// frequency and presence penalties look, in generated tokens.
+    /// `-1` = whole history, `0` = disabled, `n` = last `n`. Falls back to the
+    /// server's `--repeat-last-n`.
+    #[serde(default)]
+    pub repeat_last_n: Option<i32>,
     /// Fixed RNG seed for reproducible outputs.
     #[serde(default)]
     pub seed: Option<u64>,
@@ -420,6 +440,12 @@ pub struct ChatMessageDelta {
 
 // --- Completions (legacy) ---
 
+/// OpenAI's legacy `/v1/completions` request.
+///
+/// Every sampling field here is threaded through to the shared generation path —
+/// they were previously declared nowhere and hard-coded to `None` in the handler,
+/// so `top_p`, `stop`, `seed`, `logit_bias` and the penalties silently did nothing
+/// on this endpoint.
 #[derive(Debug, Deserialize)]
 pub struct CompletionRequest {
     pub model: String,
@@ -429,11 +455,60 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
+    pub top_p: Option<f32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub repeat_last_n: Option<i32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub top_n_sigma: Option<f32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub min_keep: Option<usize>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_stop")]
+    pub stop: Option<Vec<String>>,
+    #[serde(default)]
+    pub logit_bias: Option<std::collections::HashMap<String, f32>>,
+    /// fox extension: raw GBNF grammar, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub grammar: Option<String>,
+    /// Legacy semantics: an *integer* count of alternatives per token, unlike chat's
+    /// boolean `logprobs` + `top_logprobs` pair. Mapped onto the latter.
+    #[serde(default)]
+    pub logprobs: Option<u8>,
+    #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(default)]
+    pub user: Option<String>,
     #[serde(default)]
     pub n: Option<u32>,
     #[serde(default)]
     pub best_of: Option<u32>,
+    /// Accepted so the handler can reject it explicitly — fox cannot echo the prompt,
+    /// and silently ignoring it would be undetectable by the caller.
+    /// and silently ignoring it would be undetectable by the caller.
+    #[serde(default)]
+    pub echo: Option<bool>,
+    /// Same: accepted only to be rejected explicitly.
+    #[serde(default)]
+    pub suffix: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

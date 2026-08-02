@@ -379,6 +379,8 @@ mod tests {
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
+            kv_reuse: true,
+            slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
             speculative: false,
             spec_ngram: 2,
             spec_draft_len: 4,
@@ -429,6 +431,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
+            -1,
         );
         let resp = get_req(app, "/api/ps").await;
         assert_eq!(resp.status(), 200);

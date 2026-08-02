@@ -114,10 +114,26 @@ fn main() {
         .profile("Release");
 
     // See the GGML_NATIVE comment above: opt-in multi-tier CPU backend.
+    //
+    // Always passed explicitly, never conditionally: CMake caches options in the
+    // build directory, so simply *omitting* the define after a run that set it ON
+    // leaves it ON — unsetting the env var would silently keep building variants.
+    //
+    // Note this stops CMake *building* them but does not remove variants a previous
+    // run already installed into OUT_DIR, which are copied out regardless. Turning
+    // the flag back off therefore needs a `cargo clean` to fully take effect.
+    // Harmless if you don't: ggml just keeps loading the best available variant.
     println!("cargo:rerun-if-env-changed=FOX_CPU_ALL_VARIANTS");
-    if env::var("FOX_CPU_ALL_VARIANTS").is_ok_and(|v| v != "0" && !v.is_empty()) {
-        cmake_config.define("GGML_CPU_ALL_VARIANTS", "ON");
-        println!("cargo:warning=building all CPU backend variants (FOX_CPU_ALL_VARIANTS) — slower build, faster CPU inference");
+    let cpu_all_variants =
+        env::var("FOX_CPU_ALL_VARIANTS").is_ok_and(|v| v != "0" && !v.is_empty());
+    cmake_config.define(
+        "GGML_CPU_ALL_VARIANTS",
+        if cpu_all_variants { "ON" } else { "OFF" },
+    );
+    if cpu_all_variants {
+        println!(
+            "cargo:warning=building all CPU backend variants (FOX_CPU_ALL_VARIANTS) — slower build"
+        );
     }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

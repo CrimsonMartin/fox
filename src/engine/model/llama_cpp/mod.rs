@@ -1284,6 +1284,7 @@ impl Model for LlamaCppModel {
             n_ctx_train,
             effective_ctx: self.effective_ctx,
             vocab_size: self.config.vocab_size,
+            n_params: unsafe { ffi::llama_model_n_params(self._model.as_ptr()) },
             eos_token_id: self.eos_token,
             has_chat_template,
             supports_thinking: self.supports_thinking(),

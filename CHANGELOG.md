@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/api/show` answered from the filename, not the model.** `parameters` and
+  `template` were empty strings and `parameter_size` was the literal `"unknown"`,
+  because every field was parsed out of the file stem. When the model is resident it
+  now answers for itself: real dimensions, effective context, and an **exact**
+  parameter count from `llama_model_n_params`. It still does not load a model to
+  answer — `GET /props` covers the resident model unconditionally, and loading here
+  would evict the serving model under `--max-models 1`.
+
+  (An intermediate version derived the parameter count from
+  `n_embd`/`n_layer`/`vocab_size` and reported **1.6B for llama-3.2-1b**, which is
+  really 1.24B: the estimate ignored grouped-query attention, which shrinks K and V,
+  and double-counted tied input/output embeddings. Replacing `"unknown"` with a
+  confident wrong number is worse than either, so the estimate was dropped for the
+  exact value.)
+
 - **Ollama `keep_alive` was parsed and never applied.** A client asking to keep a
   model warm, or to drop it promptly, got a `200` and no effect — and the test
   only asserted that `200`, so the field being inert was invisible. Now honoured
@@ -71,6 +86,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller changes.
 
 ### Added
+
+- **`GET /props` and `GET /slots`** — server and per-sequence introspection.
+  `/props` reports architecture, backend, allocated vs trained context,
+  dimensions, and capability flags (`supports_thinking`, `supports_vision`,
+  `supports_infill`, `supports_kv_reuse`) **read from the loaded model**, never
+  inferred from its filename. It never triggers a load: under the default
+  `--max-models 1` that would evict whatever is serving traffic, so `model` is
+  simply `null` when nothing is resident. `/slots` reports each sequence as
+  `free`/`processing`/`idle` with its resident token count, blocks charged and idle
+  time — which is what makes the KV reuse work observable. Slot *contents* are
+  deliberately not exposed: a parked sequence is another user's conversation, and
+  llama-server redacts the same fields.
 
 - **`POST /infill`** — fill-in-the-middle completion, what editor plugins call to
   fill in code at the cursor. Emits the FIM token layout the model was trained on

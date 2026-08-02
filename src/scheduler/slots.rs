@@ -66,6 +66,25 @@ pub(crate) struct Slot {
     pub(super) t_last_used: Instant,
 }
 
+/// One slot's externally visible state, for `GET /slots`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SlotSnapshot {
+    /// llama.cpp `seq_id`, stable for the process lifetime.
+    pub id: i32,
+    /// `free` | `processing` | `idle`. `idle` means the slot holds reusable KV from
+    /// a finished request — a cache entry, not work in progress.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+    /// How many tokens of KV this slot currently holds.
+    pub resident_tokens: usize,
+    /// KV pool blocks charged to it.
+    pub blocks: usize,
+    /// Seconds since it stopped being busy — only meaningful while idle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_secs: Option<u64>,
+}
+
 /// The slot chosen for an incoming request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SlotChoice {
@@ -253,6 +272,34 @@ impl SlotTable {
     #[cfg(test)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &Slot> {
         self.slots.iter()
+    }
+
+    /// Per-slot state for `GET /slots`.
+    ///
+    /// Deliberately reports only what a slot *holds*, never the tokens themselves:
+    /// a resident sequence is another user's conversation, and an unauthenticated
+    /// introspection endpoint must not hand it out. llama-server redacts the same
+    /// fields unless `LLAMA_SERVER_SLOTS_DEBUG` is set.
+    pub(crate) fn snapshot(&self) -> Vec<SlotSnapshot> {
+        self.slots
+            .iter()
+            .map(|s| SlotSnapshot {
+                id: s.seq_id,
+                state: match s.state {
+                    SlotState::Free => "free",
+                    SlotState::Busy(_) => "processing",
+                    SlotState::Idle => "idle",
+                },
+                request_id: match s.state {
+                    SlotState::Busy(id) => Some(id),
+                    _ => None,
+                },
+                resident_tokens: s.tokens.len(),
+                blocks: s.blocks.len(),
+                idle_secs: matches!(s.state, SlotState::Idle)
+                    .then(|| s.t_last_used.elapsed().as_secs()),
+            })
+            .collect()
     }
 }
 

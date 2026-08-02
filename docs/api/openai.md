@@ -678,6 +678,34 @@ for await (const chunk of stream) {
 
 ---
 
+## Introspection
+
+### `GET /props`
+
+What this server is actually serving, read from the **loaded model** rather than
+inferred from its filename: architecture, backend, `n_ctx` (what fox allocated) vs
+`n_ctx_train`, dimensions, vocabulary size, and capability flags —
+`supports_thinking`, `supports_vision`, `supports_infill`, `supports_kv_reuse` —
+plus which fox features the server was started with.
+
+`model` is `null` when nothing is resident yet: fox loads lazily, so that is a normal
+state, not an error. This endpoint never *triggers* a load — under the default
+`--max-models 1` that would evict whatever is serving traffic.
+
+### `GET /slots`
+
+One entry per llama.cpp sequence: `free`, `processing` (with its request id), or
+`idle` — meaning it holds reusable KV from a finished request, a cache entry rather
+than work in progress. Also reports `resident_tokens`, `blocks` charged, and
+`idle_secs`. This is how the KV reuse described in
+`docs/design/llama-server-gap-analysis.md` becomes observable.
+
+The resident tokens themselves are **not** exposed. A parked sequence is another
+user's conversation and this endpoint has no per-user authorisation of its own;
+llama-server redacts the same fields.
+
+---
+
 ## Tokenizer utilities
 
 Three endpoints that run no inference — they only need the loaded model's vocabulary

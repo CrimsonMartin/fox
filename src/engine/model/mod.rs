@@ -607,6 +607,7 @@ pub trait Model: Send + Sync {
             n_ctx_train: self.context_len(),
             effective_ctx: self.context_len(),
             vocab_size: c.vocab_size,
+            n_params: 0, // backends that cannot report it say so, rather than guessing
             eos_token_id: self.eos_token_id(),
             has_chat_template: false,
             supports_thinking: self.supports_thinking(),

@@ -253,6 +253,18 @@ impl InferenceEngine {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Per-slot state for `GET /slots`.
+    pub fn slots_snapshot(&self) -> Vec<crate::scheduler::SlotSnapshot> {
+        self.scheduler.slots_snapshot()
+    }
+
+    /// The loaded model's inspectable facts — architecture, dimensions, capabilities.
+    /// Read from the model itself, never reconstructed from its filename, which is
+    /// what `/props` and `/api/show` need to stop guessing.
+    pub fn model_info(&self) -> crate::engine::model::ModelInfo {
+        self.model.model_info()
+    }
+
     pub fn model_name(&self) -> &str {
         &self.model_name
     }

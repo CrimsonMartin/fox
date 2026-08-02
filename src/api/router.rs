@@ -88,6 +88,8 @@ pub fn router(
         )
         .route("/health", get(crate::api::v1::models::health))
         .route("/metrics", get(crate::api::v1::models::metrics_handler))
+        .route("/props", axum::routing::get(super::v1::props::props))
+        .route("/slots", axum::routing::get(super::v1::props::slots))
         .route("/infill", axum::routing::post(super::v1::infill::infill))
         .route("/rerank", axum::routing::post(super::v1::rerank::rerank))
         .route("/v1/rerank", axum::routing::post(super::v1::rerank::rerank))

@@ -76,6 +76,11 @@ pub struct ModelInfo {
     pub n_ctx_train: u32,
     pub effective_ctx: u32,
     pub vocab_size: usize,
+    /// Exact parameter count, from `llama_model_n_params`. `0` when the backend
+    /// cannot report it (the stub). Never derived by formula: a GQA- and
+    /// tied-embedding-aware estimate still lands ~30% high, which would replace
+    /// "unknown" with a confident wrong number.
+    pub n_params: u64,
 
     // capabilities / identity
     pub eos_token_id: i32,

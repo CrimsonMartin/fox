@@ -926,6 +926,22 @@ async fn test_api_show_known_model() {
     assert!(v["modelfile"].as_str().is_some());
     assert!(v["details"]["format"].as_str().is_some());
     assert_eq!(v["details"]["format"], "gguf");
+
+    // Regression: these came from the FILENAME and were reported as empty strings and
+    // "unknown". A resident model must answer for itself.
+    assert_eq!(v["model_info"]["fox.resident"], true, "{v}");
+    assert_ne!(
+        v["details"]["parameter_size"], "unknown",
+        "a loaded model must report a real parameter size: {v}"
+    );
+    assert!(
+        v["parameters"].as_str().unwrap().contains("num_ctx"),
+        "`parameters` must carry the real serving defaults: {v}"
+    );
+    assert!(
+        v["model_info"]["fox.effective_context"].is_number(),
+        "context must come from the model, not the file stem: {v}"
+    );
 }
 
 #[tokio::test]

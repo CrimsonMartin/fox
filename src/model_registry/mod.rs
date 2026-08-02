@@ -179,6 +179,11 @@ impl ModelRegistry {
     }
 
     /// Returns all currently-loaded (name, entry) pairs.
+    /// Read-only view of the server's registry configuration, for `/props`.
+    pub fn config(&self) -> &RegistryConfig {
+        &self.config
+    }
+
     pub fn loaded(&self) -> Vec<(String, Arc<EngineEntry>)> {
         self.engines
             .iter()

@@ -21,6 +21,7 @@ use tracing::info;
 
 use crate::kv_cache::KVCacheManager;
 
+pub use slots::SlotSnapshot;
 use slots::SlotTable;
 
 /// Default LCP-similarity floor below which an idle slot's KV is not worth
@@ -162,6 +163,12 @@ impl Scheduler {
         drop(q);
         self.work_notify.notify_one();
         Ok(())
+    }
+
+    /// Per-slot state for `GET /slots`. Empty on a poisoned lock rather than
+    /// panicking — introspection must never take the server down.
+    pub fn slots_snapshot(&self) -> Vec<SlotSnapshot> {
+        self.slots.lock().map(|s| s.snapshot()).unwrap_or_default()
     }
 
     /// Wait until at least one request is available to schedule.

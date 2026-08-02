@@ -2,6 +2,7 @@ pub mod chat;
 pub mod completions;
 pub mod embeddings;
 pub mod infill;
+pub mod lora;
 pub mod models;
 pub mod props;
 pub mod rerank;

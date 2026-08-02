@@ -114,6 +114,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`GET` / `POST /lora-adapters` — inspect and re-scale adapters at runtime.**
+  fox could load adapters with `--lora-modules` and select one by naming it in the
+  `model` field, but there was no way to see what was loaded or to change an
+  adapter's strength without restarting — the point of a scale being a number
+  rather than a rebuild. `GET` lists `{id, name, path, scale}` with the scale
+  currently in effect; `POST` takes `[{id|name, scale}]`.
+
+  Only the *default* scale is mutable, and that is sufficient: a request's
+  `LoraSelection` already carries its own scale down to `llama_set_adapters_lora`,
+  so overriding what gets copied into it is the whole mechanism and the model's
+  adapter handles stay immutable after load. A body naming one valid and one
+  unknown adapter is resolved before anything is applied, so it changes **nothing**
+  rather than leaving the server in a state the caller neither asked for nor can
+  infer from the error. Changes apply to subsequent requests; a generation already
+  in flight keeps the scale it was admitted with, since the adapter set is a
+  property of the batch being decoded.
+
+  Verified against a real adapter: listing, setting by name and by id, the
+  all-or-nothing rejection (scale unchanged at 0.9 after a partially-invalid body),
+  and the new scale reaching the server.
+
 - **`--cache-ram <MiB>` — host-RAM prompt cache.** Complements `--kv-reuse`: a slot
   keeps a conversation warm by holding GPU blocks, this keeps one warm without
   holding any. A reclaimed sequence is serialised to host memory

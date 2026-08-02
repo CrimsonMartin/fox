@@ -28,6 +28,15 @@ pub struct ModelRegistry {
     /// means "use the server-wide `--keep-alive-secs`". `None` inside the map means
     /// "never evict on a timer" (Ollama's negative values).
     pub(crate) keep_alive_override: DashMap<String, Option<Duration>>,
+    /// Runtime scale overrides for `--lora-modules` adapters, set via
+    /// `POST /lora-adapters`. Absent means "use the scale it was configured with".
+    ///
+    /// Lives here rather than on the model because the model's adapter map is
+    /// immutable after load, and because only the *default* needs to change: the
+    /// per-request `LoraSelection` already carries its own scale down to
+    /// `llama_set_adapters_lora`, so overriding what gets copied into it is the whole
+    /// mechanism.
+    pub(crate) lora_scale_override: DashMap<String, f32>,
     config: RegistryConfig,
     aliases: HashMap<String, String>,
     /// Serializes model loading so two concurrent requests for the same cold model
@@ -45,6 +54,7 @@ impl ModelRegistry {
             lru: Mutex::new(lru::LruCache::new(cap)),
             last_used: DashMap::new(),
             keep_alive_override: DashMap::new(),
+            lora_scale_override: DashMap::new(),
             config,
             aliases,
             load_lock: tokio::sync::Mutex::new(()),
@@ -159,7 +169,14 @@ impl ModelRegistry {
         &self,
         name: &str,
     ) -> Result<(Arc<EngineEntry>, Option<crate::scheduler::LoraSelection>)> {
-        if let Some((_, _, scale)) = self.config.lora_modules.iter().find(|(n, _, _)| n == name) {
+        if let Some((_, _, configured)) =
+            self.config.lora_modules.iter().find(|(n, _, _)| n == name)
+        {
+            let scale = &self
+                .lora_scale_override
+                .get(name)
+                .map(|v| *v.value())
+                .unwrap_or(*configured);
             let primary = self.config.primary_model.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "'{name}' matches a configured LoRA adapter, but no primary model is \
@@ -179,6 +196,34 @@ impl ModelRegistry {
     }
 
     /// Returns all currently-loaded (name, entry) pairs.
+    /// Adapters loaded via `--lora-modules`, with their **current** scales — the
+    /// runtime override if one was set, else the configured default.
+    pub fn lora_adapters(&self) -> Vec<(String, std::path::PathBuf, f32)> {
+        self.config
+            .lora_modules
+            .iter()
+            .map(|(name, path, configured)| {
+                let scale = self
+                    .lora_scale_override
+                    .get(name)
+                    .map(|v| *v.value())
+                    .unwrap_or(*configured);
+                (name.clone(), path.clone(), scale)
+            })
+            .collect()
+    }
+
+    /// Set an adapter's scale for subsequent requests. `Err` naming the adapter when
+    /// it was never loaded — silently accepting an unknown name would let a caller
+    /// believe a scale change took effect when nothing exists to apply it to.
+    pub fn set_lora_scale(&self, name: &str, scale: f32) -> Result<()> {
+        if !self.config.lora_modules.iter().any(|(n, _, _)| n == name) {
+            anyhow::bail!("LoRA adapter '{name}' is not loaded (see --lora-modules)");
+        }
+        self.lora_scale_override.insert(name.to_string(), scale);
+        Ok(())
+    }
+
     /// Read-only view of the server's registry configuration, for `/props`.
     pub fn config(&self) -> &RegistryConfig {
         &self.config

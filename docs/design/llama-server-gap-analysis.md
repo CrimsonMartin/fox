@@ -392,7 +392,7 @@ Two deliberate decisions:
 | `/v1/rerank`, `/rerank` | `server-context.cpp:4962-5040`, prompt `[BOS]query[EOS][SEP]doc[EOS]`, score from `llama_get_embeddings_seq(...)[0]` | needs a `--reranking` flag and an exposed pooling type |
 | `/infill` (FIM) | `server-context.cpp:4614-4690` — `input_prefix`, `input_suffix`, `input_extra`, FIM special tokens, `n_indent`, `t_max_predict_ms` | what code-completion plugins consume; pairs naturally with `--cache-reuse` |
 | `/props`, `/slots` | `server-context.cpp:4551-4600`, `4475-4516` | fox's `/api/show` returns `parameters` and `template` as empty strings and `parameter_size: "unknown"` (`src/api/ollama/management.rs:140-158`). `/slots` falls out of stage 1.B, which creates the slot table |
-| Runtime LoRA (`GET`/`POST /lora-adapters`, per-request `lora: [{id, scale}]`) | `server-context.cpp:5042-5102`, `1728-1757` | fox loads adapters via `--lora-modules` and selects by the `model` field; only dynamic control is missing |
+| Runtime LoRA (`GET`/`POST /lora-adapters`) | `server-context.cpp:5042-5102`, `1728-1757` | **done** — list adapters and change their scale without a restart. Per-request `lora: [{id, scale}]` (several adapters on one request) is **not** done: fox groups a decode batch by adapter *name*, so multi-adapter requests would need set-based grouping first |
 | Slot state save/restore to disk | `server-context.cpp:4518-4549` | pure HTTP plumbing once stage 1.C exposes `state_seq_save`/`state_seq_load` |
 
 Deliberately **not** planned: router/multi-model mode (`server-models.cpp`) — fox's own

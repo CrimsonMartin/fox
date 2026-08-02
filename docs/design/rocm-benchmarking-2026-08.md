@@ -1080,3 +1080,93 @@ The `top_k = 0` default remains **deliberate** (`/v1/*` mirrors OpenAI, which ha
 `top_k`). It costs 8.7% for callers who do not set it. Changing the default would alter
 output for every existing caller silently, so it is documented rather than changed.
 
+
+---
+
+# The workload where fox wins: concurrent burst behind a shared prompt (2026-08-02)
+
+The section above closes with "none of 0.19's work shows up in this benchmark at all"
+— single-turn decode with a short prompt cannot see prompt reuse, because there is no
+prompt worth reusing. That is a statement about the benchmark, not about fox, and
+leaving it there would have been half the story. This section is the other half.
+
+`scripts/ab_shared_prefix.sh` + `scripts/bench_burst.py` measure the agent/RAG shape:
+N clients arrive **together**, each carrying the same long system prompt and a
+different short question. Two bursts per run, and the pair is the point — `cold` with
+nothing cached, `warm` with the previous sequences now idle and holding the prefix.
+
+## Result
+
+3 rounds, 8 clients, 1856-token shared prompt, 64 output tokens, 4096 ctx/sequence on
+both sides, Radeon 890M / Vulkan, both servers built from the same vendored llama.cpp,
+one server at a time, arms alternated:
+
+| | fox | llama-server | |
+|---|---|---|---|
+| **COLD** TTFT p50 | **1129 ms** | 4550 ms | **fox 4.03×** |
+| ranges | [1114, 1130] | [4526, 4573] | disjoint |
+| whole-burst wall | 2.65–3.01 s | 8.82–9.13 s | |
+| `cached_tokens` | **12908** | 0 | |
+| **WARM** TTFT p50 | **50 ms** | 190 ms | **fox 3.80×** |
+| ranges | [49, 53] | [186, 192] | disjoint |
+| `cached_tokens` | 14840 | 14840 | both reuse |
+
+12908 is exactly 7 × 1844: seven of the eight arrivals copied the shared prefix from a
+live sibling rather than prefilling it.
+
+## Why llama-server cannot do this
+
+Predicted from reading it, then confirmed by its `cached_tokens = 0`.
+`get_available_slot()` skips slots where `is_processing()` is true — in **both** the
+prompt-similarity pass (`server-context.cpp:1609`) and the LRU fallback (`:1652`). Its
+parent/child fork path asserts the same (`:2303`). So when N requests sharing a system
+prompt arrive at once, no slot is idle, nothing is inheritable, and the prompt is
+prefilled N times.
+
+fox copies from a *live* sequence: under `kv_unified`, `seq_cp` shares cells rather
+than duplicating the buffer, so a request may copy from a sibling that is already
+decoding. One prefill instead of eight.
+
+## Read the warm row before quoting the cold one
+
+The warm row is the honest floor. Both servers reuse an idle prefix — that is table
+stakes, not a differentiator — and fox's 3.8× there comes from the slot table
+(token-exact LCP, and parking the *generated* tokens rather than only the prompt), a
+separate mechanism from the cold gap.
+
+Neither number is the whole picture without the decode-bound control above, where fox
+sits at **96%** of llama-server. A benchmark that reports only the favourable workload
+is marketing. Both are in the repo; run both.
+
+Also unchanged: the block accounting. Each request still reserves its own fox block
+budget, so the ~80% VRAM saving projected before this work did **not** materialise —
+the compute is shared, the admission budget is not. llama.cpp's cells *are* shared by
+the metadata-only `seq_cp`, so GPU memory is not actually duplicated; what over-counts
+is fox's admission arithmetic, which makes fox admit less concurrency than the hardware
+would hold. Closing it needs ref-counted blocks with a CoW path that copies llama.cpp
+KV, which today it does not.
+
+## The stale-binary trap
+
+This benchmark's first run reported the **opposite** cold result — llama-server 1.40×
+ahead, fox `cached_tokens` 0 — and it was written up as refuting the hypothesis. It was
+not. The fox arm was a prebuilt Vulkan bundle timestamped 31 minutes *before* the
+feature commit. The benchmark faithfully measured a build that did not contain what was
+being measured.
+
+What made it convincing was that the warm row still looked right: the slot table it
+depends on predated that bundle. A partially-correct result reads as a real finding in
+a way that a totally broken one never would.
+
+What broke it open was a unit test reproducing the exact arrival pattern (all clients
+submitted before the first `schedule_step`,
+`scheduler::tests::simultaneous_burst_behind_one_prompt_reuses_it`). It **passed** —
+and the scheduler doing the right thing in the stub is what redirected the search from
+the code to the binary. **If an arm shows no effect at all, check the binary's
+timestamp against the commit before believing the result.**
+
+One more sizing trap, found the same way: the first draft used a prompt 3× longer than
+intended. llama-server returned `400`; fox **silently rolled the context window**, and
+rolling sets `rolled_tokens`, which disables reuse. That would have read as "fox cannot
+reuse prompts". The driver now reports *measured* prompt tokens and the harness warns
+when they exceed the per-sequence context.

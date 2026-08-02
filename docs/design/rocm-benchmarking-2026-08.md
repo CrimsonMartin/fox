@@ -943,6 +943,52 @@ Rule of thumb from this investigation: **a single before/after pair on this
 hardware is worthless**. If a change matters, it survives alternation; if it
 does not survive alternation, it was drift.
 
+## Audit of this document's claims (2026-08-02)
+
+This investigation produced several wrong results before producing right ones,
+so every quantitative claim above was re-checked and graded. The grading
+criterion is the one the investigation itself arrived at: **a number is only
+trustworthy if it came from a repeated, alternating comparison, or from a
+mechanism that does not depend on timing at all.**
+
+**Re-verified by fresh alternating A/B (`ab_bench.sh`, after its own bugs were
+fixed):**
+
+| claim | as committed | on re-measurement |
+|---|---|---|
+| fox vs `llama-server`, config-matched | 11.1% gap | **9.9%** (fox 160.6 [160.1, 161.4] vs 176.5 [174.7, 177.3]) |
+| `n_threads` fix | +54% | **+50.5%** (83.2 [82.5, 84.9] → 125.2 [123.4, 125.6]) |
+
+Both hold. Note the config-matched number originally came from a run predating
+the fix to `ab_bench.sh`'s process handling; it was re-measured with a watchdog
+confirming zero container overlap.
+
+**Solid without re-measurement, because the evidence is a mechanism or a test,
+not a timing:**
+
+- `kv_unified` — decode ubatch width 1.74 → 3.90 of 4, counted from llama.cpp's
+  own trace. Deterministic, and independently corroborated by the earlier
+  `rocprofv3` figure of ~1.64. Plus `make e2e` 22/22.
+- The concurrent-load SIGSEGV — cause read directly from a gdb backtrace;
+  fix verified over 85 consecutive runs against a prior 1-in-15 failure rate.
+- The golden-test fix — the bug (`all()` over an empty vec is vacuously true) is
+  visible in the source; 12/12 pass after.
+- Architecture coverage and the registry repair — pass/fail checks, re-runnable.
+
+**Weak — directionally probably right, magnitude not established:**
+
+- The concurrency-1 split of the gap (fox 52.8 vs llama-server 55.5 t/s, "~5%
+  flat cost") is a single measurement per side.
+- The `n_ctx` trade-off (33% TTFT vs 4.7% throughput) was measured with
+  `ab_bench.sh` before its process-handling fix. Direction is consistent across
+  both metrics; treat the exact percentages as provisional.
+- "~4.4 ms of the gap is `GGML_NATIVE=OFF`" — already marked unconfirmed above,
+  and partly contradicted by the later finding that fox's default CPU backend
+  matches a hand-tuned AVX-512 variant on this host.
+
+**Retracted:** `FOX_CPU_ALL_VARIANTS` improving TTFT ~20% (commit `5dd75b3`,
+retracted in `e3b447a`) — it was drift, and an alternating A/B shows no effect.
+
 ## Where to look
 
 | Concern | File |

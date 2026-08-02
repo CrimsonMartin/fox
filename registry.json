@@ -26,7 +26,7 @@
     },
     "mistral-small": {
       "aliases": ["mistral", "mistral:24b"],
-      "repo": "bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
+      "repo": "unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
       "recommended": "Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf",
       "description": "Mistral Small 3.1 24B — updated Mistral (Mar 2025)",
       "size_gb": 14.0,
@@ -50,7 +50,7 @@
     },
     "gemma3": {
       "aliases": ["gemma", "gemma3:4b"],
-      "repo": "bartowski/gemma-3-4b-it-GGUF",
+      "repo": "unsloth/gemma-3-4b-it-GGUF",
       "recommended": "gemma-3-4b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 4B — strong small model from Google",
       "size_gb": 2.5,
@@ -58,7 +58,7 @@
     },
     "gemma3:1b": {
       "aliases": ["gemma:1b"],
-      "repo": "bartowski/gemma-3-1b-it-GGUF",
+      "repo": "unsloth/gemma-3-1b-it-GGUF",
       "recommended": "gemma-3-1b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 1B — ultra-lightweight, edge inference",
       "size_gb": 0.7,
@@ -66,7 +66,7 @@
     },
     "gemma3:12b": {
       "aliases": ["gemma:12b"],
-      "repo": "bartowski/gemma-3-12b-it-GGUF",
+      "repo": "unsloth/gemma-3-12b-it-GGUF",
       "recommended": "gemma-3-12b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 12B — balanced performance",
       "size_gb": 7.5,
@@ -74,7 +74,7 @@
     },
     "gemma3:27b": {
       "aliases": ["gemma:27b"],
-      "repo": "bartowski/gemma-3-27b-it-GGUF",
+      "repo": "unsloth/gemma-3-27b-it-GGUF",
       "recommended": "gemma-3-27b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 27B — flagship Gemma, strong reasoning",
       "size_gb": 16.5,

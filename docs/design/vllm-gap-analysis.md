@@ -108,6 +108,22 @@ the same underlying constraint from a different angle). Reverted; not
 fixed. See `docs/design/rocm-benchmarking-2026-08.md`'s "Attempted fix"
 section for the full analysis and untried alternatives.
 
+> **Superseded (2026-08-02).** The premise above no longer holds. `1c36faf`
+> ("unified KV cache closes the prefix-cache throughput regression",
+> 2026-08-01) set `ctx_params.kv_unified = true`
+> (`src/engine/model/llama_cpp/mod.rs:676`), which makes `n_stream == 1`
+> (`llama-kv-cache.cpp:98`), which makes `seq_to_stream` all-zeros
+> (`:161-168`), which makes `seq_cp` *always* take the metadata-only branch and
+> **return at `:504`, before the `GGML_ASSERT(is_full)` at `:518`**. Partial
+> `seq_cp` is therefore legal and cheap today, and the "attempted and ruled
+> out" conclusion above applies only to the pre-`1c36faf` code. The same commit
+> also retires the dense-seq_id requirement this caveat is built on: with
+> `n_stream == 1`, `llama-kv-cache.cpp:725` selects `split_simple`, which has no
+> consecutive-ID constraint (the stale comment at `src/scheduler/mod.rs:36-47`
+> says as much). The real remaining gap is not `seq_cp` at all but the absence
+> of per-sequence resident-prompt tracking — see
+> [`llama-server-gap-analysis.md`](llama-server-gap-analysis.md) §0.1 and §1.
+
 ## 2. Advanced decoding — **the highest-ROI gaps**
 
 | Capability | vLLM | fox | Kind |
@@ -160,6 +176,18 @@ investigated:
   context) would hit the exact same assert. Making per-step beam-forking work
   at all would additionally need a `kv_unified = true` architecture change
   with its own side effects on fox's existing context-sizing math.
+  > **This bullet's technical argument is superseded (2026-08-02).** The
+  > `kv_unified = true` change it treats as hypothetical already shipped in
+  > `1c36faf` (2026-08-01), so cross-sequence `seq_cp` is now the cheap
+  > metadata-only path and sub-range copies no longer hit `GGML_ASSERT(is_full)`
+  > — see §1's superseded note and
+  > [`llama-server-gap-analysis.md`](llama-server-gap-analysis.md) §0.1.
+  > **The conclusion to skip beam search still stands**, on the three grounds
+  > that don't depend on this: no public llama.cpp API for it, vLLM itself
+  > demoted it, and OpenAI never exposed it — so there is no request shape any
+  > client library expects. What the correction *does* unblock is the much
+  > cheaper adjacent win: a shared-prefill fork for `n`/`best_of`, which today
+  > re-prefills the same prompt N times (`src/api/v1/chat.rs:227-257`).
 - **A *naive* implementation (each beam as an independent request, re-ranked between
   coarse rounds)** would just be a more expensive, weaker variant of the `n`/`best_of`
   fan-out already shipped in 0.18 — no per-token joint re-ranking, redundant prefill

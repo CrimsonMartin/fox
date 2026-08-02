@@ -1170,3 +1170,27 @@ intended. llama-server returned `400`; fox **silently rolled the context window*
 rolling sets `rolled_tokens`, which disables reuse. That would have read as "fox cannot
 reuse prompts". The driver now reports *measured* prompt tokens and the harness warns
 when they exceed the per-sequence context.
+
+## How it scales, and what the block accounting did (and did not) change
+
+Re-measured after the block accounting was fixed — the shared prefix charged once at
+admission rather than reserved in full and handed back:
+
+| clients | COLD TTFT p50 | WARM TTFT p50 | whole-burst wall |
+|---|---|---|---|
+| 8  | fox 1129 ms / ls 4514 ms — **4.00×** | fox 52 ms / ls 193 ms — 3.71× | 2.7 s / 8.8 s |
+| 16 | fox 1402 ms / ls 8064 ms — **5.75×** | fox 59 ms / ls 362 ms — 6.13× | 3.8 s / 16.2 s |
+
+All ranges disjoint. At 16 clients, `cached_tokens` is 27660 = 15 × 1844: fifteen of
+sixteen arrivals copied the prefix.
+
+**Doubling the concurrency costs fox 24% more cold TTFT (1129 → 1402 ms) and
+llama-server 79% (4514 → 8064 ms).** The prefill work fox adds per extra client is one
+short suffix; llama-server adds a whole prompt.
+
+The 8-client row is unchanged from before the accounting fix (4.00× vs 4.03×), and that
+is the expected result rather than a disappointment: at 8 clients the pool was never the
+constraint, so a change to how blocks are *budgeted* has nothing to move. Compute
+sharing and budget sharing are separate wins that show up under separate pressures —
+quoting the accounting fix as the cause of a TTFT number would be attributing it to the
+wrong change.

@@ -853,6 +853,43 @@ any future fox-vs-X comparison on this hardware; a single run here isn't
 trustworthy enough to draw conclusions from, as this whole investigation
 kept demonstrating.
 
+### `scripts/ab_bench.sh` — when you are comparing two *builds*
+
+`repeat_bench.sh` deliberately does not start or stop servers, which leaves
+four ways to produce a confident-looking wrong answer. Every one of them
+produced a wrong answer in this investigation:
+
+| hazard | what it produced here |
+|---|---|
+| two servers up at once (ggml's pool spin-waits, so an *idle* server still burns cores — and it penalises whichever arm uses more threads, i.e. the variable under test) | fox 79 vs llama-server 151 t/s; measured alone, 121 vs 153 |
+| comparing runs from different moments | "`FOX_CPU_ALL_VARIANTS` improves TTFT 20%" — it improves nothing |
+| a build change that silently did not apply (stale `libggml-cpu-*.so` are loaded regardless of what was just compiled; a `libggml-hip.so` that fails to dlopen falls back to CPU with no error) | nearly benchmarked a CPU build against a GPU one |
+| declaring a winner from overlapping ranges | the same 20% claim, retracted in `e3b447a` |
+
+`ab_bench.sh` closes all four: it runs **exactly one arm at a time** (and
+refuses to start if something is already on the port), **alternates** A/B and
+B/A each round, **prints what each arm actually loaded** (via `FOX_LLAMA_LOG`)
+and warns when both arms load the same thing, and returns **INCONCLUSIVE**
+unless the two arms' ranges are disjoint. It also warns when an arm varies
+more than 10% against *itself*, which is this machine's usual state.
+
+```bash
+./scripts/ab_bench.sh \
+  --a-label before --a-cmd './target/release/fox serve --model-path M --port 8097' \
+  --b-label after  --b-cmd './target/release/fox serve --model-path M --port 8097' \
+  --prep-b 'cargo build --release'  \
+  --url http://localhost:8097 --model llama-3.2-1b-instruct-q8_0 \
+  --rounds 3 --metric ttft        # or --metric throughput
+```
+
+`--prep-a`/`--prep-b` run before each start of that arm — rebuild, swap `.so`
+files, set an env var — so the arms genuinely differ. Both arms should use the
+same port: only one runs at a time, and sharing the port makes that structural.
+
+Rule of thumb from this investigation: **a single before/after pair on this
+hardware is worthless**. If a change matters, it survives alternation; if it
+does not survive alternation, it was drift.
+
 ## Where to look
 
 | Concern | File |
@@ -861,7 +898,8 @@ kept demonstrating.
 | ROCm Docker build | `Dockerfile.rocm` |
 | **Reference `llama-server`** — same vendored commit, same ggml/HIP flags | `Dockerfile.llama-server-rocm` |
 | **Thread count** — never inherit ggml's 4-thread default | `src/engine/model/llama_cpp/mod.rs` (`resolve_n_threads`, `FOX_N_THREADS`) |
-| Repeated/statistically-sound benchmarking | `scripts/repeat_bench.sh` |
+| Repeated/statistically-sound benchmarking (servers you already run) | `scripts/repeat_bench.sh` |
+| **A/B of two builds** — owns server lifecycle, alternates, verifies what loaded, refuses to call overlapping ranges a win | `scripts/ab_bench.sh` |
 | **The main fix** — dense/ascending `seq_id` allocation | `src/scheduler/mod.rs` (`seq_id_pool`, now a min-heap) |
 | **The main fix** — batch emitted in ascending `seq_id` order | `src/engine/model/llama_cpp/batch.rs` (`do_decode_batch`) |
 | **The closing fix** — unified KV cache, so `split_simple` runs instead of `split_equal` | `src/engine/model/llama_cpp/mod.rs` (`ctx_params.kv_unified` in `load()` and `new_context()`) |

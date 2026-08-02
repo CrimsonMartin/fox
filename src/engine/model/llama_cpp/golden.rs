@@ -188,7 +188,7 @@ fn golden_chunked_prefill_matches_single_shot() {
         logit_bias: None,
         multimodal: None,
         lora: None,
-        needs_logits: false,
+        needs_logits: true, // this test inspects Logits::values
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -270,7 +270,7 @@ fn golden_context_shift_continues_past_n_ctx() {
         logit_bias: None,
         multimodal: None,
         lora: None,
-        needs_logits: false,
+        needs_logits: true, // this test inspects Logits::values
     };
 
     // Prefill the prompt on seq 0.
@@ -295,6 +295,13 @@ fn golden_context_shift_continues_past_n_ctx() {
         let ctx_len = live + 1; // this token will be written at position `live`
         let out = m.do_decode(&[1], &[mk_req(Some(next), ctx_len)]).unwrap();
         let logits = &out[0].1;
+        // Non-empty first: `values` is only populated when the request sets
+        // `needs_logits`, and `all()` over an empty vec is vacuously true — so
+        // without this the finiteness check below silently asserts nothing.
+        assert!(
+            !logits.values.is_empty(),
+            "expected populated logits (step {step})"
+        );
         assert!(
             logits.values.iter().all(|v| v.is_finite()),
             "logits after roll must be finite (step {step}, rolled {rolled})"
@@ -785,7 +792,7 @@ fn golden_prefix_reuse_after_trim() {
                 logit_bias: None,
                 multimodal: None,
                 lora: None,
-                needs_logits: false,
+                needs_logits: true, // this test inspects Logits::values
             }
         };
 
@@ -825,6 +832,9 @@ fn golden_prefix_reuse_after_trim() {
         )
         .expect("re-prefill on a trimmed donated sequence must not fail");
     let logits = hit[0].logits.clone().expect("hit prefill completes");
+    // See the note in golden_context_shift_continues_past_n_ctx: empty `values`
+    // would make the finiteness assert vacuous.
+    assert!(!logits.values.is_empty(), "expected populated logits");
     assert!(
         logits.values.iter().all(|v| v.is_finite()),
         "post-hit logits must be finite"
@@ -844,6 +854,7 @@ fn golden_prefix_reuse_after_trim() {
             )],
         )
         .expect("decode after a cache-hit prefill must work");
+    assert!(!out[0].1.values.is_empty(), "expected populated logits");
     assert!(out[0].1.values.iter().all(|v| v.is_finite()));
 
     m.clear_sequence(0);

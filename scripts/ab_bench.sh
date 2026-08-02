@@ -97,8 +97,21 @@ LOGDIR=$(mktemp -d)
 SERVER_PID=""
 
 cleanup() {
-    [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null
-    wait "$SERVER_PID" 2>/dev/null
+    if [[ -n "$SERVER_PID" ]]; then
+        # Kill the whole process group (setsid gave the server its own), so a
+        # server that spawns helpers cannot outlive the arm that started it.
+        kill -TERM -- -"$SERVER_PID" 2>/dev/null || kill "$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null
+        # Verify it is actually gone before the next arm starts.
+        for _ in $(seq 1 25); do
+            port_busy || break
+            sleep 1
+        done
+        if port_busy; then
+            kill -KILL -- -"$SERVER_PID" 2>/dev/null || kill -9 "$SERVER_PID" 2>/dev/null
+            sleep 2
+        fi
+    fi
     SERVER_PID=""
 }
 trap 'cleanup; exit 130' INT TERM
@@ -119,7 +132,16 @@ start_arm() {
     fi
     # FOX_LLAMA_LOG surfaces llama.cpp's own startup lines, which is how we can
     # tell which backend .so actually got loaded (hazard 3).
-    FOX_LLAMA_LOG=1 bash -c "$cmd" > "$log" 2>&1 &
+    # setsid puts the arm in its own process group so cleanup() can kill the whole
+    # group. Without that, $! is the wrapper shell's pid and killing it leaves the
+    # actual server running — that silently breaks the one-server-at-a-time
+    # guarantee this script exists to provide (observed: four fox processes alive
+    # at once, each distorting the others).
+    #
+    # No `exec` here: it would break commands that carry env assignments, e.g.
+    # `FOX_N_THREADS=8 ./target/release/fox serve ...`, which is a normal way to
+    # express an arm.
+    FOX_LLAMA_LOG=1 setsid bash -c "$cmd" > "$log" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 "$READY_TIMEOUT"); do
         port_busy && return 0

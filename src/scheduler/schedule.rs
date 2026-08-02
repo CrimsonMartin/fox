@@ -6,6 +6,7 @@ use crate::kv_cache::PageTable;
 
 use super::batch;
 use super::batch::{ScheduledBatch, StopReason};
+use super::slots::common_prefix_len;
 use super::Scheduler;
 
 impl Scheduler {
@@ -162,6 +163,46 @@ impl Scheduler {
                 break 'admit;
             };
 
+            // Copy-from-a-live-sequence. `select` above only inherits *idle* slots, so
+            // when N requests sharing a system prompt arrive together none of them can
+            // reuse anything — each prefills and then holds its own copy. Measured: 6
+            // concurrent clients behind a 672-token prompt held 264 blocks where ~54
+            // would do. A busy sequence cannot be inherited, but it can be copied from:
+            // `seq_cp` shares cells under `kv_unified` rather than duplicating them.
+            //
+            // The search runs over `running`, not over the slot table: `claim` clears a
+            // slot's token list because while a request owns the sequence *it* is the
+            // source of truth. Only a request that is already `Decoding` has its whole
+            // prompt in the KV and is therefore copyable.
+            if allow_reuse && req.fork_source.is_none() && req.multimodal.is_none() {
+                let best = running
+                    .iter()
+                    .filter(|r| r.kv_seq_id >= 0 && r.multimodal.is_none() && !r.skip_prefix_cache)
+                    .map(|r| {
+                        let lcp = common_prefix_len(&r.prompt_tokens, &req.prompt_tokens);
+                        (r.kv_seq_id, lcp, r.state)
+                    })
+                    .filter(|&(_, lcp, _)| {
+                        lcp > choice.lcp
+                            && (lcp as f32 / req.prompt_tokens.len().max(1) as f32)
+                                >= self.slot_prompt_similarity
+                    })
+                    .max_by_key(|&(_, lcp, _)| lcp);
+
+                if let Some((donor_seq, lcp, state)) = best {
+                    if state == batch::RequestState::Decoding {
+                        req.fork_source = Some((donor_seq, lcp));
+                    } else {
+                        // Still prefilling: nothing to copy yet. Deferring keeps the
+                        // queue moving — it is blocked on a sibling, not on capacity,
+                        // so leaving it at the head would be a self-inflicted
+                        // head-of-line block.
+                        deferred.push(req);
+                        continue 'admit;
+                    }
+                }
+            }
+
             // The host-RAM cache is consulted only when it can beat what the live
             // slots already offer: restoring a state that covers less than `choice.lcp`
             // would be a memcpy that loses information. On a hit the chosen slot's KV
@@ -254,8 +295,14 @@ impl Scheduler {
             // parent's whole prompt beats any partial LCP match, and the two are
             // mutually exclusive — the copy overwrites positions 0..n.
             if let Some((parent_seq, fork_skip)) = req.fork_source {
-                n_past = fork_skip;
+                // [TAG_PROMPT_LOGITS] again: copying the *entire* prompt would leave
+                // nothing to decode and no logits, so keep one token back.
+                n_past = fork_skip.min(req.n_positions().saturating_sub(1));
                 req.prefix_seq_id = Some(parent_seq);
+                // The destination now holds the copied prefix; record it or a later
+                // LCP match would be computed against tokens that are not resident.
+                let resident = req.prompt_tokens[..n_past.min(req.prompt_tokens.len())].to_vec();
+                slots.set_resident(choice.index, resident);
             } else {
                 req.prefix_seq_id = None;
             }

@@ -712,6 +712,74 @@ mod tests {
         );
     }
 
+    /// Concurrent requests behind one system prompt must share its KV, not each hold
+    /// a copy. This is the case `select` cannot serve: when they arrive together no
+    /// slot is idle, so nothing is inheritable — but a *live* sequence can be copied.
+    #[test]
+    fn concurrent_shared_prefix_copies_from_a_live_sequence() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        let shared: Vec<i32> = (1..=60).collect();
+        let with_tail = |t: i32| {
+            let mut v = shared.clone();
+            v.extend([t, t + 1000]);
+            v
+        };
+
+        // First arrival prefills the shared prompt.
+        let (tx0, _rx0) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                with_tail(1),
+                8,
+                SamplingParams::default(),
+                tx0,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        // A second, *concurrent* request: the first is still Prefilling, so there is
+        // nothing to copy yet and it must be deferred rather than block the queue.
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                with_tail(2),
+                8,
+                SamplingParams::default(),
+                tx1,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+        assert!(
+            !batch.prefill.contains(&2),
+            "nothing to copy yet: {batch:?}"
+        );
+        assert_eq!(sched.queue_depth(), 1, "deferred, not dropped");
+
+        // Once the first is decoding, its prompt is resident and copyable.
+        sched.update_after_token(1, 99, true);
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let donor_seq = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
+        let second = running.iter().find(|r| r.id == 2).expect("admitted");
+        assert_eq!(
+            second.prefix_seq_id,
+            Some(donor_seq),
+            "must copy the shared prefix from the LIVE sequence"
+        );
+        assert_eq!(
+            second.skip_prefix_tokens, 60,
+            "the whole shared prefix is skipped, not re-prefilled"
+        );
+        assert_ne!(
+            second.kv_seq_id, donor_seq,
+            "each request keeps its own sequence"
+        );
+    }
+
     /// A branch whose parent never materialises must still run — slower, not stuck.
     #[test]
     fn forked_branch_falls_back_when_the_parent_is_gone() {

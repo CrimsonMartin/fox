@@ -1204,6 +1204,71 @@ impl Model for LlamaCppModel {
         self.do_rerank_score(tokens)
     }
 
+    fn state_seq_save(&self, seq_id: i32) -> Result<Vec<u8>> {
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {e}"))?;
+        let ctx = ctx_guard.as_ptr();
+        // FLAGS_NONE, never ON_DEVICE: llama.h:883-885 warns that the on-device
+        // variant keeps the data in device buffers AND invalidates every prior state
+        // for that seq_id — the opposite of what a host-RAM cache needs.
+        let size = unsafe {
+            ffi::llama_state_seq_get_size_ext(ctx, seq_id, ffi::LLAMA_STATE_SEQ_FLAGS_NONE)
+        };
+        if size == 0 {
+            return Err(anyhow!("sequence {seq_id} has no state to save"));
+        }
+        let mut buf = vec![0u8; size];
+        let written = unsafe {
+            ffi::llama_state_seq_get_data_ext(
+                ctx,
+                buf.as_mut_ptr(),
+                size,
+                seq_id,
+                ffi::LLAMA_STATE_SEQ_FLAGS_NONE,
+            )
+        };
+        if written == 0 {
+            return Err(anyhow!("llama_state_seq_get_data_ext wrote nothing"));
+        }
+        buf.truncate(written);
+        Ok(buf)
+    }
+
+    fn state_seq_load(&self, seq_id: i32, data: &[u8]) -> Result<usize> {
+        if data.is_empty() {
+            return Err(anyhow!("cannot restore an empty state blob"));
+        }
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {e}"))?;
+        let ctx = ctx_guard.as_ptr();
+        // The destination must be empty first: set_data_ext writes cells at their
+        // recorded positions and does not clear, so leftovers would survive
+        // underneath the restored state and corrupt the sequence.
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_rm(mem, seq_id, 0, -1);
+            }
+        }
+        let read = unsafe {
+            ffi::llama_state_seq_set_data_ext(
+                ctx,
+                data.as_ptr(),
+                data.len(),
+                seq_id,
+                ffi::LLAMA_STATE_SEQ_FLAGS_NONE,
+            )
+        };
+        if read == 0 {
+            return Err(anyhow!("llama_state_seq_set_data_ext rejected the blob"));
+        }
+        Ok(read)
+    }
+
     fn sep_token_id(&self) -> Option<i32> {
         let sep = unsafe { ffi::llama_vocab_sep(self.vocab) };
         (sep >= 0).then_some(sep)

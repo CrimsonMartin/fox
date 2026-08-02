@@ -87,6 +87,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--cache-ram <MiB>` — host-RAM prompt cache.** Complements `--kv-reuse`: a slot
+  keeps a conversation warm by holding GPU blocks, this keeps one warm without
+  holding any. A reclaimed sequence is serialised to host memory
+  (`llama_state_seq_get_data_ext`) and restored later
+  (`llama_state_seq_set_data_ext`) instead of being re-prefilled.
+
+  Ordering in the engine is load-bearing: **saves → clears → restores → trims**. A
+  save must read the sequence before the clear wipes it; a restore must land after
+  the clears (its destination may itself have just been reclaimed) and before the
+  trims, which bound the *restored* state at the new request's divergence point. A
+  failed restore resets the request to prefill from token 0 rather than letting it
+  read cells that were never written — slower, never wrong.
+
+  The FFI round-trip is verified against a real model: a saved state restored into a
+  *different* sequence predicts the identical token with logits matching to <1e-3,
+  and restoring over a dirty destination is correct because the load clears first.
+
+  **Not a general speedup, and defaults to `0`.** Reclamation only triggers when the
+  block pool is exhausted *and* the claiming request needs more blocks than the slot
+  it inherits — neither holds under sequential single-client traffic, where every
+  request shares the chat-template prefix and LCP affinity routes them all onto one
+  slot whose blocks they inherit unchanged. It earns its keep under concurrent,
+  distinct conversations that exhaust the pool. See
+  `docs/design/llama-server-gap-analysis.md` §1.C.
+
 - **`GET /props` and `GET /slots`** — server and per-sequence introspection.
   `/props` reports architecture, backend, allocated vs trained context,
   dimensions, and capability flags (`supports_thinking`, `supports_vision`,

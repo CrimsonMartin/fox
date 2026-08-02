@@ -161,6 +161,7 @@ mod tests {
             context_shift: false,
             context_keep: 0,
             reranking: false,
+            cache_ram_bytes: 0,
             kv_reuse: true,
             slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
             speculative: false,

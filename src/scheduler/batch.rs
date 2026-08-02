@@ -355,6 +355,14 @@ pub struct ScheduledBatch {
     /// Sequence IDs whose KV must be wiped entirely: a finished request whose state
     /// was not safe to reuse, or an idle slot reclaimed to free blocks.
     pub kv_clears: Vec<i32>,
+    /// `(seq_id, tokens)` to serialise into the host-RAM prompt cache **before** the
+    /// matching `kv_clears` entry wipes it. Order matters: the engine saves first,
+    /// then clears, or the state is gone before it can be copied.
+    pub kv_saves: Vec<(i32, Vec<i32>)>,
+    /// `(seq_id, state_blob)` to restore into a sequence before it is prefilled.
+    /// Carries the blob by value: it has just been removed from the cache, so there
+    /// is exactly one copy in flight and no second reference to keep consistent.
+    pub kv_restores: Vec<(i32, Vec<u8>)>,
 }
 
 impl ScheduledBatch {

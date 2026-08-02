@@ -4,6 +4,7 @@
 // that doesn't fit waits in the queue (FIFO) until running requests finish.
 
 mod batch;
+mod prompt_cache;
 mod schedule;
 mod slots;
 
@@ -21,6 +22,7 @@ use tracing::info;
 
 use crate::kv_cache::KVCacheManager;
 
+use prompt_cache::PromptCache;
 pub use slots::SlotSnapshot;
 use slots::SlotTable;
 
@@ -52,6 +54,12 @@ pub struct Scheduler {
     /// Minimum fraction of an incoming prompt that must already be resident in an
     /// idle slot before that slot's KV is inherited instead of starting fresh.
     pub(super) slot_prompt_similarity: f32,
+    /// Host-RAM store of serialised sequence states (`--cache-ram`). Complements the
+    /// slot table: slots keep a conversation warm by holding GPU blocks, this keeps one
+    /// warm without holding any. Empty and inert when the budget is 0 (the default).
+    ///
+    /// Lock ordering: acquired after `slots`, never while holding the model lock.
+    pub(crate) prompt_cache: std::sync::Mutex<PromptCache>,
     /// Master switch for KV reuse (`--kv-reuse`). When false, finished sequences are
     /// always cleared and every prompt is prefilled from token 0 — the pre-0.19
     /// behaviour, kept as an escape hatch and as the A/B baseline arm.
@@ -113,12 +121,21 @@ impl Scheduler {
             kv_cache,
             work_notify: tokio::sync::Notify::new(),
             slots: std::sync::Mutex::new(SlotTable::new(max_batch_size)),
+            prompt_cache: std::sync::Mutex::new(PromptCache::new(0)),
             slot_prompt_similarity: DEFAULT_SLOT_PROMPT_SIMILARITY,
             kv_reuse: true,
             prefix_hits: AtomicU64::new(0),
             prefix_misses: AtomicU64::new(0),
             max_queue_depth,
         }
+    }
+
+    /// Set the host-RAM prompt-cache budget in bytes (`--cache-ram`, 0 = disabled).
+    pub fn with_prompt_cache(self, limit_bytes: usize) -> Self {
+        if let Ok(mut c) = self.prompt_cache.lock() {
+            *c = PromptCache::new(limit_bytes);
+        }
+        self
     }
 
     /// Override the KV-reuse policy (`--kv-reuse` / `--slot-prompt-similarity`).
@@ -163,6 +180,32 @@ impl Scheduler {
         drop(q);
         self.work_notify.notify_one();
         Ok(())
+    }
+
+    /// Store a serialised sequence state in the host-RAM cache. Called by the engine
+    /// after it has serialised a sequence the scheduler asked it to save.
+    pub fn store_prompt_state(&self, tokens: Vec<i32>, data: Vec<u8>) {
+        if let Ok(mut c) = self.prompt_cache.lock() {
+            c.store(tokens, data);
+        }
+    }
+
+    /// Drop every cached sequence state (model unload).
+    pub fn clear_prompt_cache(&self) {
+        if let Ok(mut c) = self.prompt_cache.lock() {
+            c.clear();
+        }
+    }
+
+    /// `(entries, bytes, hits, misses)` for metrics and `/props`.
+    pub fn prompt_cache_stats(&self) -> (usize, usize, u64, u64) {
+        self.prompt_cache
+            .lock()
+            .map(|c| {
+                let (h, m) = c.stats();
+                (c.len(), c.bytes(), h, m)
+            })
+            .unwrap_or((0, 0, 0, 0))
     }
 
     /// Per-slot state for `GET /slots`. Empty on a poisoned lock rather than
@@ -473,6 +516,139 @@ mod tests {
             slots.count(|s| matches!(s.state, SlotState::Busy(_))),
             3,
             "requests 2, 3 and 4 hold slots"
+        );
+    }
+
+    /// The RAM cache must capture a reclaimed sequence and offer it back, so a
+    /// conversation survives losing its GPU blocks.
+    #[test]
+    fn reclaimed_sequence_is_offered_to_the_ram_cache() {
+        // 6 blocks; each request below needs 2.
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 6, 16));
+        let sched = Scheduler::new(kv.clone(), 4).with_prompt_cache(1024 * 1024);
+        let prompt = |seed: i32| -> Vec<i32> { (0..20).map(|i| seed * 1000 + i).collect() };
+
+        run_and_park(&sched, 1, prompt(1), &[777]);
+        sched.schedule_step();
+        for id in [2u64, 3] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sched
+                .submit(InferenceRequest::new(
+                    id,
+                    prompt(id as i32),
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+            sched.schedule_step();
+        }
+        assert_eq!(kv.allocated_blocks(), 6, "pool full");
+
+        // A fourth request forces the idle slot to be reclaimed.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                4,
+                prompt(4),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        // The scheduler must have asked the engine to serialise it first — losing the
+        // blocks is fine, losing the conversation is the thing the cache prevents.
+        assert_eq!(
+            batch.kv_saves.len(),
+            1,
+            "reclaim must request a save: {batch:?}"
+        );
+        let (saved_seq, saved_tokens) = &batch.kv_saves[0];
+        assert_eq!(*saved_seq, 0, "slot 0 was the idle victim");
+        assert_eq!(
+            saved_tokens.len(),
+            21,
+            "the whole resident sequence — prompt + generated — must be saved"
+        );
+        assert!(
+            batch.kv_clears.contains(saved_seq),
+            "the save must be paired with the clear that follows it"
+        );
+    }
+
+    /// With the cache disabled nothing is serialised, so the default configuration
+    /// carries none of its cost.
+    #[test]
+    fn no_saves_are_requested_when_the_ram_cache_is_off() {
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 6, 16));
+        let sched = Scheduler::new(kv.clone(), 4); // cache defaults to 0 bytes
+        let prompt = |seed: i32| -> Vec<i32> { (0..20).map(|i| seed * 1000 + i).collect() };
+
+        run_and_park(&sched, 1, prompt(1), &[777]);
+        sched.schedule_step();
+        for id in [2u64, 3] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sched
+                .submit(InferenceRequest::new(
+                    id,
+                    prompt(id as i32),
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+            sched.schedule_step();
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                4,
+                prompt(4),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+        assert!(batch.kv_saves.is_empty(), "cache off must cost nothing");
+    }
+
+    /// A stored state is handed back to a later prompt that extends it, and only when
+    /// it beats what the live slots already cover.
+    #[test]
+    fn stored_state_is_restored_for_an_extending_prompt() {
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 64, 16));
+        let sched = Scheduler::new(kv, 4).with_prompt_cache(1024 * 1024);
+        let base: Vec<i32> = (0..20).collect();
+
+        // Pretend the engine serialised this conversation earlier.
+        sched.store_prompt_state(base.clone(), vec![1u8; 128]);
+
+        // A prompt that extends it must get the state back.
+        let mut longer = base.clone();
+        longer.extend([900, 901]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                9,
+                longer,
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        assert_eq!(batch.kv_restores.len(), 1, "cached state must be restored");
+        assert_eq!(batch.kv_restores[0].1, vec![1u8; 128]);
+
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 9).unwrap();
+        assert_eq!(
+            req.skip_prefix_tokens, 20,
+            "the restored prefix must be skipped, not re-prefilled"
         );
     }
 

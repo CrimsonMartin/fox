@@ -190,6 +190,27 @@ impl SlotTable {
             .map(|(index, _)| SlotChoice { index, lcp: 0 })
     }
 
+    /// The `seq_id` of the slot at `index`.
+    pub(super) fn seq_id_at(&self, index: usize) -> i32 {
+        self.slots[index].seq_id
+    }
+
+    /// Overwrite what a slot is considered to hold, after its KV was replaced from the
+    /// host-RAM cache. The slot's previous contents are gone — `state_seq_load` clears
+    /// the destination — so the bookkeeping has to follow, or a later LCP match would
+    /// be computed against tokens that are no longer resident.
+    pub(super) fn set_resident(&mut self, index: usize, tokens: Vec<i32>) {
+        self.slots[index].tokens = tokens;
+    }
+
+    /// Forget what a sequence was believed to hold, by `seq_id`. Used when a restore
+    /// failed: the slot's recorded tokens describe a state that never landed.
+    pub(super) fn forget_resident(&mut self, seq_id: i32) {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.seq_id == seq_id) {
+            slot.tokens.clear();
+        }
+    }
+
     /// How many blocks the slot at `index` currently holds.
     pub(super) fn blocks_at(&self, index: usize) -> usize {
         self.slots[index].blocks.len()
@@ -243,7 +264,11 @@ impl SlotTable {
     /// entry, not work in progress. `Busy` slots are never considered, so the
     /// never-preempt-on-admission invariant (see
     /// `admission_never_preempts_running_requests`) is untouched.
-    pub(super) fn reclaim_lru(&mut self, except: usize) -> Option<(i32, Vec<BlockId>)> {
+    /// Returns `(seq_id, resident_tokens, blocks)`. The token list comes back rather
+    /// than being dropped so the caller can serialise the sequence to the host-RAM
+    /// prompt cache before its KV is wiped — the victim is only known here, so
+    /// reading it beforehand is not possible.
+    pub(super) fn reclaim_lru(&mut self, except: usize) -> Option<(i32, Vec<i32>, Vec<BlockId>)> {
         let index = self
             .slots
             .iter()
@@ -252,9 +277,12 @@ impl SlotTable {
             .min_by_key(|(_, s)| s.t_last_used)
             .map(|(i, _)| i)?;
         let slot = &mut self.slots[index];
-        slot.tokens.clear();
         slot.state = SlotState::Free;
-        Some((slot.seq_id, std::mem::take(&mut slot.blocks)))
+        Some((
+            slot.seq_id,
+            std::mem::take(&mut slot.tokens),
+            std::mem::take(&mut slot.blocks),
+        ))
     }
 
     /// Total blocks charged across every slot — the accounting counterpart to
@@ -429,8 +457,13 @@ mod tests {
         t.slots[0].t_last_used = Instant::now() - std::time::Duration::from_secs(600);
         // Slot 0 is by far the oldest, but it is Busy — reclaiming it would be
         // preemption, which admission must never do.
-        let (seq_id, blocks) = t.reclaim_lru(usize::MAX).unwrap();
+        let (seq_id, tokens, blocks) = t.reclaim_lru(usize::MAX).unwrap();
         assert_eq!(seq_id, 1);
+        assert_eq!(
+            tokens,
+            vec![2],
+            "the victim's tokens come back for the RAM cache"
+        );
         assert_eq!(blocks.len(), 2);
         assert_eq!(t.slots[0].state, SlotState::Busy(1));
     }

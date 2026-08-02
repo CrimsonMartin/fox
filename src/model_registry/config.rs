@@ -35,6 +35,9 @@ pub struct RegistryConfig {
     /// pooling type, so this cannot be auto-detected; llama-server takes a flag for
     /// the same reason. A model loaded this way is a reranker, not a generator.
     pub reranking: bool,
+    /// Host-RAM budget in **bytes** for serialised sequence states (`--cache-ram`,
+    /// given in MiB on the CLI). 0 disables the cache.
+    pub cache_ram_bytes: usize,
     pub kv_reuse: bool,
     /// Minimum fraction of an incoming prompt that must already be resident in an idle
     /// slot before that slot's KV is inherited (`--slot-prompt-similarity`).

@@ -543,6 +543,25 @@ pub trait Model: Send + Sync {
     /// Uses sequence slot 0; caller must not have an active inference request on slot 0.
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>>;
 
+    /// Serialise one sequence's KV state to host memory.
+    ///
+    /// The blob is opaque and only valid for *this* model in *this* process — it
+    /// encodes cell layout, not just tokens. Restoring it into a different model, or
+    /// after the context was recreated, is undefined; the caller must key it by model
+    /// and drop it on unload.
+    ///
+    /// `Err` when the backend cannot serialise (the stub) or the sequence is empty.
+    fn state_seq_save(&self, _seq_id: i32) -> Result<Vec<u8>> {
+        anyhow::bail!("this model backend cannot serialise sequence state")
+    }
+
+    /// Restore a blob produced by [`Self::state_seq_save`] into `seq_id`, returning the
+    /// number of bytes consumed. The destination sequence must be empty: llama.cpp
+    /// writes the cells at their original positions and does not clear first.
+    fn state_seq_load(&self, _seq_id: i32, _data: &[u8]) -> Result<usize> {
+        anyhow::bail!("this model backend cannot restore sequence state")
+    }
+
     /// Score one `(query, document)` pair for reranking: a single relevance number
     /// read from the model's classification head.
     ///

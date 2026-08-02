@@ -131,7 +131,7 @@ KV, prompt *and* generation.
 |---|---|---|
 | **1.A** | `repeat_last_n` window for the penalties | **done** — see §3 |
 | **1.B** | Per-seq_id resident-token tracking + LCP slot affinity; finished requests park as `Idle` instead of freeing; LRU reclaim of idle slots under block pressure. New `src/scheduler/slots.rs` replacing `prefix_cache.rs`. Flags `--kv-reuse`, `--slot-prompt-similarity` | planned |
-| **1.C** | Host-RAM sequence state cache (`--cache-ram`), the only way to keep a conversation warm *without* holding GPU blocks — the single-model laptop case | planned, depends on 1.B |
+| **1.C** | Host-RAM sequence state cache (`--cache-ram`) — keeps a conversation warm *without* holding GPU blocks | **done** — see below |
 | **1.D** | Shared-prefill fork for `n>1`/`best_of` (today N independent full prefills, `src/api/v1/chat.rs:227-257`) | planned, unblocked by §0.1 and §0.3 |
 | **deferred** | `--cache-reuse` chunk shifting | see below |
 
@@ -176,6 +176,36 @@ finding is the tail: the old 8-entry cache evicts a third of a 12-conversation w
 set on every pass, and each eviction costs a full re-prefill — which shows up as a
 heavy tail, not as a shifted median. A median-only report would have hidden the very
 thing under test.
+
+### 1.C as built, and when it actually earns its keep
+
+`--cache-ram` serialises a reclaimed sequence to host memory
+(`llama_state_seq_get_data_ext`) and restores it later
+(`llama_state_seq_set_data_ext`) instead of re-prefilling. Ordering in the engine is
+load-bearing and documented at the call site: **saves → clears → restores → trims**. A
+save must read the sequence before the clear wipes it; a restore must land after the
+clears (its destination may itself have just been reclaimed) and before the trims,
+which bound the *restored* state at the new request's divergence point. A failed
+restore resets the request to prefill from token 0 rather than letting it read cells
+that were never written — slower, never wrong.
+
+**Verification, and its limit.** The FFI round-trip is proven against a real model
+(`golden_state_seq_round_trip_preserves_decode`): a saved state restored into a
+*different* sequence predicts the identical token, with logits matching to <1e-3, and
+restoring over a dirty destination is correct because `state_seq_load` clears first.
+The scheduler side is proven by unit tests asserting the exact save/restore intents.
+
+What was **not** observed is the full chain firing against a real model under load, and
+the reason is worth recording. Reclamation only triggers when the block pool is
+exhausted *and* the claiming request needs more blocks than the slot it inherits. Under
+sequential single-client traffic neither holds: every request shares the chat-template
+prefix, so LCP affinity routes them all onto one slot whose blocks they inherit
+unchanged. Nine requests against an 8-slot server left 1 slot idle and 7 free, across
+four attempts at staging pressure.
+
+So `--cache-ram` is **not a general speedup**. It earns its keep specifically under
+concurrent, distinct conversations that exhaust the block pool — where the slot table
+alone would have to throw a conversation away. That is why it defaults to `0`.
 
 ### Greedy output is not stable under concurrency — pre-existing, amplified by reuse
 

@@ -193,17 +193,22 @@ impl ModelRegistry {
 
     /// Explicitly unload a model by stem name. Returns `true` if it was loaded.
     pub fn unload(&self, name: &str) -> bool {
-        let removed = self.engines.remove(name).is_some();
-        if removed {
+        let evicted = self.engines.remove(name);
+        if let Some((_, entry)) = &evicted {
             self.last_used.remove(name);
             // Drop the per-request TTL too, or a reloaded model would silently
             // inherit the keep_alive of whatever request last touched the old one.
             self.keep_alive_override.remove(name);
+            // The host-RAM prompt cache holds blobs that encode THIS model's cell
+            // layout; restoring one into a different model would corrupt it. The
+            // cache dies with the scheduler anyway, but anything still holding an
+            // `Arc` to the engine would otherwise keep stale blobs alive.
+            entry.engine.clear_prompt_cache();
             if let Ok(mut lru) = self.lru.lock() {
                 lru.pop(name);
             }
         }
-        removed
+        evicted.is_some()
     }
 
     pub(crate) fn evict_lru_if_needed(&self) {
@@ -372,6 +377,7 @@ mod tests {
             context_shift: false,
             context_keep: 0,
             reranking: false,
+            cache_ram_bytes: 0,
             kv_reuse: true,
             slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
             speculative: false,

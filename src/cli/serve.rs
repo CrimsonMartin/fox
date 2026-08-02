@@ -88,6 +88,14 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, env = "FOX_RERANKING")]
     pub reranking: bool,
 
+    /// Host-RAM budget in MiB for serialised sequence states. Complements
+    /// `--kv-reuse`: a slot keeps a conversation warm by holding GPU blocks, this keeps
+    /// one warm without holding any — a reclaimed sequence is copied to host memory and
+    /// restored later instead of being re-prefilled. Worth it when VRAM is the scarce
+    /// resource and prompts are long. `0` (the default) disables it.
+    #[arg(long, default_value = "0", env = "FOX_CACHE_RAM")]
+    pub cache_ram: usize,
+
     /// Keep a finished request's KV cache resident so a later prompt sharing a prefix
     /// with it skips re-prefilling that much. Each sequence remembers the tokens it
     /// holds — prompt *and* generated reply — so the next turn of a conversation
@@ -466,6 +474,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         context_shift: args.context_shift,
         context_keep: args.context_keep,
         reranking: args.reranking,
+        cache_ram_bytes: args.cache_ram.saturating_mul(1024 * 1024),
         kv_reuse: args.kv_reuse,
         slot_prompt_similarity: args.slot_prompt_similarity,
         speculative: args.speculative,

@@ -253,6 +253,23 @@ impl InferenceEngine {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Serialise a sequence's KV to host memory (see `Model::state_seq_save`).
+    pub fn state_seq_save(&self, seq_id: i32) -> anyhow::Result<Vec<u8>> {
+        self.model.state_seq_save(seq_id)
+    }
+
+    /// Restore a previously saved sequence blob into `seq_id`.
+    pub fn state_seq_load(&self, seq_id: i32, data: &[u8]) -> anyhow::Result<usize> {
+        self.model.state_seq_load(seq_id, data)
+    }
+
+    /// Drop every cached sequence state. Called when the model unloads: the blobs
+    /// encode this model's cell layout and are meaningless — and dangerous — to any
+    /// other.
+    pub fn clear_prompt_cache(&self) {
+        self.scheduler.clear_prompt_cache();
+    }
+
     /// Per-slot state for `GET /slots`.
     pub fn slots_snapshot(&self) -> Vec<crate::scheduler::SlotSnapshot> {
         self.scheduler.slots_snapshot()

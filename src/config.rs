@@ -24,6 +24,7 @@ struct ConfigFile {
     context_keep: Option<usize>,
     repeat_last_n: Option<i32>,
     reranking: Option<bool>,
+    cache_ram: Option<usize>,
     kv_reuse: Option<bool>,
     slot_prompt_similarity: Option<f32>,
     speculative: Option<bool>,
@@ -100,6 +101,7 @@ pub fn load_config_into_env() {
         cfg.repeat_last_n.map(|v| v.to_string()),
     );
     set_if_unset("FOX_RERANKING", cfg.reranking.map(|v| v.to_string()));
+    set_if_unset("FOX_CACHE_RAM", cfg.cache_ram.map(|v| v.to_string()));
     set_if_unset("FOX_KV_REUSE", cfg.kv_reuse.map(|v| v.to_string()));
     set_if_unset(
         "FOX_SLOT_PROMPT_SIMILARITY",

@@ -58,6 +58,11 @@ impl Scheduler {
 
         let mut kv_trims: Vec<(i32, usize)> = Vec::new();
         let mut kv_clears: Vec<i32> = Vec::new();
+        let mut kv_saves: Vec<(i32, Vec<i32>)> = Vec::new();
+        let mut kv_restores: Vec<(i32, Vec<u8>)> = Vec::new();
+        // Held across the admission loop rather than re-locked per request. Acquired
+        // after `slots`, matching the documented lock order.
+        let mut pcache = self.prompt_cache.lock().ok();
 
         // 1. Retire Finished requests.
         //
@@ -116,11 +121,30 @@ impl Scheduler {
                 break 'admit;
             };
 
+            // The host-RAM cache is consulted only when it can beat what the live
+            // slots already offer: restoring a state that covers less than `choice.lcp`
+            // would be a memcpy that loses information. On a hit the chosen slot's KV
+            // is replaced wholesale, so its own resident tokens no longer apply.
+            let mut lcp = choice.lcp;
+            if allow_reuse {
+                if let Some(hit) = pcache
+                    .as_mut()
+                    .and_then(|c| c.take_best(&req.prompt_tokens, choice.lcp))
+                {
+                    kv_restores.push((slots.seq_id_at(choice.index), hit.data));
+                    slots.set_resident(
+                        choice.index,
+                        req.prompt_tokens[..hit.resident.min(req.prompt_tokens.len())].to_vec(),
+                    );
+                    lcp = hit.matched;
+                }
+            }
+
             // Token-exact reuse, then llama-server's [TAG_PROMPT_LOGITS] guard
             // (server-context.cpp:3356-3361): if the prompt is *entirely* resident
             // there is nothing left to decode and no logits would be produced, so
             // step one token back and recompute the final position.
-            let mut n_past = choice.lcp.min(req.n_positions());
+            let mut n_past = lcp.min(req.n_positions());
             if n_past > 0 && n_past == req.n_positions() {
                 n_past -= 1;
             }
@@ -134,9 +158,17 @@ impl Scheduler {
             // Make room by reclaiming idle slots — LRU first, never the slot we just
             // chose, and never a Busy one. Not preemption; see SlotTable::reclaim_lru.
             while top_up > 0 && !self.kv_cache.can_allocate(top_up) {
-                let Some((victim_seq, victim_blocks)) = slots.reclaim_lru(choice.index) else {
+                let Some((victim_seq, victim_tokens, victim_blocks)) =
+                    slots.reclaim_lru(choice.index)
+                else {
                     break;
                 };
+                // Serialise what it held to host RAM instead of throwing it away —
+                // that is the whole point of the RAM cache: the conversation stays
+                // reusable without continuing to occupy a GPU block.
+                if pcache.as_ref().is_some_and(|c| c.enabled()) && !victim_tokens.is_empty() {
+                    kv_saves.push((victim_seq, victim_tokens));
+                }
                 self.kv_cache.free_blocks(&victim_blocks);
                 kv_clears.push(victim_seq);
                 debug!(
@@ -222,6 +254,8 @@ impl Scheduler {
             preempted_seq_ids,
             kv_trims,
             kv_clears,
+            kv_saves,
+            kv_restores,
         }
     }
 
@@ -314,6 +348,26 @@ impl Scheduler {
                 req.stop_reason = Some(stop_reason);
                 break;
             }
+        }
+    }
+
+    /// Undo the bookkeeping for a prompt-cache restore that failed at the model layer.
+    ///
+    /// The scheduler has already told the request how many tokens it may skip, on the
+    /// assumption the restore would succeed. If it did not, the request would prefill
+    /// on top of cells that were never written. Resetting it to prefill from token 0
+    /// costs a re-prefill and nothing else — the alternative is silently wrong output.
+    pub fn invalidate_restore(&self, seq_id: i32) {
+        if let Ok(mut running) = self.running_batch.lock() {
+            for req in running.iter_mut() {
+                if req.kv_seq_id == seq_id {
+                    req.skip_prefix_tokens = 0;
+                    req.prefill_pos = 0;
+                }
+            }
+        }
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.forget_resident(seq_id);
         }
     }
 

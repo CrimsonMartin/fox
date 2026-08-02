@@ -74,12 +74,45 @@ impl InferenceEngine {
 
             // Apply the scheduler's KV bookkeeping BEFORE any prefill runs this step.
             // The scheduler has no model handle, so it records intent and we execute
-            // it here. Ordering is load-bearing: a request that inherited an idle
-            // slot's KV must have everything past its divergence point dropped before
-            // it writes its own tokens there, or the stale tail silently corrupts its
-            // context (the failure mode is garbage output, not a crash).
+            // it here. Ordering is load-bearing throughout:
+            //
+            //   saves → clears → restores → trims
+            //
+            // A save must read the sequence before the clear wipes it. A restore must
+            // land after the clears (its destination may itself have just been
+            // reclaimed) and before the trims, because the trim bounds the *restored*
+            // state at the new request's divergence point. Getting this order wrong
+            // corrupts context silently — garbage output, not a crash.
+            for (seq_id, tokens) in &batch.kv_saves {
+                match engine.model.state_seq_save(*seq_id) {
+                    Ok(data) => {
+                        tracing::debug!(
+                            seq_id,
+                            bytes = data.len(),
+                            tokens = tokens.len(),
+                            "serialised sequence to the host-RAM prompt cache"
+                        );
+                        engine.scheduler.store_prompt_state(tokens.clone(), data);
+                    }
+                    // A failed save costs a re-prefill later, nothing more — the
+                    // sequence is being discarded either way.
+                    Err(e) => tracing::debug!(seq_id, "prompt-cache save skipped: {e}"),
+                }
+            }
             for seq_id in &batch.kv_clears {
                 engine.model.clear_sequence(*seq_id);
+            }
+            for (seq_id, data) in &batch.kv_restores {
+                if let Err(e) = engine.model.state_seq_load(*seq_id, data) {
+                    // The scheduler already told the request how much it may skip, so
+                    // a failed restore would leave it reading cells that were never
+                    // written. Wipe the sequence and let it re-prefill from scratch:
+                    // the following trim then bounds an empty sequence, which is a
+                    // no-op, and the request is merely slower rather than wrong.
+                    tracing::warn!(seq_id, "prompt-cache restore failed: {e} — re-prefilling");
+                    engine.model.clear_sequence(*seq_id);
+                    engine.scheduler.invalidate_restore(*seq_id);
+                }
             }
             for (seq_id, keep_from) in &batch.kv_trims {
                 engine.model.trim_sequence(*seq_id, *keep_from);

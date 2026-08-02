@@ -930,9 +930,12 @@ async fn test_api_show_known_model() {
     // Regression: these came from the FILENAME and were reported as empty strings and
     // "unknown". A resident model must answer for itself.
     assert_eq!(v["model_info"]["fox.resident"], true, "{v}");
-    assert_ne!(
+    // The stub genuinely cannot report a parameter count, so it says so. That is the
+    // point: an exact value or "unknown", never a plausible-looking estimate. (Against
+    // a real model this reads e.g. "1.2B" — verified by hand, not assertable here.)
+    assert_eq!(
         v["details"]["parameter_size"], "unknown",
-        "a loaded model must report a real parameter size: {v}"
+        "a backend that cannot count parameters must not guess: {v}"
     );
     assert!(
         v["parameters"].as_str().unwrap().contains("num_ctx"),

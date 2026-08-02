@@ -106,6 +106,51 @@ fn meta_str(model: *const ffi::llama_model, key: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
+/// Number of threads llama.cpp should use for compute.
+///
+/// llama.cpp's own default is `GGML_DEFAULT_N_THREADS` = 4 (marked
+/// `// TODO: better default` in `ggml.h`) and applies regardless of machine —
+/// leaving it alone means fox uses 4 threads on a 24-core box, roughly halving
+/// CPU-backend throughput. `llama-server` doesn't inherit that default either;
+/// it resolves `n_threads` from `common_cpu_get_num_math()`.
+///
+/// Mirrors `common_cpu_get_num_physical_cores()` (`common/common.cpp`): on
+/// Linux, count distinct `thread_siblings` masks, which yields *physical*
+/// cores. Physical rather than logical is deliberate — the two SMT siblings of
+/// one core share execution units, so counting them doubles thread count without
+/// doubling math throughput and typically costs performance for this workload.
+/// Falls back to half the logical CPUs (a reasonable SMT-aware guess) and then
+/// to llama.cpp's own 4.
+#[cfg(not(fox_stub))]
+fn resolve_n_threads() -> i32 {
+    if let Some(n) = std::env::var("FOX_N_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut siblings = std::collections::HashSet::new();
+        for cpu in 0..u32::MAX {
+            let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings");
+            match std::fs::read_to_string(&path) {
+                Ok(line) => {
+                    siblings.insert(line.trim().to_string());
+                }
+                Err(_) => break, // no more CPUs
+            }
+        }
+        if !siblings.is_empty() {
+            return siblings.len() as i32;
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1) as i32)
+        .unwrap_or(4)
+}
+
 /// Resolve the per-head dimension for KV cache sizing.
 ///
 /// `n_embd / n_head` is WRONG for architectures that pin an explicit head
@@ -629,6 +674,11 @@ impl LlamaCppModel {
         // of a possible 4 under sustained load) — see
         // docs/design/rocm-benchmarking-2026-08.md's "Known limitation".
         ctx_params.kv_unified = true;
+        // Never inherit llama.cpp's 4-thread default — see resolve_n_threads().
+        let n_threads = resolve_n_threads();
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = n_threads;
+        tracing::debug!(n_threads, "llama.cpp compute threads");
         // AUTO (-1): let llama.cpp enable flash attention only when the active
         // backend supports it for this model/KV type. Forcing ENABLED (1) caused
         // decode failures and garbage output on Vulkan / some ROCm setups and with
@@ -805,6 +855,9 @@ impl LlamaCppModel {
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
         ctx_params.kv_unified = true; // see load() for why
+        let n_threads = resolve_n_threads(); // see load() for why
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = n_threads;
         ctx_params.flash_attn_type = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO (see load())
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;

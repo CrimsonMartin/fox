@@ -739,6 +739,7 @@ mod tests {
             seed: Some(42),
             num_predict: Some(64),
             stop: None,
+            ..Default::default()
         };
         let (params, max_tokens) = sampling_from_ollama(Some(&opts), false, -1);
         assert_eq!(max_tokens, 64);

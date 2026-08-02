@@ -36,6 +36,29 @@ pub async fn ollama_chat(
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Honour the request's `keep_alive` (previously parsed and thrown away, so a
+    // client asking to keep a model warm — or drop it promptly — could not tell that
+    // nothing happened). `Immediate` is applied after the response instead, below.
+    let keep_alive = crate::api::types::parse_keep_alive(req.keep_alive.as_ref());
+    match keep_alive {
+        Some(crate::api::types::KeepAlive::Forever) => {
+            state.registry.set_keep_alive(&req.model, None)
+        }
+        Some(crate::api::types::KeepAlive::Secs(n)) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::from_secs(n))),
+        // `0` = "unload once this request is done". Expressed as a zero TTL rather
+        // than an explicit unload: the eviction pass already refuses to drop a model
+        // with work in flight (`is_busy`), so this cannot kill the very request that
+        // asked for it — including a stream the handler has already returned.
+        // Divergence from Ollama, deliberate: the unload lands on the next eviction
+        // tick (within 60s) rather than the instant the response ends.
+        Some(crate::api::types::KeepAlive::Immediate) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::ZERO)),
+        None => {}
+    }
+
     // Real `load_duration` — ~0 when the model was already resident.
     let load_ns = start.elapsed().as_nanos() as u64;
 
@@ -134,6 +157,20 @@ pub async fn ollama_chat(
 
     let stream_mode = req.stream.unwrap_or(true);
     let show_thinking_in_output = use_thinking && !stream_mode;
+
+    if let Some(unsupported) = req
+        .options
+        .as_ref()
+        .map(|o| o.unsupported_options())
+        .filter(|v| !v.is_empty())
+    {
+        tracing::warn!(
+            model = %req.model,
+            options = %unsupported.join(", "),
+            "ignoring unsupported Ollama options — fox accepts them for compatibility \
+             but does not act on them"
+        );
+    }
 
     let (mut sampling, max_tokens) = sampling_from_ollama(
         req.options.as_ref(),

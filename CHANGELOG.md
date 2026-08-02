@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ollama `keep_alive` was parsed and never applied.** A client asking to keep a
+  model warm, or to drop it promptly, got a `200` and no effect — and the test
+  only asserted that `200`, so the field being inert was invisible. Now honoured
+  per request: a duration string (`"5m"`, `"30s"`, `"500ms"`) or a number of
+  seconds sets that model's idle TTL, a negative value pins it against timed
+  eviction, and `0` sets a zero TTL so the next eviction pass drops it. The
+  eviction task now runs even when the server-wide `--keep-alive-secs` is `0`,
+  since a request can set a TTL where the server has none — otherwise the field
+  would have stayed inert in exactly that configuration. Deliberate divergence
+  from Ollama: `keep_alive: 0` unloads on the next eviction tick (within 60s)
+  rather than the instant the response ends, which also means it can never kill
+  the request that asked for it (`is_busy` guards the pass).
+
+- **Ollama options silently dropped by serde** (`num_ctx`, `num_keep`,
+  `typical_p`, `mirostat`, `mirostat_tau`, `mirostat_eta`, `penalize_newline`)
+  are now declared and reported. fox does not implement them — `num_ctx` would
+  need a model reload, `num_keep` exists only as the server-wide
+  `--context-keep`, and the samplers are absent for the reasons in
+  `docs/design/llama-server-gap-analysis.md` §3 — so setting one logs a warning
+  naming it, instead of vanishing. They are not rejected: clients send Ollama's
+  defaults on every request, and a 400 would break them.
+
 - **JSON-Schema→GBNF dropped optional properties.** A schema like
   `{properties: {a, b}, required: [a]}` produced a grammar that *forbade* `b`
   entirely, so guided decoding could never emit a declared optional field. This

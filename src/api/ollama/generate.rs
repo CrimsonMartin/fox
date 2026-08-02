@@ -31,6 +31,29 @@ pub async fn ollama_generate(
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Honour the request's `keep_alive` (previously parsed and thrown away, so a
+    // client asking to keep a model warm — or drop it promptly — could not tell that
+    // nothing happened). `Immediate` is applied after the response instead, below.
+    let keep_alive = crate::api::types::parse_keep_alive(req.keep_alive.as_ref());
+    match keep_alive {
+        Some(crate::api::types::KeepAlive::Forever) => {
+            state.registry.set_keep_alive(&req.model, None)
+        }
+        Some(crate::api::types::KeepAlive::Secs(n)) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::from_secs(n))),
+        // `0` = "unload once this request is done". Expressed as a zero TTL rather
+        // than an explicit unload: the eviction pass already refuses to drop a model
+        // with work in flight (`is_busy`), so this cannot kill the very request that
+        // asked for it — including a stream the handler has already returned.
+        // Divergence from Ollama, deliberate: the unload lands on the next eviction
+        // tick (within 60s) rather than the instant the response ends.
+        Some(crate::api::types::KeepAlive::Immediate) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::ZERO)),
+        None => {}
+    }
+
     // Real `load_duration`: ~0 when the model was already resident, which is the
     // honest answer, and the actual load cost when this request triggered it.
     let load_ns = start.elapsed().as_nanos() as u64;
@@ -97,6 +120,20 @@ pub async fn ollama_generate(
     let supports_thinking = entry.engine.supports_thinking();
 
     // /api/generate always suppresses thinking from output (no `thinking` field in response).
+    if let Some(unsupported) = req
+        .options
+        .as_ref()
+        .map(|o| o.unsupported_options())
+        .filter(|v| !v.is_empty())
+    {
+        tracing::warn!(
+            model = %req.model,
+            options = %unsupported.join(", "),
+            "ignoring unsupported Ollama options — fox accepts them for compatibility \
+             but does not act on them"
+        );
+    }
+
     let (mut sampling, max_tokens) =
         sampling_from_ollama(req.options.as_ref(), false, state.repeat_last_n);
     sampling.initial_in_thinking = supports_thinking;
@@ -372,17 +409,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ollama_generate_keep_alive_accepted() {
+    async fn keep_alive_is_applied_not_just_accepted() {
+        // Regression: `keep_alive` was parsed and thrown away, and the test only
+        // asserted a 200 — which it returned either way, so the field being inert
+        // was invisible.
         let dir = tempfile::tempdir().unwrap();
         let (state, _entry) = make_test_state("stub", dir.path());
-        let app = make_router(&state);
-        let body = serde_json::json!({
-            "model": "stub",
-            "prompt": "Hi",
-            "stream": false,
-            "keep_alive": "5m"
-        });
-        let resp = post_json(app, "/api/generate", body).await;
+        let body = |ka: serde_json::Value| serde_json::json!({"model": "stub", "prompt": "Hi", "stream": false, "keep_alive": ka});
+
+        let resp = post_json(
+            make_router(&state),
+            "/api/generate",
+            body(serde_json::json!("5m")),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state
+                .registry
+                .keep_alive_override
+                .get("stub")
+                .map(|e| *e.value()),
+            Some(Some(std::time::Duration::from_secs(300))),
+            "\"5m\" must reach the registry"
+        );
+
+        // A negative value pins the model against timed eviction.
+        let resp = post_json(
+            make_router(&state),
+            "/api/generate",
+            body(serde_json::json!(-1)),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state
+                .registry
+                .keep_alive_override
+                .get("stub")
+                .map(|e| *e.value()),
+            Some(None),
+            "a negative keep_alive must mean never evict"
+        );
+
+        // Zero becomes a zero TTL, so the next eviction pass drops it.
+        let resp = post_json(
+            make_router(&state),
+            "/api/generate",
+            body(serde_json::json!(0)),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state
+                .registry
+                .keep_alive_override
+                .get("stub")
+                .map(|e| *e.value()),
+            Some(Some(std::time::Duration::ZERO))
+        );
     }
 }

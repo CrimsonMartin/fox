@@ -24,6 +24,10 @@ pub struct ModelRegistry {
     engines: DashMap<String, Arc<EngineEntry>>,
     lru: Mutex<lru::LruCache<String, ()>>,
     pub(crate) last_used: DashMap<String, Instant>,
+    /// Per-model keep-alive override set by a request's `keep_alive` field. Absent
+    /// means "use the server-wide `--keep-alive-secs`". `None` inside the map means
+    /// "never evict on a timer" (Ollama's negative values).
+    pub(crate) keep_alive_override: DashMap<String, Option<Duration>>,
     config: RegistryConfig,
     aliases: HashMap<String, String>,
     /// Serializes model loading so two concurrent requests for the same cold model
@@ -40,6 +44,7 @@ impl ModelRegistry {
             engines: DashMap::new(),
             lru: Mutex::new(lru::LruCache::new(cap)),
             last_used: DashMap::new(),
+            keep_alive_override: DashMap::new(),
             config,
             aliases,
             load_lock: tokio::sync::Mutex::new(()),
@@ -49,9 +54,10 @@ impl ModelRegistry {
     /// Spawn a background task that evicts models idle longer than `keep_alive_secs`.
     /// Uses a weak reference so the task stops automatically when the registry is dropped.
     pub fn start_eviction_task(self: Arc<Self>) {
-        if self.config.keep_alive_secs == 0 {
-            return;
-        }
+        // Runs even when `keep_alive_secs == 0` (server default: never evict on a
+        // timer), because a request's own `keep_alive` can now set a TTL for one
+        // model. `evict_expired` decides per model; bailing out here would make the
+        // per-request field silently inert again, which is the bug being fixed.
         let weak = Arc::downgrade(&self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -185,6 +191,9 @@ impl ModelRegistry {
         let removed = self.engines.remove(name).is_some();
         if removed {
             self.last_used.remove(name);
+            // Drop the per-request TTL too, or a reloaded model would silently
+            // inherit the keep_alive of whatever request last touched the old one.
+            self.keep_alive_override.remove(name);
             if let Ok(mut lru) = self.lru.lock() {
                 lru.pop(name);
             }
@@ -223,16 +232,35 @@ impl ModelRegistry {
             .unwrap_or(false)
     }
 
-    pub(crate) fn evict_expired(&self) {
-        if self.config.keep_alive_secs == 0 {
-            return;
+    /// Record a per-request `keep_alive` for `model`, overriding the server default
+    /// until another request changes it. `None` pins the model against timed eviction.
+    ///
+    /// This is the whole point of honouring the field: the value was previously parsed
+    /// and thrown away, so a client asking to keep a model warm — or to drop it
+    /// promptly — had no way to tell that nothing happened.
+    pub(crate) fn set_keep_alive(&self, model: &str, ttl: Option<Duration>) {
+        self.keep_alive_override.insert(model.to_string(), ttl);
+    }
+
+    /// Effective idle TTL for `model`: its override if one was set, else the
+    /// server-wide default. `None` = never evict on a timer.
+    fn effective_keep_alive(&self, model: &str) -> Option<Duration> {
+        match self.keep_alive_override.get(model) {
+            Some(o) => *o.value(),
+            None => (self.config.keep_alive_secs > 0)
+                .then(|| Duration::from_secs(self.config.keep_alive_secs)),
         }
+    }
+
+    pub(crate) fn evict_expired(&self) {
         let now = Instant::now();
-        let keep_alive = Duration::from_secs(self.config.keep_alive_secs);
         let expired: Vec<String> = self
             .last_used
             .iter()
-            .filter(|e| now.duration_since(*e.value()) >= keep_alive)
+            .filter(|e| {
+                self.effective_keep_alive(e.key())
+                    .is_some_and(|ttl| now.duration_since(*e.value()) >= ttl)
+            })
             .map(|e| e.key().clone())
             .collect();
         for name in expired {

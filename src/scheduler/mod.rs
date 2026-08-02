@@ -764,6 +764,74 @@ mod tests {
         );
     }
 
+    /// The budget must reflect the sharing, not just the compute. Before this, eight
+    /// clients behind one system prompt held 264 blocks where ~54 were in use: each
+    /// skipped the prefill but still reserved its own blocks for the shared positions.
+    #[test]
+    fn shared_prefix_is_charged_once_and_fully_returned() {
+        let kv = test_kv(16);
+        let block_size = kv.block_size();
+        let sched = Scheduler::new(kv.clone(), 8);
+        let shared: Vec<i32> = (1..=128).collect();
+
+        let mut _keep = Vec::new();
+        for i in 0..8u64 {
+            let mut prompt = shared.clone();
+            prompt.extend([i as i32 + 500, i as i32 + 900]);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            _keep.push(rx);
+            sched
+                .submit(InferenceRequest::new(
+                    i + 1,
+                    prompt,
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+        }
+
+        // Each arrival is deferred until its donor is decoding, so drain step by step:
+        // prefill whoever was admitted, then let the next wave copy from them.
+        for _ in 0..8 {
+            let batch = sched.schedule_step();
+            for id in &batch.prefill {
+                sched.update_after_token(*id, 99, true);
+            }
+        }
+
+        let per_request = (128usize + 2 + 8).div_ceil(block_size);
+        let allocated = kv.allocated_blocks();
+        let n = sched.running_batch.lock().unwrap().len();
+        assert!(n > 1, "the burst must actually be admitted, got {n}");
+
+        // Each sharer still needs private blocks for the positions past the shared
+        // prefix; what it must NOT need is its own copy of the prefix itself.
+        let naive = per_request * n;
+        assert!(
+            allocated < naive,
+            "shared prefix charged {n} times: {allocated} blocks vs {naive} naive"
+        );
+        let shared_blocks = 128 / block_size;
+        assert!(
+            allocated <= naive - shared_blocks * (n - 1),
+            "every sharer past the first must avoid re-charging {shared_blocks} prefix blocks: \
+             {allocated} blocks, naive {naive}"
+        );
+
+        // Ref-counting is only correct if it also unwinds: a block referenced by four
+        // sequences must return to the pool exactly once, not stay pinned forever.
+        for i in 0..8u64 {
+            sched.mark_finished(i + 1, StopReason::EngineError);
+        }
+        sched.schedule_step();
+        assert_eq!(
+            kv.allocated_blocks(),
+            0,
+            "shared blocks must be fully returned once every referent is gone"
+        );
+    }
+
     /// Concurrent requests behind one system prompt must share its KV, not each hold
     /// a copy. This is the case `select` cannot serve: when they arrive together no
     /// slot is idle, so nothing is inheritable — but a *live* sequence can be copied.

@@ -429,34 +429,23 @@ impl InferenceEngine {
     }
 
     pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Vec<Logits>)>> {
-        // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
-        // allocate a new exclusive copy before llama.cpp writes to it.
+        // There is deliberately NO copy-on-write here, and that is load-bearing rather
+        // than an omission.
         //
-        // With the current prefix-caching scheme (blocks are transferred exclusively on
-        // cache hit), shared blocks arise only if `retain_block` was called explicitly.
-        // This guard makes the decode path safe for future scenarios where multiple active
-        // requests share KV blocks.
-        for req_id in req_ids {
-            let requests = self.scheduler.get_running(&[*req_id]);
-            let Some(req) = requests.first() else {
-                continue;
-            };
-            for (logical_idx, &block_id) in req.page_table.entries.iter().enumerate() {
-                if self.kv_cache.is_shared(block_id) {
-                    if let Some(new_block_id) = self.kv_cache.copy_on_write(block_id) {
-                        self.scheduler
-                            .cow_update_page_table(*req_id, logical_idx, new_block_id);
-                        tracing::debug!(
-                            request_id = req_id,
-                            logical_idx,
-                            old_block = block_id,
-                            new_block = new_block_id,
-                            "CoW: privatised shared KV block before decode"
-                        );
-                    }
-                }
-            }
-        }
+        // fox's blocks are an admission budget, not addresses — they are never handed to
+        // llama.cpp (see scheduler/slots.rs). When a request copies a shared prefix, the
+        // cells really are shared inside llama.cpp: `seq_cp` under `kv_unified` shares
+        // them rather than duplicating the buffer. So privatising a block here would
+        // allocate budget for memory that nobody occupies, re-inflating exactly the
+        // over-count the sharing exists to remove — while copying no KV, because there is
+        // no KV at this layer to copy.
+        //
+        // What makes that safe is the invariant enforced where the sharing is set up: only
+        // WHOLE blocks below `n_past` are shared, so the block straddling the divergence
+        // point stays private. A shared block therefore never receives a write, and CoW
+        // has nothing to protect. If that floor-division ever becomes a `div_ceil`, this
+        // reasoning collapses and two live sequences start writing the same budgeted
+        // block.
 
         let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests

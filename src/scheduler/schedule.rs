@@ -303,6 +303,51 @@ impl Scheduler {
                 // LCP match would be computed against tokens that are not resident.
                 let resident = req.prompt_tokens[..n_past.min(req.prompt_tokens.len())].to_vec();
                 slots.set_resident(choice.index, resident);
+
+                // Charge the shared prefix ONCE. `seq_cp` under `kv_unified` shares
+                // llama.cpp's cells rather than duplicating them, so a branch that
+                // allocated its own blocks for those positions would be reserving a
+                // budget for memory nobody occupies — measured as 264 blocks held
+                // where ~54 were in use. Reference the donor's blocks instead and
+                // hand back the duplicates.
+                //
+                // Only WHOLE blocks are shared (floor, not ceil), and that is the
+                // invariant the whole scheme rests on: the block straddling `n_past`
+                // also covers positions this branch will write, so it must stay
+                // private. With floor division no shared block ever receives a write,
+                // which is what makes it safe to not copy-on-write them (see
+                // `run_decode`). An off-by-one to `div_ceil` here would silently
+                // corrupt the budget of two live sequences.
+                let block_size = self.kv_cache.block_size();
+                let shared = n_past / block_size;
+                if shared > 0 {
+                    if let Some(donor) = running.iter().find(|r| r.kv_seq_id == parent_seq) {
+                        let donor_blocks: Vec<_> = donor
+                            .page_table
+                            .block_ids()
+                            .iter()
+                            .take(shared)
+                            .copied()
+                            .collect();
+                        if donor_blocks.len() == shared {
+                            for &b in &donor_blocks {
+                                self.kv_cache.retain_block(b);
+                            }
+                            let mut own = req.page_table.block_ids().to_vec();
+                            let replaced: Vec<_> = own.drain(..shared).collect();
+                            self.kv_cache.free_blocks(&replaced);
+                            let mut merged = donor_blocks;
+                            merged.extend(own);
+                            req.page_table = PageTable::new(merged);
+                            debug!(
+                                request_id = id,
+                                donor_seq = parent_seq,
+                                shared_blocks = shared,
+                                "sharing the donor's prefix blocks instead of duplicating them"
+                            );
+                        }
+                    }
+                }
             } else {
                 req.prefix_seq_id = None;
             }
@@ -358,23 +403,6 @@ impl Scheduler {
             kv_clears,
             kv_saves,
             kv_restores,
-        }
-    }
-
-    /// Replace the physical block at `logical_idx` in the request's page table with `new_block_id`.
-    ///
-    /// Called by the engine's CoW path after `KVCacheManager::copy_on_write` has allocated a
-    /// new exclusive block for a request that was sharing a block with the prefix cache.
-    pub fn cow_update_page_table(&self, req_id: u64, logical_idx: usize, new_block_id: usize) {
-        if let Ok(mut running) = self.running_batch.lock() {
-            for req in running.iter_mut() {
-                if req.id == req_id {
-                    if let Some(entry) = req.page_table.entries.get_mut(logical_idx) {
-                        *entry = new_block_id;
-                    }
-                    break;
-                }
-            }
         }
     }
 

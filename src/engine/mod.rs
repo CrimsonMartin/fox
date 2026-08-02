@@ -275,6 +275,19 @@ impl InferenceEngine {
         self.scheduler.slots_snapshot()
     }
 
+    /// Blocks actually held in the pool, and its capacity.
+    ///
+    /// Not the sum of the per-slot counts in `slots_snapshot`: a block shared by a
+    /// prefix copy is counted once by *every* slot referencing it, so that sum cannot
+    /// fall when sharing works and reading it as memory use overstates it by exactly
+    /// the amount that was saved. This is the pool's own occupancy.
+    pub fn kv_blocks(&self) -> (usize, usize) {
+        (
+            self.kv_cache.allocated_blocks(),
+            self.kv_cache.total_blocks(),
+        )
+    }
+
     /// The loaded model's inspectable facts — architecture, dimensions, capabilities.
     /// Read from the model itself, never reconstructed from its filename, which is
     /// what `/props` and `/api/show` need to stop guessing.

@@ -168,6 +168,13 @@ pub async fn props(State(state): State<AppState>) -> Json<PropsResponse> {
 pub struct SlotsResponse {
     pub model: Option<String>,
     pub slots: Vec<SlotSnapshot>,
+    /// Blocks held in the KV pool, and its capacity. Summing `slots[].blocks` does
+    /// NOT give this: a shared prefix block is counted by each slot that references
+    /// it, so only this figure falls when sharing takes effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_blocks_used: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_blocks_total: Option<usize>,
 }
 
 pub async fn slots(State(state): State<AppState>) -> Json<SlotsResponse> {
@@ -179,14 +186,21 @@ pub async fn slots(State(state): State<AppState>) -> Json<SlotsResponse> {
         .or_else(|| state.registry.loaded().into_iter().next());
 
     match resident {
-        Some((name, entry)) => Json(SlotsResponse {
-            model: Some(name),
-            slots: entry.engine.slots_snapshot(),
-        }),
+        Some((name, entry)) => {
+            let (used, total) = entry.engine.kv_blocks();
+            Json(SlotsResponse {
+                model: Some(name),
+                slots: entry.engine.slots_snapshot(),
+                kv_blocks_used: Some(used),
+                kv_blocks_total: Some(total),
+            })
+        }
         // No model resident yet: an empty list, not a 404. Nothing is wrong.
         None => Json(SlotsResponse {
             model: None,
             slots: Vec::new(),
+            kv_blocks_used: None,
+            kv_blocks_total: None,
         }),
     }
 }

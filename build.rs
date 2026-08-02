@@ -78,23 +78,23 @@ fn main() {
         .define("BUILD_SHARED_LIBS", "ON")
         // Each backend (.so) is dlopen-ed at runtime — zero CUDA dep in the binary.
         .define("GGML_BACKEND_DL", "ON")
-        // GGML_NATIVE (CPU arch-specific optimizations) is incompatible with GGML_BACKEND_DL.
-        // Without it the CPU backend is built for a generic baseline — no AVX2/AVX-512 —
-        // which measurably costs latency on the CPU backend (~4.4ms of a 35.9ms
-        // single-request TTFT on a Zen 5 box; see
-        // docs/design/rocm-benchmarking-2026-08.md).
+        // GGML_NATIVE (CPU arch-specific optimizations) is incompatible with
+        // GGML_BACKEND_DL, so the CPU backend is built without host-specific tuning.
+        // This is NOT the same as falling back to a bare baseline: measured on a Zen 5
+        // host, the resulting libggml-cpu.so performs the same as a hand-built AVX-512
+        // (zen4) variant, and 2.7x faster than the true baseline (x64) variant. See
+        // docs/design/rocm-benchmarking-2026-08.md.
         .define("GGML_NATIVE", "OFF")
-        // ...but the portability/performance trade-off above is not actually forced.
-        // GGML_CPU_ALL_VARIANTS builds the CPU backend once per instruction-set tier
-        // (x64, sse42, haswell, skylakex, zen4, ...) as separate .so files and lets
-        // ggml pick the best one the host supports at runtime — it *requires*
-        // GGML_BACKEND_DL, which fox already sets. That keeps one portable binary and
-        // still gets AVX-512 where available.
+        // If a host *does* land on a poor tier, GGML_CPU_ALL_VARIANTS builds the CPU
+        // backend once per instruction-set tier (x64, sse42, haswell, skylakex, zen4,
+        // ...) as separate .so files and lets ggml pick the best supported one at
+        // runtime — it *requires* GGML_BACKEND_DL, which fox already sets, so one
+        // portable binary still gets AVX-512.
         //
-        // Off by default because it multiplies CPU-backend compile time by the number
-        // of tiers (~14 on x86), which is a poor trade for a GPU-backed build where
-        // the CPU backend barely runs. Opt in with FOX_CPU_ALL_VARIANTS=1 — worth it
-        // for CPU-only deployments and for distributing a single optimised binary.
+        // Off by default: it multiplies CPU-backend compile time by the number of tiers
+        // (12s -> 45s here), and on the one machine this was measured it bought nothing
+        // over the default build. Opt in with FOX_CPU_ALL_VARIANTS=1 after checking
+        // what your host actually loads (FOX_LLAMA_LOG=1 prints the chosen .so).
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_TOOLS", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")

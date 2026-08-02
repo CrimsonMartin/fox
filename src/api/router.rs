@@ -88,6 +88,9 @@ pub fn router(
         )
         .route("/health", get(crate::api::v1::models::health))
         .route("/metrics", get(crate::api::v1::models::metrics_handler))
+        .route("/infill", axum::routing::post(super::v1::infill::infill))
+        .route("/rerank", axum::routing::post(super::v1::rerank::rerank))
+        .route("/v1/rerank", axum::routing::post(super::v1::rerank::rerank))
         // Tokenizer utilities (llama-server parity) — no inference, just the
         // loaded model's vocabulary and chat template.
         .route(

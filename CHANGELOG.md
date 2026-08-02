@@ -72,6 +72,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /infill`** — fill-in-the-middle completion, what editor plugins call to
+  fill in code at the cursor. Emits the FIM token layout the model was trained on
+  (`[SUF] suffix [PRE] prefix [MID]`; suffix first, so the model reads what it must
+  join up to before it starts writing) and accepts `input_extra` for repo-level
+  context. A model whose vocabulary has no FIM tokens is **rejected with an
+  explanation** rather than answered: prompting a chat model for infill produces
+  fluent text that ignores the suffix, and the caller has no way to tell.
+  Verified against a real FIM-capable model — the completion joined the suffix
+  exactly.
+
+- **`POST /rerank` and `/v1/rerank`** — score documents against a query with a
+  reranker model. Accepts both the Jina/Cohere (`documents`) and TEI (`texts`)
+  spellings, plus `top_n` and `return_text`, and preserves each result's original
+  index across sorting. No new flag was needed: fox never sets `pooling_type`, so
+  llama.cpp resolves it from the model's own metadata — `RANK` for a reranker,
+  `NONE` for anything else — and a `NULL` from `llama_get_embeddings_seq` is
+  exactly the signal that the model has no relevance head, which is rejected with
+  a clear error instead of a score invented from a mean-pooled vector.
+  **Partially verified**: the rejection path is confirmed against a real
+  non-reranker model, but a *successful* rerank has not been run, because no
+  reranker GGUF was available locally.
+
 - **`POST /tokenize`, `/detokenize`, `/apply-template`** — llama-server's tokenizer
   utilities (`server-context.cpp:4899-4956, 4846-4856`). No inference involved, just
   the loaded model's vocabulary and chat template; clients use them to count tokens

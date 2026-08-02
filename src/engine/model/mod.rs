@@ -124,6 +124,20 @@ pub struct RecommendedSampling {
     pub top_k: Option<u32>,
 }
 
+/// A model's fill-in-the-middle special tokens.
+///
+/// FIM models are trained on a specific token order — llama.cpp's own infill path and
+/// every mainstream code model use *suffix before prefix* (`[SUF] suffix [PRE] prefix
+/// [MID]`), which lets the model see what it must join up to before it starts writing.
+/// Emitting them prefix-first still produces fluent text, just text that ignores the
+/// suffix, so the ordering is load-bearing rather than cosmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FimTokens {
+    pub prefix: i32,
+    pub suffix: i32,
+    pub middle: i32,
+}
+
 /// Model architecture configuration.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
@@ -361,6 +375,18 @@ pub trait Model: Send + Sync {
 
     fn tokenize(&self, text: &str) -> Result<Vec<i32>>;
 
+    /// The model's fill-in-the-middle special tokens, if it has them:
+    /// `(prefix, suffix, middle)`. `None` for any model not trained for FIM — most
+    /// chat models — which is what `/infill` checks before accepting a request.
+    ///
+    /// These are a property of the vocabulary, not something a prompt can fake: a
+    /// model without them has no notion of "generate between these two spans", so
+    /// synthesising a prompt would produce plausible-looking nonsense. Default `None`
+    /// so the stub and any non-llama.cpp model report honestly.
+    fn fim_tokens(&self) -> Option<FimTokens> {
+        None
+    }
+
     fn token_to_piece(&self, token: i32) -> Result<String>;
 
     /// Returns the raw bytes produced by `llama_token_to_piece` without UTF-8
@@ -516,6 +542,27 @@ pub trait Model: Send + Sync {
     /// Run a forward pass in embedding mode and return the sequence embedding vector.
     /// Uses sequence slot 0; caller must not have an active inference request on slot 0.
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>>;
+
+    /// Score one `(query, document)` pair for reranking: a single relevance number
+    /// read from the model's classification head.
+    ///
+    /// Only a reranker model can answer this. fox never sets `pooling_type`, so it
+    /// stays `UNSPECIFIED` and llama.cpp resolves it from the model's own metadata
+    /// (`llama-context.cpp:182-188`) — `RANK` for a reranker, `NONE` for everything
+    /// else. Under `NONE`, `llama_get_embeddings_seq` returns NULL, which is exactly
+    /// the signal used to reject a non-reranker model with a clear error instead of
+    /// inventing a score from a mean-pooled vector.
+    ///
+    /// `Err` when the model is not a reranker or the forward pass fails.
+    fn rerank_score(&self, _tokens: &[i32]) -> Result<f32> {
+        anyhow::bail!("this model backend does not support reranking")
+    }
+
+    /// The vocabulary's separator token, used to join query and document in the
+    /// rerank prompt. `None` when the model has no SEP.
+    fn sep_token_id(&self) -> Option<i32> {
+        None
+    }
 
     /// Return the text forms of the model's EOS and EOT tokens.
     /// Used as base stop sequences so generation halts on model-native terminators

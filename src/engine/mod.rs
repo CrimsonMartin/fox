@@ -137,6 +137,23 @@ impl InferenceEngine {
         self.model.tokenize(text)
     }
 
+    /// Score one (query, document) pair for reranking. `Err` when the model has no
+    /// relevance head — see `Model::rerank_score` for how that is detected.
+    pub fn rerank_score(&self, tokens: &[i32]) -> anyhow::Result<f32> {
+        self.model.rerank_score(tokens)
+    }
+
+    /// The vocabulary's separator token, used to join query and document.
+    pub fn sep_token_id(&self) -> Option<i32> {
+        self.model.sep_token_id()
+    }
+
+    /// The model's fill-in-the-middle tokens, or `None` if it has none — which is
+    /// how `/infill` tells a code model from a chat model.
+    pub fn fim_tokens(&self) -> Option<crate::engine::model::FimTokens> {
+        self.model.fim_tokens()
+    }
+
     /// Turn token ids back into text.
     ///
     /// Concatenates the raw piece bytes before decoding, rather than decoding each

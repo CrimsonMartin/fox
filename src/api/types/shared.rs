@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Deserialize the OpenAI `stop` field which can be either a string or an array of strings.
-pub(super) fn deserialize_stop<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+pub(crate) fn deserialize_stop<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
 {

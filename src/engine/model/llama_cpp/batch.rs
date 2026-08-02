@@ -1018,6 +1018,72 @@ impl LlamaCppModel {
         }
     }
 
+    /// Score one (query, document) pair via the model's classification head.
+    ///
+    /// Deliberately does NOT reuse `do_get_embeddings`: that one marks every token
+    /// for output and mean-pools by hand precisely because the generation context
+    /// resolves to `pooling_type = NONE`. A reranker resolves to `RANK` instead, where
+    /// llama.cpp writes one score per *sequence* and only `llama_get_embeddings_seq`
+    /// can read it. A NULL return there is the model telling us it is not a reranker.
+    pub(super) fn do_rerank_score(&self, tokens: &[i32]) -> Result<f32> {
+        if tokens.is_empty() {
+            return Err(anyhow!("cannot score an empty sequence"));
+        }
+        let n_tokens = tokens.len() as i32;
+
+        let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, 1) };
+        for (i, &token) in tokens.iter().enumerate() {
+            unsafe {
+                *batch.token.add(i) = token;
+                *batch.pos.add(i) = i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                let arr = *batch.seq_id.add(i);
+                // Same dedicated slot as embeddings: outside the scheduler's pool, so
+                // scoring can never clobber a live generation's KV.
+                *arr.add(0) = self.embed_seq_id;
+                // RANK pooling reduces over the sequence; only the last token needs
+                // its output flagged.
+                *batch.logits.add(i) = i8::from(i + 1 == tokens.len());
+            }
+            batch.n_tokens += 1;
+        }
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+
+        unsafe { ffi::llama_set_embeddings(ctx, true) };
+        let ret = unsafe { ffi::llama_decode(ctx, batch) };
+
+        let cleanup = |ctx: *mut ffi::llama_context| unsafe {
+            let mem = ffi::llama_get_memory(ctx as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_rm(mem, self.embed_seq_id, 0, -1);
+            }
+            ffi::llama_set_embeddings(ctx, false);
+            ffi::llama_batch_free(batch);
+        };
+
+        if ret != 0 {
+            cleanup(ctx);
+            return Err(anyhow!("llama_decode (rerank) failed: {}", ret));
+        }
+
+        let ptr = unsafe { ffi::llama_get_embeddings_seq(ctx, self.embed_seq_id) };
+        if ptr.is_null() {
+            cleanup(ctx);
+            return Err(anyhow!(
+                "model has no reranking head — llama.cpp resolved its pooling type to \
+                 something other than RANK, so there is no sequence score to read"
+            ));
+        }
+        let score = unsafe { *ptr };
+        cleanup(ctx);
+        Ok(score)
+    }
+
     pub(super) fn do_get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         if tokens.is_empty() {
             return Ok(vec![]);

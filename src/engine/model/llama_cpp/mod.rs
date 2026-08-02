@@ -930,6 +930,25 @@ impl Model for LlamaCppModel {
         self.tokenize_impl(text)
     }
 
+    fn fim_tokens(&self) -> Option<crate::engine::model::FimTokens> {
+        // llama.cpp returns LLAMA_TOKEN_NULL (-1) for a vocabulary that has no FIM
+        // tokens. All three are required: a model with only some of them cannot be
+        // driven through the infill format, and guessing the missing one would
+        // silently produce a prompt the model was never trained on.
+        let (prefix, suffix, middle) = unsafe {
+            (
+                ffi::llama_vocab_fim_pre(self.vocab),
+                ffi::llama_vocab_fim_suf(self.vocab),
+                ffi::llama_vocab_fim_mid(self.vocab),
+            )
+        };
+        (prefix >= 0 && suffix >= 0 && middle >= 0).then_some(crate::engine::model::FimTokens {
+            prefix,
+            suffix,
+            middle,
+        })
+    }
+
     fn token_to_piece(&self, token: i32) -> Result<String> {
         self.token_to_piece_impl(token)
     }
@@ -1170,6 +1189,15 @@ impl Model for LlamaCppModel {
         draft_len: usize,
     ) -> Vec<i32> {
         self.do_draft_propose(seq_id, new_tokens, base_pos, draft_len)
+    }
+
+    fn rerank_score(&self, tokens: &[i32]) -> Result<f32> {
+        self.do_rerank_score(tokens)
+    }
+
+    fn sep_token_id(&self) -> Option<i32> {
+        let sep = unsafe { ffi::llama_vocab_sep(self.vocab) };
+        (sep >= 0).then_some(sep)
     }
 
     fn vocab_fingerprint(&self) -> u64 {

@@ -764,6 +764,58 @@ mod tests {
         );
     }
 
+    /// A pool too small to admit the burst naively, but ample once the shared prefix
+    /// is charged once. Sizing the reservation after the fact left the steady state
+    /// correct and the admission decision wrong: capacity the request was never going
+    /// to hold could still turn it away.
+    #[test]
+    fn admission_reserves_only_the_blocks_past_the_shared_prefix() {
+        // 34 blocks: naively 9 per request (128 prompt + 2 + 8 generated, 16/block),
+        // so only 3 of 6 fit. Sharing the 8 whole prefix blocks drops each later
+        // arrival to 1 of its own, and all 6 fit with room to spare.
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(34 * 16, 16));
+        let sched = Scheduler::new(kv.clone(), 8);
+        let shared: Vec<i32> = (1..=128).collect();
+        assert!(
+            kv.total_blocks() < 6 * 9,
+            "the pool must be too small for the naive reservation, else this proves nothing"
+        );
+
+        let mut _keep = Vec::new();
+        for i in 0..6u64 {
+            let mut prompt = shared.clone();
+            prompt.extend([i as i32 + 500, i as i32 + 900]);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            _keep.push(rx);
+            sched
+                .submit(InferenceRequest::new(
+                    i + 1,
+                    prompt,
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+        }
+
+        for _ in 0..8 {
+            let batch = sched.schedule_step();
+            for id in &batch.prefill {
+                sched.update_after_token(*id, 99, true);
+            }
+        }
+
+        let admitted = sched.running_batch.lock().unwrap().len();
+        assert_eq!(
+            admitted,
+            6,
+            "all six must be admitted; the pool only looks full if each is charged for \
+             a prefix it shares ({} blocks of {})",
+            kv.allocated_blocks(),
+            kv.total_blocks()
+        );
+    }
+
     /// The budget must reflect the sharing, not just the compute. Before this, eight
     /// clients behind one system prompt held 264 blocks where ~54 were in use: each
     /// skipped the prefill but still reserved its own blocks for the shared positions.

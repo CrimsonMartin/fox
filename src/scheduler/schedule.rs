@@ -233,9 +233,51 @@ impl Scheduler {
 
             // Blocks are a budget, not addresses (see slots.rs): the request inherits
             // whatever the slot already holds and tops up only the difference.
+            //
+            // Resolve the donor's shared blocks BEFORE sizing the reservation. Charging
+            // for the shared prefix and handing it back afterwards leaves the steady
+            // state correct but the admission decision wrong: a burst can be turned away
+            // for capacity it was never going to hold. Sizing for what the request will
+            // actually own is what lets the sharing widen concurrency rather than only
+            // shrink the pool.
+            let block_size = self.kv_cache.block_size();
+            let fork_share: Vec<crate::kv_cache::BlockId> = match req.fork_source {
+                Some((parent_seq, fork_skip)) => {
+                    let n_past = fork_skip.min(req.n_positions().saturating_sub(1));
+                    // Whole blocks only. The block straddling the divergence point also
+                    // covers positions this request will write, so it must stay private;
+                    // this floor is what keeps a shared block write-free, which in turn
+                    // is why `run_decode` needs no copy-on-write.
+                    let want = n_past / block_size;
+                    let got: Vec<_> = running
+                        .iter()
+                        .find(|r| r.kv_seq_id == parent_seq)
+                        .map(|d| {
+                            d.page_table
+                                .block_ids()
+                                .iter()
+                                .take(want)
+                                .copied()
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if want > 0 && got.len() != want {
+                        // The donor holds fewer blocks than its prefix implies. Reserving
+                        // short here would under-budget a live request, so drop the copy
+                        // and admit normally — slower, never wrong.
+                        req.fork_source = None;
+                        Vec::new()
+                    } else {
+                        got
+                    }
+                }
+                None => Vec::new(),
+            };
+
             let needed = self.blocks_needed(&req);
+            let needed_own = needed.saturating_sub(fork_share.len());
             let have = slots.blocks_at(choice.index);
-            let top_up = needed.saturating_sub(have);
+            let top_up = needed_own.saturating_sub(have);
 
             // Make room by reclaiming idle slots — LRU first, never the slot we just
             // chose, and never a Busy one. Not preemption; see SlotTable::reclaim_lru.
@@ -283,12 +325,28 @@ impl Scheduler {
             let (seq_id, mut blocks) = slots.claim(choice.index, id);
             // Give back any surplus the previous occupant held beyond this request's
             // reservation, so a short prompt after a long one doesn't pin the pool.
-            if blocks.len() > needed {
-                let surplus = blocks.split_off(needed);
+            if blocks.len() > needed_own {
+                let surplus = blocks.split_off(needed_own);
                 self.kv_cache.free_blocks(&surplus);
             }
             blocks.extend(new_ids);
 
+            // The shared prefix goes first, so the page table still reads in position
+            // order; a reference is taken now that the request is certain to be admitted.
+            if !fork_share.is_empty() {
+                for &b in &fork_share {
+                    self.kv_cache.retain_block(b);
+                }
+                debug!(
+                    request_id = req.id,
+                    shared_blocks = fork_share.len(),
+                    own_blocks = blocks.len(),
+                    "reserving only the blocks past the donor's shared prefix"
+                );
+                let mut merged = fork_share;
+                merged.extend(blocks);
+                blocks = merged;
+            }
             req.page_table = PageTable::new(blocks);
             req.kv_seq_id = seq_id;
             // A forked branch overrides whatever the slot offered: copying the
@@ -303,51 +361,6 @@ impl Scheduler {
                 // LCP match would be computed against tokens that are not resident.
                 let resident = req.prompt_tokens[..n_past.min(req.prompt_tokens.len())].to_vec();
                 slots.set_resident(choice.index, resident);
-
-                // Charge the shared prefix ONCE. `seq_cp` under `kv_unified` shares
-                // llama.cpp's cells rather than duplicating them, so a branch that
-                // allocated its own blocks for those positions would be reserving a
-                // budget for memory nobody occupies — measured as 264 blocks held
-                // where ~54 were in use. Reference the donor's blocks instead and
-                // hand back the duplicates.
-                //
-                // Only WHOLE blocks are shared (floor, not ceil), and that is the
-                // invariant the whole scheme rests on: the block straddling `n_past`
-                // also covers positions this branch will write, so it must stay
-                // private. With floor division no shared block ever receives a write,
-                // which is what makes it safe to not copy-on-write them (see
-                // `run_decode`). An off-by-one to `div_ceil` here would silently
-                // corrupt the budget of two live sequences.
-                let block_size = self.kv_cache.block_size();
-                let shared = n_past / block_size;
-                if shared > 0 {
-                    if let Some(donor) = running.iter().find(|r| r.kv_seq_id == parent_seq) {
-                        let donor_blocks: Vec<_> = donor
-                            .page_table
-                            .block_ids()
-                            .iter()
-                            .take(shared)
-                            .copied()
-                            .collect();
-                        if donor_blocks.len() == shared {
-                            for &b in &donor_blocks {
-                                self.kv_cache.retain_block(b);
-                            }
-                            let mut own = req.page_table.block_ids().to_vec();
-                            let replaced: Vec<_> = own.drain(..shared).collect();
-                            self.kv_cache.free_blocks(&replaced);
-                            let mut merged = donor_blocks;
-                            merged.extend(own);
-                            req.page_table = PageTable::new(merged);
-                            debug!(
-                                request_id = id,
-                                donor_seq = parent_seq,
-                                shared_blocks = shared,
-                                "sharing the donor's prefix blocks instead of duplicating them"
-                            );
-                        }
-                    }
-                }
             } else {
                 req.prefix_seq_id = None;
             }

@@ -34,7 +34,12 @@
 #     --a-label generic --a-cmd './target/release/fox serve --model-path M --port 8097' \
 #     --b-label zen4    --b-cmd './target/release/fox serve --model-path M --port 8097' \
 #     --url http://localhost:8097 --model llama-3.2-1b-instruct-q8_0 \
-#     [--rounds 3] [--metric ttft|throughput] [--prep-a CMD] [--prep-b CMD]
+#     [--rounds 3] [--metric ttft|throughput] [--prep-a CMD] [--prep-b CMD] \
+#     [--prompt-file FILE]
+#
+# --prompt-file replaces the default 2-token "Hi" probe for --metric ttft. Needed
+# to measure anything about prompt reuse: with a 2-token prompt there is no
+# prefill to save, so a KV/prefix-cache change measures as pure noise.
 #
 # --prep-a/--prep-b run before each start of that arm: use them to swap the
 # thing under test (rebuild, move .so files, change an env var) so the two arms
@@ -63,6 +68,7 @@ BENCH_BIN="${BENCH_BIN:-./target/release/fox-bench}"
 CONCURRENCY=4
 REQUESTS=40
 MAX_TOKENS=256
+PROMPT_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --concurrency) CONCURRENCY="$2"; shift 2 ;;
         --requests)    REQUESTS="$2"; shift 2 ;;
         --max-tokens)  MAX_TOKENS="$2"; shift 2 ;;
+        --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
         -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -91,6 +98,7 @@ require curl; require python3
 [[ -n "$URL" && -n "$MODEL" ]] || die "--url and --model are required"
 [[ "$METRIC" == "ttft" || "$METRIC" == "throughput" ]] || die "--metric must be ttft or throughput"
 [[ "$METRIC" == "ttft" ]] || [[ -x "$BENCH_BIN" ]] || die "fox-bench not found at $BENCH_BIN (needed for --metric throughput)"
+[[ -z "$PROMPT_FILE" ]] || [[ -r "$PROMPT_FILE" ]] || die "--prompt-file not readable: $PROMPT_FILE"
 
 PORT="${URL##*:}"; PORT="${PORT%%/*}"
 LOGDIR=$(mktemp -d)
@@ -162,12 +170,34 @@ arm_fingerprint() {
     echo "${backend:-?} ${so:-?}" | tr -s ' '
 }
 
+# Build the request body once. With --prompt-file the prompt is whatever that
+# file contains, which is how prompt-reuse features (KV/prefix caching) get
+# measured at all: the default "Hi" is ~2 tokens, so prefill is already free and
+# any reuse win is buried in noise. The body is written to a file and fed to
+# curl with --data-binary @, so no amount of quoting in the prompt can break it.
+build_ttft_body() {
+    BODY_FILE="$LOGDIR/ttft_body.json"
+    MODEL="$MODEL" PROMPT_FILE="$PROMPT_FILE" python3 - "$BODY_FILE" <<'PYEOF'
+import json, os, sys
+pf = os.environ.get("PROMPT_FILE") or ""
+prompt = open(pf).read() if pf else "Hi"
+body = {
+    "model": os.environ["MODEL"],
+    "messages": [{"role": "user", "content": prompt}],
+    "max_tokens": 1,
+    "temperature": 1.0,
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(body, f)
+PYEOF
+}
+
 measure_ttft() {
     local total=0 t
     for _ in $(seq 1 "$SAMPLES"); do
         t=$(curl -sf -o /dev/null -w "%{time_total}" --max-time 300 "$URL/v1/chat/completions" \
             -H 'Content-Type: application/json' \
-            -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],\"max_tokens\":1,\"temperature\":1.0}" 2>/dev/null) || return 1
+            --data-binary "@$BODY_FILE" 2>/dev/null) || return 1
         total=$(python3 -c "print($total+$t)")
     done
     python3 -c "print(f'{1000*$total/$SAMPLES:.2f}')"
@@ -197,10 +227,13 @@ run_arm() {
     printf "  %-12s %8s %s   [%s]\n" "$label" "$value" "$unit" "$fp"
 }
 
+[[ "$METRIC" == "ttft" ]] && build_ttft_body
+
 echo "=== ab_bench.sh ==="
 echo "  A: $A_LABEL"
 echo "  B: $B_LABEL"
 echo "  Metric: $METRIC   Rounds: $ROUNDS   URL: $URL"
+[[ "$METRIC" == "ttft" ]] && echo "  Prompt: ${PROMPT_FILE:-<default 2-token probe>}"
 printf '%s\n%s\n' "$A_CMD" "$B_CMD" > "$LOGDIR/cmds"
 echo "  One server at a time; arms alternate to cancel drift."
 echo

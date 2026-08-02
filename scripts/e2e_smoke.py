@@ -112,13 +112,23 @@ for i in range(3):
     )
 
 # ── 2) guided decoding: JSON schema (enum + integer → short, deterministic) ──
+#
+# Token budget: the grammar's `integer` rule is `"-"? ("0" | [1-9][0-9]*)` — digits are
+# unbounded, because JSON Schema's `type: integer` has no length bound to translate. So
+# guided decoding does NOT guarantee a *complete* document within a token cap: a run
+# that wanders into a long number gets cut off mid-JSON and `json.loads` fails. With the
+# old 60-token cap that failure was indistinguishable from "the grammar emitted
+# something non-conforming", which is the actual bug this check exists to catch.
+#
+# Fixed two ways: generous headroom, and an explicit truncation check first, so a future
+# failure says which of the two happened instead of leaving it to be guessed.
 print("2) guided decoding (json_schema)")
 st, r = post(
     "/v1/chat/completions",
     {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Is the sky blue? How many suns?"}],
-        "max_tokens": 60,
+        "max_tokens": 256,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -135,15 +145,26 @@ st, r = post(
         },
     },
 )
-try:
-    p = json.loads(r["choices"][0]["message"]["content"])
+finish = (r.get("choices") or [{}])[0].get("finish_reason") if st == 200 else None
+raw = (r.get("choices") or [{}])[0].get("message", {}).get("content", "") if st == 200 else ""
+if finish == "length":
+    # Not a conformance failure: the document was cut off before it could close.
     check(
-        "output parses and conforms",
-        p["answer"] in ("yes", "no") and isinstance(p["count"], int),
-        str(p),
+        "output was not truncated by max_tokens",
+        False,
+        f"hit max_tokens ({len(raw)} chars, no closing brace) — raise the cap or bound "
+        f"the schema; partial={raw[:120]!r}",
     )
-except Exception as e:  # noqa: BLE001 — any failure is a check failure
-    check("output parses and conforms", False, f"{e} resp={str(r)[:200]}")
+else:
+    try:
+        p = json.loads(raw)
+        check(
+            "output parses and conforms",
+            p["answer"] in ("yes", "no") and isinstance(p["count"], int),
+            str(p),
+        )
+    except Exception as e:  # noqa: BLE001 — any failure is a check failure
+        check("output parses and conforms", False, f"{e} resp={str(r)[:200]}")
 
 # ── 3) unconvertible schema must be a 400, not a silent fallback ─────────────
 print("3) invalid schema rejected")
@@ -204,6 +225,11 @@ n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
 check("accepted and min_tokens honoured (≥3)", st == 200 and n >= 3, f"tokens={n}")
 
 # ── 6) Ollama surface: format "json" ─────────────────────────────────────────
+#
+# Same truncation trap as check 2, and worse: `format: "json"` compiles to the fully
+# permissive any-JSON grammar, so nothing bounds how long or how deeply nested the
+# document gets. An explicit num_predict plus a truncation check keeps a cut-off
+# document from being misreported as "the grammar produced invalid JSON".
 print('6) Ollama format: "json"')
 st, r = post(
     "/api/chat",
@@ -211,16 +237,25 @@ st, r = post(
         "model": MODEL,
         "stream": False,
         "format": "json",
+        "options": {"num_predict": 256},
         "messages": [
             {"role": "user", "content": "Give me a JSON object with a color key."}
         ],
     },
 )
-try:
-    p = json.loads(r["message"]["content"])
-    check("output parses as JSON", isinstance(p, (dict, list)), str(p)[:80])
-except Exception as e:  # noqa: BLE001
-    check("output parses as JSON", False, f"{e} resp={str(r)[:200]}")
+if st == 200 and r.get("done_reason") == "length":
+    partial = r.get("message", {}).get("content", "")
+    check(
+        "output was not truncated by num_predict",
+        False,
+        f"hit num_predict — raise it or constrain the format; partial={partial[:120]!r}",
+    )
+else:
+    try:
+        p = json.loads(r["message"]["content"])
+        check("output parses as JSON", isinstance(p, (dict, list)), str(p)[:80])
+    except Exception as e:  # noqa: BLE001
+        check("output parses as JSON", False, f"{e} resp={str(r)[:200]}")
 
 # ── 7) speculative decoding proposes drafts on repetitive output ─────────────
 # The prompt embeds a repeating n-gram, so prompt-lookup must find matches during

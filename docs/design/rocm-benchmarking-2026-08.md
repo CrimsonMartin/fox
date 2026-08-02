@@ -766,6 +766,59 @@ obvious culprit and a fast path for it measured **3.21 ms → 0.69 ms per call,
 iteration, so the expensive branch is almost never taken. Reverted rather
 than shipped: it also changed which token a fixed seed draws.
 
+## Config-matched comparison, and the context-size trade-off (2026-08-02)
+
+Every fox-vs-llama-server number before this point compared servers configured
+differently — fox at `n_seq_max=33`, `n_ctx=135168`, `n_batch=4096`,
+`kv_unified=true` against llama-server at 4 / 16384 / 2048 / false — and
+charged the whole difference to fox. Redone with the configurations matched
+(fox `--max-context-len 4096 --max-batch-size 4`; llama-server
+`-c 20480 --parallel 4 -kvu -b 4096`), on ROCm, one server at a time,
+alternating, via `scripts/ab_bench.sh`:
+
+| metric | fox | llama-server | gap |
+|---|---|---|---|
+| TTFT | 28.16 ms (range [27.92, 28.20]) | 23.45 ms ([23.24, 23.82]) | **16.7%** |
+| throughput | 158.4 t/s ([157.4, 159.2]) | 176.0 t/s ([175.8, 176.2]) | **11.1%** |
+
+Both disjoint, both stable. **The throughput gap is unchanged from the
+unmatched comparison (11.1% either way), so configuration was never its
+cause.** The TTFT gap, however, was substantially fox's own configuration:
+fox's default measured 42 ms and drops to 28 ms purely by matching.
+
+### What in the config costs TTFT: `n_ctx`, not `n_seq_max`
+
+Isolated by holding total context constant (~20k) and varying only the
+sequence count — `--max-context-len 4096 --max-batch-size 4` (5 seqs) versus
+`--max-context-len 620 --max-batch-size 32` (33 seqs):
+
+| | TTFT |
+|---|---|
+| 5 seqs, ctx 20k | 28.01 ms |
+| 33 seqs, ctx 20k | 28.03 ms |
+
+INCONCLUSIVE, +0.1% — `n_seq_max` is free. The cost is the total `n_ctx`,
+which fox derives as `effective_max_ctx * n_seq` (so 33x the per-sequence
+context by default).
+
+### The trade-off runs both ways
+
+Same two context sizes, measured for throughput instead:
+
+| | TTFT | throughput |
+|---|---|---|
+| ctx 20k | **28.2 ms** | 154.6 t/s |
+| ctx 135k (fox's default shape) | 42 ms | **161.8 t/s** |
+
+A large context **costs 33% TTFT and buys 4.7% throughput**. So fox's default
+is not simply wrong — it is tuned for sustained throughput at the expense of
+first-token latency. That is a defensible choice; it is just nowhere stated as
+a choice, and users who care about interactive latency have no hint that
+`--max-batch-size` is the knob that controls it.
+
+Worth revisiting deliberately: a deployment serving one interactive user wants
+the opposite default from one serving batch traffic.
+
 ## Pre-existing issues found while verifying (neither caused by this work)
 
 Both were confirmed to reproduce on a build with the `kv_unified` change

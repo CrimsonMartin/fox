@@ -16,6 +16,7 @@ use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::api::router::AppState;
+use crate::api::shared::sampling_defaults as defaults;
 use crate::scheduler::SlotSnapshot;
 
 #[derive(Debug, Serialize)]
@@ -29,6 +30,40 @@ pub struct PropsResponse {
     pub build_info: String,
     /// Which fox-level features this server was started with.
     pub features: PropsFeatures,
+    /// The sampling defaults a request gets when it sets nothing — **per API
+    /// surface**, because fox's differ on purpose and a caller cannot otherwise find
+    /// out which set applies to it.
+    pub default_generation_settings: DefaultGenerationSettings,
+}
+
+/// fox serves two API families whose upstreams ship different sampling defaults, so
+/// fox's differ too (see `api/shared/sampling_defaults.rs`, where a test locks the
+/// divergence). llama-server has a single set and publishes it under the same
+/// `/props` key; fox publishes both, since which one applies depends on the endpoint
+/// a client happens to use.
+///
+/// This exists because the divergence has a measurable cost a caller cannot see:
+/// `/v1/*` mirrors OpenAI, which has no `top_k`, so `top_k = 0` means the sampler
+/// softmaxes the whole vocabulary instead of 40 candidates — worth **8.7%** of decode
+/// throughput on a Radeon 890M (`docs/design/rocm-benchmarking-2026-08.md`). The
+/// default stays as it is; publishing it makes an informed `"top_k": 40` possible.
+#[derive(Debug, Serialize)]
+pub struct DefaultGenerationSettings {
+    pub openai: SurfaceDefaults,
+    pub ollama: SurfaceDefaults,
+    /// Server-wide, applies to both (`--repeat-last-n`).
+    pub repeat_last_n: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SurfaceDefaults {
+    pub temperature: f32,
+    pub top_p: f32,
+    /// `0` = disabled, i.e. no truncation before the softmax.
+    pub top_k: u32,
+    /// `1.0` = disabled.
+    pub repeat_penalty: f32,
+    pub max_tokens: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +139,23 @@ pub async fn props(State(state): State<AppState>) -> Json<PropsResponse> {
         model_info,
         total_slots: cfg.max_batch_size,
         build_info: format!("fox {}", env!("CARGO_PKG_VERSION")),
+        default_generation_settings: DefaultGenerationSettings {
+            openai: SurfaceDefaults {
+                temperature: defaults::TEMPERATURE,
+                top_p: defaults::TOP_P,
+                top_k: defaults::openai::TOP_K,
+                repeat_penalty: defaults::openai::REPETITION_PENALTY,
+                max_tokens: defaults::openai::MAX_TOKENS,
+            },
+            ollama: SurfaceDefaults {
+                temperature: defaults::TEMPERATURE,
+                top_p: defaults::TOP_P,
+                top_k: defaults::ollama::TOP_K,
+                repeat_penalty: defaults::ollama::REPEAT_PENALTY,
+                max_tokens: defaults::ollama::MAX_TOKENS,
+            },
+            repeat_last_n: state.repeat_last_n,
+        },
         features: PropsFeatures {
             kv_reuse: cfg.kv_reuse,
             reranking: cfg.reranking,
@@ -164,6 +216,14 @@ mod tests {
         assert!(mi["vocab_size"].as_u64().unwrap() > 0, "{v}");
         assert!(mi["supports_infill"].is_boolean(), "{v}");
         assert!(v["features"]["kv_reuse"].is_boolean(), "{v}");
+
+        // The two surfaces' sampling defaults must both be visible: they differ on
+        // purpose, and `/v1/*`'s top_k = 0 costs ~8.7% of decode throughput, which a
+        // caller has no other way to discover.
+        let d = &v["default_generation_settings"];
+        assert_eq!(d["openai"]["top_k"], 0, "{v}");
+        assert_eq!(d["ollama"]["top_k"], 40, "{v}");
+        assert!(d["repeat_last_n"].is_number(), "{v}");
     }
 
     #[tokio::test]

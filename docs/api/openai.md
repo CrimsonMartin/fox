@@ -688,6 +688,15 @@ inferred from its filename: architecture, backend, `n_ctx` (what fox allocated) 
 `supports_thinking`, `supports_vision`, `supports_infill`, `supports_kv_reuse` —
 plus which fox features the server was started with.
 
+It also publishes `default_generation_settings` — **the sampling defaults a request
+gets when it sets nothing, per API surface**. fox's two surfaces differ on purpose
+(`/v1/*` mirrors OpenAI, `/api/*` mirrors Ollama), and that divergence has a
+measurable cost a caller cannot otherwise see: OpenAI has no `top_k`, so `/v1/*`
+defaults to `0`, meaning the sampler softmaxes the whole vocabulary rather than 40
+candidates — worth ~8.7% of decode throughput on a Radeon 890M. The default is
+deliberate and unchanged; publishing it is what makes an informed `"top_k": 40`
+possible. llama-server publishes its (single) set under the same key.
+
 `model` is `null` when nothing is resident yet: fox loads lazily, so that is a normal
 state, not an error. This endpoint never *triggers* a load — under the default
 `--max-models 1` that would evict whatever is serving traffic.

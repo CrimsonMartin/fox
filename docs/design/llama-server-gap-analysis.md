@@ -244,16 +244,27 @@ running on the same machine, so the CPU contention likely inflates *both* number
 arms shared that load, so the 2/10 vs 10/10 comparison stands; the individual figures
 should be read as "this happens often", not as calibrated probabilities.
 
-**The e2e failure itself is still unexplained, and the drift above probably does not
-explain it.** A 40-run capture loop (plus ~11 earlier runs) produced **zero** failures:
-one failure in ~52 runs, never reproduced. More importantly, the arithmetic does not
-line up — concurrent greedy output differs in 10/10 rounds, so if e2e assertions were
-sensitive to output *content* they would fail far more often than 1-in-52. They mostly
-are not: the suite asserts structural properties (token counts, `finish_reason`,
-parseability, `done: true`), and its only concurrent check asserts token counts. So the
-measured drift is real but is the wrong size to be the cause.
+**The e2e failure is explained, and it was not the drift above.** Checks 1 and 9 send
+`max_tokens: 12` with no `temperature` (so fox's stochastic 0.8 default) and no
+`min_tokens`, then assert `finish == "length"`. Nothing stopped the model emitting EOS
+before the twelfth token, which yields `"stop"` and fails the check.
 
-Recorded as **cause unknown**.
+Measured directly rather than waited for: 600 requests in the concurrent shape check 9
+uses produced **2** early stops — 0.33% per request. Across this suite's 7 such requests
+that is a 2.31% chance per run, i.e. **~1 failing run in 43**. The observed rate was 1 in
+~52. (A first attempt with 250 *sequential* requests found 0, which looked like a refutation
+but was not: at 0.33% the expected count there is 0.7, so it had no power to detect it.
+Concurrency also raises the rate, for the same batch-composition reason as the drift above.)
+
+Fixed by adding `min_tokens: 12`, which suppresses EOG until the cap so `finish ==
+"length"` is a fact about the engine rather than a coin flip. The checks' intent is
+untouched — they exist to catch a request dying after its prefill token, and such a
+request still reports `n < 12`. Verified under the same concurrent conditions: 600/600
+`length`, zero short, against 2/600 before.
+
+Worth keeping in mind generally: this was a **test** defect that survived two rounds of
+investigation because the first instinct was to suspect the code under change. The
+drift finding above is real and was worth having, but it was not this.
 
 Chasing it did surface a genuine fragility in the suite, since fixed. Checks 2 and 6
 both parse grammar-constrained output, and **guided decoding does not guarantee a

@@ -101,6 +101,15 @@ for i in range(3):
                 {"role": "user", "content": "Count from one to twenty in words."}
             ],
             "max_tokens": 12,
+            # min_tokens suppresses EOG until the cap is reached, so `finish ==
+            # "length"` below is a fact about the engine rather than a coin flip.
+            # Without it the model samples at the default temperature and can emit
+            # EOS early: measured at 0.33% per request under concurrency, which across
+            # this suite's 7 such requests is ~1 failing run in 43 — the intermittent
+            # e2e failure that took two sessions to pin down. The check's intent (it
+            # must decode PAST its prefill token, 1 token is a FAIL) is untouched: a
+            # request that dies early still reports n < 12.
+            "min_tokens": 12,
         },
     )
     n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
@@ -364,6 +373,7 @@ def one_client(i):
                 }
             ],
             "max_tokens": 12,
+            "min_tokens": 12,  # see check 1 — keeps `finish == "length"` deterministic
         },
     )
     n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0

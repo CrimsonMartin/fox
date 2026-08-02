@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The intermittent `make e2e` failure, found and fixed — it was the test.** Checks 1
+  and 9 sent `max_tokens: 12` with no `temperature` (so fox's stochastic `0.8`
+  default) and no `min_tokens`, then asserted `finish == "length"`. Nothing stopped
+  the model emitting EOS before the twelfth token, which yields `"stop"` and fails.
+  Measured rather than waited for: 600 requests in check 9's concurrent shape
+  produced 2 early stops (0.33% each), which across the suite's 7 such requests is
+  ~1 failing run in 43 — against the 1-in-~52 actually observed. Adding
+  `min_tokens: 12` makes `finish == "length"` a fact about the engine instead of a
+  coin flip, without weakening what the checks are for (a request that dies after
+  its prefill token still reports `n < 12`). Verified under identical concurrent
+  conditions: 600/600 `length`, zero short.
+
 - **A model loaded from outside `models_dir` was unreachable by its own name.**
   `--model-path` pointing anywhere other than `models_dir` produced a server that
   advertised the model in `/health` and `/props` under a name every request path

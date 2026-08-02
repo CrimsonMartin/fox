@@ -652,6 +652,89 @@ mod tests {
         );
     }
 
+    /// A forked branch waits for its parent's prefill, then copies it instead of
+    /// re-prefilling the same prompt.
+    #[test]
+    fn forked_branch_waits_then_copies_the_parents_prefill() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        let prompt: Vec<i32> = (1..=40).collect();
+
+        let (tx0, _rx0) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                prompt.clone(),
+                8,
+                SamplingParams::default(),
+                tx0,
+            ))
+            .unwrap();
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(
+                InferenceRequest::new(2, prompt.clone(), 8, SamplingParams::default(), tx1)
+                    .with_fork_parent(1),
+            )
+            .unwrap();
+
+        // Step 1: the parent is admitted; the branch is held back because there is
+        // nothing to copy yet, and — crucially — does not block the queue.
+        let batch = sched.schedule_step();
+        assert_eq!(batch.prefill, vec![1], "only the parent starts: {batch:?}");
+        assert_eq!(
+            sched.queue_depth(),
+            1,
+            "the branch is re-queued, not dropped"
+        );
+
+        // Parent finishes prefilling.
+        sched.update_after_token(1, 99, true);
+
+        // Step 2: the branch is admitted and adopts the parent's prompt.
+        sched.schedule_step();
+        let running = sched.running_batch.lock().unwrap();
+        let branch = running.iter().find(|r| r.id == 2).expect("branch admitted");
+        let parent_seq = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
+        assert_eq!(
+            branch.prefix_seq_id,
+            Some(parent_seq),
+            "the branch must copy from its parent's sequence"
+        );
+        assert_eq!(
+            branch.skip_prefix_tokens,
+            prompt.len() - 1,
+            "the whole prompt is copied bar one token, so logits still get produced"
+        );
+        assert_ne!(
+            branch.kv_seq_id, parent_seq,
+            "branches need their own sequence"
+        );
+    }
+
+    /// A branch whose parent never materialises must still run — slower, not stuck.
+    #[test]
+    fn forked_branch_falls_back_when_the_parent_is_gone() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        let prompt: Vec<i32> = (1..=40).collect();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(
+                InferenceRequest::new(7, prompt.clone(), 8, SamplingParams::default(), tx)
+                    .with_fork_parent(999), // never submitted
+            )
+            .unwrap();
+
+        let batch = sched.schedule_step();
+        assert_eq!(batch.prefill, vec![7], "must be admitted, not stranded");
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 7).unwrap();
+        assert_eq!(req.prefix_seq_id, None, "nothing to copy from");
+        assert_eq!(req.skip_prefix_tokens, 0, "so it prefills in full");
+    }
+
     /// `--kv-reuse false` restores the pre-0.19 behaviour end to end.
     #[test]
     fn kv_reuse_disabled_never_parks_or_hits() {

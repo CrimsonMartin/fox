@@ -284,6 +284,11 @@ pub async fn chat_completions(
 
     let mut branch_rxs: Vec<tokio::sync::mpsc::UnboundedReceiver<Token>> =
         Vec::with_capacity(effective_best_of as usize);
+    // Branch 0 prefills the shared prompt; the rest copy its KV instead of
+    // recomputing the identical thing N times. The scheduler holds them back until
+    // branch 0 is decoding and falls back to a normal prefill if it never gets there,
+    // so this is a speed optimisation with no correctness edge of its own.
+    let mut fork_parent: Option<u64> = None;
     for branch_idx in 0..effective_best_of {
         let mut branch_sampling = sampling.clone();
         branch_sampling.logprobs = branch_logprobs;
@@ -311,6 +316,11 @@ pub async fn chat_completions(
         }
         if let Some(selection) = lora.clone() {
             inference_req = inference_req.with_lora(selection);
+        }
+        if let Some(parent) = fork_parent {
+            inference_req = inference_req.with_fork_parent(parent);
+        } else {
+            fork_parent = Some(req_id); // branch 0 is everyone else's parent
         }
         // Admission failure is safe by construction: bailing here drops every
         // already-submitted branch's `rx` (and its paired `tx`), which is

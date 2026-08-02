@@ -250,6 +250,19 @@ pub struct InferenceRequest {
     /// `prompt_tokens` instead; LoRA requests have real text tokens, so this
     /// flag is the explicit mechanism for them.
     pub skip_prefix_cache: bool,
+    /// For `n>1`/`best_of`: the sibling branch whose prefill this one waits for and
+    /// then copies, instead of re-prefilling the identical prompt itself.
+    ///
+    /// `None` for branch 0 and for every ordinary request. Admission holds a forked
+    /// branch back until its parent is decoding — the parent's KV has to exist before
+    /// it can be copied — and falls back to a normal full prefill if the parent is
+    /// gone, so a failed or finished parent costs speed, never correctness.
+    pub fork_parent: Option<u64>,
+    /// Resolved at admission from `fork_parent`: `(parent_seq_id, tokens_to_copy)`.
+    /// Separate from `fork_parent` because the parent's `seq_id` is only known once it
+    /// is actually decoding, and because clearing `fork_parent` is how the fallback
+    /// path says "prefill normally".
+    pub fork_source: Option<(i32, usize)>,
 }
 
 impl InferenceRequest {
@@ -282,6 +295,8 @@ impl InferenceRequest {
             multimodal: None,
             lora: None,
             skip_prefix_cache: false,
+            fork_parent: None,
+            fork_source: None,
         }
     }
 
@@ -290,6 +305,13 @@ impl InferenceRequest {
     /// position count comes from the chunks via [`Self::n_positions`] instead.
     pub fn with_multimodal(mut self, chunks: crate::engine::model::MultimodalChunks) -> Self {
         self.multimodal = Some(chunks);
+        self
+    }
+
+    /// Mark this request as a forked branch of `parent`: it shares the prompt and
+    /// will copy the parent's prefilled KV rather than recomputing it.
+    pub fn with_fork_parent(mut self, parent: u64) -> Self {
+        self.fork_parent = Some(parent);
         self
     }
 

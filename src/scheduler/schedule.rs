@@ -100,7 +100,48 @@ impl Scheduler {
         // preemption sources (priority, growth) can reuse the engine-side clearing.
         let preempted_seq_ids = Vec::new();
 
+        // Forked branches whose parent has not finished prefilling yet. Collected
+        // rather than left at the queue head: they are not blocked on *capacity*, so
+        // stalling everything behind them would be a self-inflicted head-of-line block.
+        // Re-queued in order once the loop ends.
+        let mut deferred: Vec<batch::InferenceRequest> = Vec::new();
+
         'admit: while let Some(mut req) = waiting.pop_front() {
+            // A forked branch may only be admitted once its parent's prompt is in the
+            // KV — there is nothing to copy before that.
+            if let Some(parent_id) = req.fork_parent {
+                match running.iter().find(|r| r.id == parent_id) {
+                    Some(parent) if parent.state == batch::RequestState::Decoding => {
+                        // Parent is prefilled: adopt its prompt wholesale, leaving one
+                        // token to decode ([TAG_PROMPT_LOGITS]) so this branch produces
+                        // logits of its own.
+                        let parent_seq = parent.kv_seq_id;
+                        let n_positions = req.n_positions();
+                        // Multimodal is excluded: its positions come from image chunks
+                        // while `effective_skip` counts `prompt_tokens`, which is empty,
+                        // so the copy boundary and the resubmission boundary would not
+                        // agree. LoRA too — a branch must not inherit KV computed under
+                        // a different adapter.
+                        let forkable =
+                            req.multimodal.is_none() && !req.skip_prefix_cache && self.kv_reuse;
+                        if forkable && parent_seq >= 0 && n_positions > 0 {
+                            req.fork_source = Some((parent_seq, n_positions - 1));
+                        } else {
+                            req.fork_parent = None; // unusable parent — prefill normally
+                        }
+                    }
+                    // Still prefilling: try again next step.
+                    Some(_) => {
+                        deferred.push(req);
+                        continue 'admit;
+                    }
+                    // Parent already finished, failed, or was never admitted. Fall back
+                    // to an ordinary admission — slot affinity will usually still find
+                    // the parent's parked KV, so this degrades to slower, not wrong.
+                    None => req.fork_parent = None,
+                }
+            }
+
             // A request that could never fit, even into an empty pool, is rejected
             // synchronously by `Scheduler::submit()` before it ever reaches this queue
             // (0.16) — it's a static check (prompt + max_new_tokens vs. total pool size)
@@ -209,9 +250,17 @@ impl Scheduler {
 
             req.page_table = PageTable::new(blocks);
             req.kv_seq_id = seq_id;
+            // A forked branch overrides whatever the slot offered: copying the
+            // parent's whole prompt beats any partial LCP match, and the two are
+            // mutually exclusive — the copy overwrites positions 0..n.
+            if let Some((parent_seq, fork_skip)) = req.fork_source {
+                n_past = fork_skip;
+                req.prefix_seq_id = Some(parent_seq);
+            } else {
+                req.prefix_seq_id = None;
+            }
             req.skip_prefix_tokens = n_past;
             req.prefill_pos = n_past;
-            req.prefix_seq_id = None;
             req.stop_reason = None;
             req.state = batch::RequestState::Prefilling;
 
@@ -234,6 +283,12 @@ impl Scheduler {
                 info!(request_id = id, seq_id, "request admitted to batch");
             }
             running.push(req);
+        }
+
+        // Put deferred branches back at the front, in their original order, so they
+        // are reconsidered next step ahead of anything that arrived meanwhile.
+        for req in deferred.into_iter().rev() {
+            waiting.push_front(req);
         }
 
         // 4. Build the prefill and decode lists from the running batch. A request stays

@@ -132,7 +132,7 @@ KV, prompt *and* generation.
 | **1.A** | `repeat_last_n` window for the penalties | **done** — see §3 |
 | **1.B** | Per-seq_id resident-token tracking + LCP slot affinity; finished requests park as `Idle` instead of freeing; LRU reclaim of idle slots under block pressure. New `src/scheduler/slots.rs` replacing `prefix_cache.rs`. Flags `--kv-reuse`, `--slot-prompt-similarity` | planned |
 | **1.C** | Host-RAM sequence state cache (`--cache-ram`) — keeps a conversation warm *without* holding GPU blocks | **done** — see below |
-| **1.D** | Shared-prefill fork for `n>1`/`best_of` (today N independent full prefills, `src/api/v1/chat.rs:227-257`) | planned, unblocked by §0.1 and §0.3 |
+| **1.D** | Shared-prefill fork for `n>1`/`best_of` | **done** — 3.4× on an 801-token `n=4` request (6.60 s → 2.01 s); one prefill instead of four |
 | **deferred** | `--cache-reuse` chunk shifting | see below |
 
 **Why `--cache-reuse` is deferred rather than skipped.** It is mechanically possible:

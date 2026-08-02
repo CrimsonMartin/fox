@@ -85,6 +85,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stream_options` keeps the previous always-attach behaviour, so no existing
   caller changes.
 
+### Changed
+
+- **`n>1` / `best_of` no longer prefills the same prompt N times.** Branch 0
+  prefills; the rest wait for it and copy its KV
+  (`llama_memory_seq_cp`) instead of recomputing the identical thing. Measured on
+  an 801-token prompt with `n=4`, alternating arms, one server at a time:
+  **6.60/6.63 s → 2.01/1.96 s (3.4×)**. The server log shows one full admission and
+  three branches reporting `cached_tokens: 800` of 801.
+
+  The wait is what makes it correct: a branch is held back until its parent is
+  actually decoding, since there is nothing to copy before that. Deferred branches
+  are re-queued rather than left at the queue head — they are not blocked on
+  *capacity*, so stalling everything behind them would be a self-inflicted
+  head-of-line block. If the parent never materialises (finished, failed, never
+  admitted) the branch falls back to an ordinary full prefill, so this is a speed
+  optimisation with no correctness edge of its own; slot affinity usually finds the
+  parent's parked KV anyway.
+
+  Multimodal and LoRA branches are excluded: multimodal counts positions from image
+  chunks while the resubmission boundary counts `prompt_tokens` (empty for them), so
+  the two would disagree; a LoRA branch must not inherit KV computed under a
+  different adapter. Branches allocate their own block budget rather than sharing —
+  llama.cpp shares the cells itself under `kv_unified`, so fox's accounting is
+  merely conservative, and the dormant copy-on-write path stays dormant.
+
+  Output is unaffected: `n=4` still returns four distinct completions.
+
 ### Added
 
 - **`--cache-ram <MiB>` — host-RAM prompt cache.** Complements `--kv-reuse`: a slot

@@ -39,7 +39,46 @@ GPU. Read from `/sys/class/kfd/kfd/topology/nodes/*/properties`.
 | fox | ready | `Dockerfile.vulkan` → bundle; `make vulkan` |
 | `llama-server` | ready, **flags audited** | `Dockerfile.llama-server-vulkan`, same vendored llama.cpp |
 | vLLM | **runs**, verified | `rocm/vllm:latest` + `HSA_OVERRIDE_GFX_VERSION=11.0.0` |
-| Ollama | not yet tried | `ollama/ollama:rocm` image already pulled |
+| Ollama | **runs on GPU**, verified | `ollama/ollama:rocm` + `OLLAMA_IGPU_ENABLE=1`; `scripts/try_ollama_rocm.sh` |
+
+All four engines run on this hardware. No engine has to be excluded from the comparison.
+
+### Ollama — gate results, 2026-08-03
+
+Run `scripts/try_ollama_rocm.sh`. It imports the same Q8_0 GGUF the published runs use
+via a Modelfile rather than `ollama pull`, so axis 1 stays exact — `ollama pull
+llama3.2:1b` would bring Q4_K_M and the comparison would no longer be of serving layers.
+
+- **No `HSA_OVERRIDE_GFX_VERSION` needed.** Ollama recognises gfx1150 natively:
+  `inference compute … library=ROCm compute=gfx1150 … type=iGPU`. Unlike vLLM, which
+  needs the override, this is a difference worth stating in the write-up.
+- **`OLLAMA_IGPU_ENABLE=1` is mandatory here.** By default Ollama *finds* the 890M and
+  then discards it — `dropping integrated GPU; to enable, set OLLAMA_IGPU_ENABLE=1` —
+  and falls back to CPU **without failing**. `ollama ps` reports `100% CPU` and it serves
+  normally. Benchmarking that fallback against fox on Vulkan would have produced a huge,
+  entirely fake win. With the flag: `100% GPU`.
+- That silent fallback is why the gate asks *which processor the model is resident on*
+  instead of *did the model load*. Every Ollama arm must assert `100% GPU` from
+  `ollama ps` before its numbers count.
+
+**Config-matching knobs for Ollama** — its defaults do not match what the other three
+are given, and they are set by env var, not by request:
+
+| knob | Ollama default | must be set to |
+|---|---|---|
+| `OLLAMA_CONTEXT_LENGTH` | `0` → chose **131072** for this model | `CTX_PER_SEQ` (4096) |
+| `OLLAMA_NUM_PARALLEL` | `1` → 8 concurrent clients **serialise in a queue** | `CONC` |
+| `OLLAMA_FLASH_ATTENTION` | `false` | match the other arms |
+| `OLLAMA_KV_CACHE_TYPE` | unset (f16) | match `--kv-cache-type` |
+
+`OLLAMA_NUM_PARALLEL` is the dangerous one: left at 1 it turns a concurrency benchmark
+into a queueing benchmark, and the resulting TTFT curve looks exactly like the prefix-reuse
+failure the paper is about. It would be a fabricated win in the direction of the thesis.
+
+- The OpenAI-compatible surface works with `bench_burst.py` as written (streaming plus
+  `stream_options.include_usage`), but usage carries **no `prompt_tokens_details`**, so
+  `cached_tokens` reads 0 for Ollama. That means "not reported", not "no reuse", and the
+  table has to say so. TTFT remains directly comparable.
 
 ### llama-server flag audit — done, numbers stand
 

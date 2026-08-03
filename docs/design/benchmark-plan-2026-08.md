@@ -8,13 +8,74 @@ re-deriving it. Written 2026-08-03, at the end of the 0.19.1 work.
 A white paper demonstrating what fox does differently, backed by a comparison of fox,
 `llama-server`, Ollama and vLLM on this machine.
 
+## Where this landed — the balance, 2026-08-03
+
+Read this before the sections below. They are in the order the work happened, which means
+several state conclusions that later sections retract. This is what survived.
+
+### One claim survives, and it is narrow
+
+**fox reuses a shared prefix from a sequence that is still decoding; `llama-server`
+cannot, and no flag gives it that.** `get_available_slot()` skips `is_processing()` slots
+in both its similarity pass (`server-context.cpp:1609`) and its LRU fallback (`:1652`), so
+concurrent arrivals cannot inherit from each other. Measured, 3 rounds, disjoint ranges,
+8 clients behind a 1856-token shared prompt:
+
+| | fox | `llama-server` | Ollama |
+|---|---|---|---|
+| cold TTFT p50 | **1102 ms** | 4327 ms | 5344 ms |
+| warm TTFT p50 | **50 ms** | 184 ms | 405 ms |
+
+That is the paper's thesis, and it is the only headline that holds up.
+
+### Three claims did not survive
+
+| claim | what it actually was |
+|---|---|
+| "fox degrades 5.5× under a noisy neighbour, `llama-server` 44×" | **a default.** `--max-prefill-chunk 512` against `n_batch 2048`. With `-b 512` the reference stalls 263 ms against fox's 273. |
+| "fox is within ~10% of `llama-server` on throughput" | **true only to 16 clients.** The gap is 15% at 32, 22% at 64 and 103% at 128. |
+| "the sweep gains at 32 clients" | **a contaminated control.** Duplicate prompts above 16 clients handed fox its own prefix cache; retracted. |
+
+### The finding that matters most is a trade, not a win
+
+fox's unified KV cache (`kv_unified = true`, `n_stream = 1`) is what makes a partial
+`seq_cp` metadata-only — the mechanism behind the one surviving claim. It is *also* the
+sole cause of fox collapsing above 64 concurrent requests, because a decode step then
+attends over the union of every sequence's cells: cost grows as N·(N·L) instead of N·L.
+
+| | unified KV buys | unified KV costs |
+|---|---|---|
+| | 5.7× cold TTFT, 117× warm | 6% throughput at 16 clients, 108% at 128 |
+| | | a concurrency ceiling at ~64 |
+
+Proved by running the same binary with `FOX_KV_UNIFIED=0`: that arm does not bend at all,
+matching `llama-server` at 64 clients and passing it at 128.
+
+**fox's real advantage and its worst weakness are the same design decision.** That is a
+more interesting paper than "fox is 4× faster", but it only works if told whole.
+
+### Where fox is behind, plainly
+
+- decode throughput: 1.06× behind at 4 clients after the sampler fix (was 1.10×)
+- idle stream smoothness: ITL p99 50 ms against `llama-server`'s 21 ms
+- memory: ~400 MB more GTT for the same workload
+- concurrency: collapses above 64; `llama-server` was still climbing at 128
+
+### What has not been done
+
+The whole comparison is **Llama-3.2-1B-Q8_0 on one iGPU**. The 9B model, the multi-turn,
+RAG and agentic workloads, and every architecture other than dense GQA are unmeasured.
+Nothing here should be published as a general claim about fox.
+
+
 ## Method, agreed
 
 **Two axes, both reported.**
 
 1. **Config-matched.** Same model, quantisation, context length and sampler settings
-   across all four. Isolates the serving layer. This is the number nobody can argue with,
-   and it is where fox sits at 96% of `llama-server` on decode-bound throughput.
+   across all four. Isolates the serving layer. This is the number nobody can argue with.
+   (It once read "fox sits at 96% of `llama-server`" here; measured properly that is
+   1.06× behind at 4 clients and 2.03× behind at 128 — see the balance above.)
 2. **Best-effort per engine.** Each engine tuned with its own techniques — the comparison
    a user actually cares about when choosing one.
 
@@ -217,6 +278,19 @@ where fox's cache cannot help), batch embedding, and offline bulk processing.
 - **Report measured prompt tokens.** An oversized prompt fails differently per engine:
   `llama-server` returns 400, fox rolls the context window and silently disables reuse.
 - Kill servers and delete downloaded models after **every** test, not at the end.
+- **Vary every input the workload claims is unrelated.** `bench_decode.py` handed out 16
+  prompts with `i % 16`, so above 16 clients the "nothing to reuse" control was feeding
+  fox byte-identical prompts. It biased exactly one engine, in the direction of the
+  hypothesis, at exactly the concurrencies making the strongest claims.
+- **Any before/after on a sweep needs both arms inside one alternating run.** Two
+  post-fix sweeps at 16 clients differed by 5.7% between sessions while within-run ranges
+  were ±1%.
+- **Before publishing an advantage, try to hand it to the reference with a flag.** The
+  noisy-neighbour result was `--max-prefill-chunk 512` against `n_batch 2048`, and `-b
+  512` erased it. If a one-flag change closes the gap, it was never a design difference.
+- **Prefer absolute latencies to ratios against each engine's own baseline.** The
+  noisy-neighbour "factor" rewarded whichever engine had rougher idle streams: at a
+  matched chunk `llama-server` scored a worse factor while stalling less.
 
 ## Results — Vulkan trio, 2026-08-03
 
@@ -298,7 +372,10 @@ supported by ROCm. Both ROCm images compile for gfx1100 and `HSA_OVERRIDE_GFX_VE
 misrepresents the card to the runtime. Vulkan needs none of that and also runs on Intel
 and NVIDIA. A 15% decode win does not buy that fragility for a default.
 
-### Saturation curves — and the ceiling this sweep did not reach
+### Saturation curves — SUPERSEDED (contaminated control, ceiling not reached)
+
+> Kept for the record only. The control was contaminated above 16 clients and the sweep
+> stopped before either engine bent. Use "Saturation, to 128 clients" further down.
 
 `MODE=sweep`, decode workload at concurrency 1→32, 3 rounds. Aggregate tok/s and the
 scaling efficiency against a single client:
@@ -670,7 +747,11 @@ Both engines that report nothing show a large warm TTFT drop (Ollama 5377 → 40
 Publishing their 0 in a "cached tokens" column would state the opposite of what happened,
 which is why the column has to carry the distinction rather than the number alone.
 
-## Results so far
+## Results so far — SUPERSEDED, kept for provenance
+
+> The first fox↔`llama-server` run, from before the harness was generalised. Its TTFT
+> figures were reproduced within noise by `scripts/bench_engines.sh`; its "96%" throughput
+> line did not survive (see the balance at the top). Numbers below are the originals.
 
 fox vs `llama-server`, Vulkan, Llama-3.2-1B-Q8_0, both from the same vendored llama.cpp,
 3 rounds, disjoint ranges:

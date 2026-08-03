@@ -246,6 +246,29 @@ Order:
 5. `release: X.Y.Z` commit
 6. Push, then tag
 
+### How `develop` and `main` differ
+
+They are not two views of one history — `git merge-base main develop` is **empty**. Treat
+them as two mechanisms:
+
+- **`develop`** takes ordinary merges, one per feature branch, keeping the merge commit:
+  `git merge --no-ff feature/0.X -m "Merge branch 'feature/0.X' into develop"`.
+- **`main`** takes a **squashed snapshot per released version**, in order, one commit each
+  (`release: vX.Y.Z`), **and the tag lives there**. It is 10 linear single-parent commits
+  whose tree matches `develop`'s exactly; merging into it would splice unrelated
+  histories.
+
+  ```bash
+  git checkout main
+  git read-tree -u --reset <the release commit>   # take that version's tree wholesale
+  git commit -m "release: vX.Y.Z"
+  git tag vX.Y.Z
+  ```
+
+Version by version, tag by tag. Never one snapshot covering several releases: `main` is
+the only record of what each version actually contained, and collapsing two of them
+throws that away.
+
 ## Pull request process
 
 `develop` is the active trunk; `main` is the release branch. Branch from and target `develop`.

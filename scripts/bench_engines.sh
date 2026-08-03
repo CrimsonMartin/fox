@@ -71,6 +71,15 @@ else
   OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:rocm}"
 fi
 OLLAMA_TAG="${OLLAMA_TAG:-foxbench}"
+# Extra llama-server flags, for giving the reference the same tuning fox gets by
+# default. Equal tuning effort is the rule that makes the "best effort" axis honest, and
+# it cuts against fox as often as for it: fox chunks prefill at 512 tokens by default
+# while llama.cpp fills n_batch=2048, which is most of the noisy-neighbour difference.
+LS_EXTRA="${LS_EXTRA:-}"
+# fox's prefill chunk. Its default (512) is a quarter of llama.cpp's n_batch (2048), and
+# the symmetric test matters as much as the fair one: if fox at 2048 degrades like
+# llama-server, the noisy-neighbour advantage is a default rather than a design.
+FOX_CHUNK="${FOX_CHUNK:-}"
 
 ENGINES="${ENGINES:-fox llama-server ollama}"
 # burst  = concurrent clients behind a shared prefix (fox's favourable workload)
@@ -138,6 +147,8 @@ echo "    modelo      $MODEL"
 echo "    fox         $FOX_STAMP"
 echo "    llama-serv  $LS_STAMP"
 echo "    ollama      $OLLAMA_IMAGE"
+[ -n "$LS_EXTRA" ] && echo "    ls-extra    $LS_EXTRA"
+[ -n "$FOX_CHUNK" ] && echo "    fox-chunk   $FOX_CHUNK"
 echo "    commit      $(git -C "$S/.." rev-parse --short HEAD 2>/dev/null)"
 echo "    $CONC clientes · $MAXTOK tokens · ${CTX_PER_SEQ} ctx/secuencia · $ROUNDS rondas"
 echo
@@ -264,7 +275,8 @@ start_fox() {
   if [ "$BACKEND" = rocm ]; then
     rocm_run_env "$FOX_IMAGE" serve --model-path "/models/$(basename "$MODEL")" \
       --host 0.0.0.0 --port 8080 \
-      --max-context-len "$CTX_PER_SEQ" --max-batch-size "$SRV_CONC" || return 1
+      --max-context-len "$CTX_PER_SEQ" --max-batch-size "$SRV_CONC" \
+      ${FOX_CHUNK:+--max-prefill-chunk "$FOX_CHUNK"} || return 1
     wait_up /health || return 1
     docker logs "$ENG_CONT" > "$OUT/server_fox.log" 2>&1
     return 0
@@ -272,6 +284,7 @@ start_fox() {
   env LD_LIBRARY_PATH="$(dirname "$FOX_BIN")" "${FOX_ENV[@]}" "$FOX_BIN" serve \
     --model-path "$MODEL" --host 127.0.0.1 --port "$PORT" \
     --max-context-len "$CTX_PER_SEQ" --max-batch-size "$SRV_CONC" \
+    ${FOX_CHUNK:+--max-prefill-chunk "$FOX_CHUNK"} \
     > "$OUT/server_fox.log" 2>&1 &
   disown
   wait_up /health
@@ -280,14 +293,14 @@ start_fox() {
 start_llama_server() {
   if [ "$BACKEND" = rocm ]; then
     rocm_run "$LS_IMAGE" -m "/models/$(basename "$MODEL")" --host 0.0.0.0 --port 8080 \
-      -c "$CTX" -ngl 99 --parallel "$SRV_CONC" || return 1
+      -c "$CTX" -ngl 99 --parallel "$SRV_CONC" $LS_EXTRA || return 1
     wait_up /health || return 1
     docker logs "$ENG_CONT" > "$OUT/server_llama-server.log" 2>&1
     return 0
   fi
   env LD_LIBRARY_PATH="$(dirname "$LLAMA_SERVER_BIN")" "$LLAMA_SERVER_BIN" \
     -m "$MODEL" --host 127.0.0.1 --port "$PORT" -c "$CTX" -ngl 99 --parallel "$SRV_CONC" \
-    > "$OUT/server_llama-server.log" 2>&1 &
+    $LS_EXTRA > "$OUT/server_llama-server.log" 2>&1 &
   disown
   wait_up /health
 }

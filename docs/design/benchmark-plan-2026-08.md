@@ -343,6 +343,9 @@ damage is a freeze in somebody else's stream, and an average cannot see it.
 | `llama-server` | 23 ms | 2329 ms | 100.8× | 4618 ms |
 | Ollama | 46 ms | 900 ms | 19.5× | 1894 ms |
 
+**RETRACTED as an architectural claim — it is a default.** See "the noisy-neighbour
+advantage is a flag" below. The numbers stand; the interpretation does not.
+
 This is the largest separation any workload here produces, and it is the one a user feels
 most directly. But it comes with a finding that must be published next to it:
 
@@ -351,6 +354,40 @@ most directly. But it comes with a finding that must be published next to it:
 freezing the stream when a long prefill arrives. Stating only the factor would be
 misleading — a reader who measures idle jitter would find fox 2.4× worse and conclude the
 whole table was cooked.
+
+### The noisy-neighbour advantage is a flag, not a design
+
+Traced by arithmetic first: the stall an interactive stream suffers is the **prefill chunk
+size × per-token prefill cost**. fox chunks at 512 tokens (`--max-prefill-chunk`, default
+512); llama.cpp fills `n_batch = 2048` per `llama_decode` (`server-context.cpp:3051`).
+Both interleave decode tokens with prefill — only the chunk differs, by 4×.
+
+Tested from both directions, 3 rounds each:
+
+| arm | ITL p99 before | during | factor | long prefill |
+|---|---|---|---|---|
+| fox, chunk 512 (default) | 50 ms | 273 ms | 5.5× | 1964 ms |
+| `llama-server`, n_batch 2048 (default) | 21 ms | 933 ms | 44.3× | 1759 ms |
+| **`llama-server` with `-b 512`** | 21 ms | **263 ms** | 12.4× | 1896 ms |
+| **fox with chunk 2048** | 50 ms | **976 ms** | 19.5× | 1801 ms |
+
+At a matched chunk the two engines stall **the same amount**: 263 ms against fox's 273 ms.
+Give fox llama.cpp's chunk and it degrades to 976 ms, indistinguishable from
+`llama-server`'s 933 ms. The advantage is entirely `--max-prefill-chunk 512` being a
+quarter of `n_batch = 2048`, and `-b 512` hands it to the reference for free. Publishing
+"fox degrades 5.5× where `llama-server` degrades 44×" as an architectural property would
+have been exactly the failure the equal-tuning-effort rule exists to prevent — this time
+in fox's favour.
+
+It is not free for either: the smaller chunk costs ~8% on the long prefill itself (fox
+1964 vs 1801 ms; `llama-server` 1896 vs 1759 ms). That is the real trade — interactive
+smoothness against prefill throughput — and it is a flag both engines expose.
+
+**The headline metric was also wrong.** The "factor" is a ratio against each engine's own
+baseline, so it rewards an engine for having *worse* idle jitter. At a matched chunk
+`llama-server` shows a worse factor (12.4× vs 5.5×) while suffering a *smaller* absolute
+stall (263 vs 273 ms) — purely because its baseline is 21 ms against fox's 50 ms. Report
+the **absolute stall**; the ratio flatters whoever starts out rougher.
 
 ### The KPIs that were missing
 

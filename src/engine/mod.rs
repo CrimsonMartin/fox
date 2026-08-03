@@ -90,12 +90,16 @@ impl InferenceEngine {
         draft_model: Option<Arc<dyn Model>>,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
+        // The scheduler decides to skip prefill; llama.cpp performs the copy. Telling
+        // only the engine leaves the scheduler skipping prefill for cells nobody copied.
+        scheduler.set_prefix_reuse(supports_prefix_cache);
         if supports_prefix_cache {
             tracing::info!("prefix caching enabled (model supports seq_cp)");
         } else {
-            tracing::info!(
-                "prefix caching disabled (model uses recurrent/hybrid memory — seq_cp unsupported)"
-            );
+            // The reason is deliberately not spelled out: it is now either a
+            // recurrent/hybrid model or a non-unified KV cache, and naming only the
+            // first sent a previous investigation looking at the wrong thing.
+            tracing::info!("prefix caching disabled (model cannot donate KV cells)");
         }
         let model_stop_tokens = model.stop_tokens();
         if !model_stop_tokens.is_empty() {

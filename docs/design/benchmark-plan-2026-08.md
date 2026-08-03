@@ -384,6 +384,61 @@ The occupancy number doubles as the assertion that replaced a log that does not 
 of `libggml-hip.so` failing to dlopen and the server falling back to CPU silently. Reading
 the driver catches that for every engine. A busy percentage near zero aborts the row.
 
+### The decode deficit: two hypotheses tested, both wrong
+
+fox sits ~10% below `llama-server` on decode-bound throughput. Two explanations were
+tested directly rather than argued about. Neither survived.
+
+**Hypothesis 1 — `kv_unified = true` costs decode throughput.** Tested with
+`FOX_KV_UNIFIED=0`, a runtime switch so both arms come from **one binary** (building two
+would put the build into the comparison). Arm `fox-seq` in `scripts/bench_engines.sh`.
+
+| decode, conc 4 | per request | aggregate |
+|---|---|---|
+| fox (unified) | 45 tok/s | 169.6 |
+| fox-seq (not unified) | 46 tok/s | 172.8 |
+| `llama-server` | **50 tok/s** | **184.6** |
+
+Turning unified KV off recovers **2%**, not 10. It is not the lever. **Prediction was
+wrong and is retracted.**
+
+What the same run *did* price is the trade itself, and it is lopsided:
+
+| | fox | fox-seq |
+|---|---|---|
+| cold burst TTFT p50 | **1108 ms** | 6300 ms |
+| warm burst TTFT p50 | **51 ms** | 5987 ms |
+
+Unified KV buys 5.7× cold and 117× warm TTFT for 2% of decode. Caveat that must travel
+with those numbers: `fox-seq` has **no prompt reuse at all** — without a unified cache
+fox cannot reuse, whereas `llama-server` without one still reuses from *idle* slots. So
+this prices "fox with vs without its prefix cache", not "unified vs non-unified with
+equivalent reuse". Only the 2% decode figure isolates unified KV cleanly, because that
+workload has nothing to reuse either way.
+
+Also from that run: `fox-seq` degrades 6.3× under a noisy neighbour against fox's 5.5×.
+fox's resistance to prefill interference is therefore **not** coming from its prefix
+cache — it survives with the cache off. That mechanism is still unidentified.
+
+**Hypothesis 2 — fox fragments its decode batches.** Precedent existed: seq_id
+fragmentation was once measured at 1.74 of a possible 4. Read from llama.cpp itself via
+`LLAMA_BATCH_DEBUG=1` (never by patching `vendor/`); in decode each sequence contributes
+exactly one token, so a ubatch's `n_tokens` *is* the batch fill.
+
+fox at 4 clients: **3.89 of 4**, with 248 of 262 steps completely full. Essentially no
+fragmentation; it accounts for ~3% at most. **Also not the lever.**
+
+(`llama-server`'s equivalent trace was not captured — its log never reached DEBUG level
+even at `-lv 4`. fox's own figure is enough to rule out gross fragmentation on fox's
+side, but the comparison is one-sided and should be completed.)
+
+**So ~5-8% remains unexplained**, and every cheap explanation is now spent: it is not
+per-token overhead (fox and `llama-server` tie at concurrency 1 and 2, so any fixed
+per-request cost would have shown there), not unified KV, not batch fill, not the
+`logits.to_vec()` the older docs blamed (~0.5% by arithmetic), not thread count, not
+ROCm version. The next step is a profile of the decode loop — `perf record` on both
+servers under the same workload — not another hypothesis.
+
 ### vLLM — its own section, 2026-08-03
 
 `scripts/bench_vllm.sh`, 3 rounds, server restarted per round. `rocm/vllm:latest`

@@ -60,6 +60,9 @@ pub struct Scheduler {
     ///
     /// Lock ordering: acquired after `slots`, never while holding the model lock.
     pub(crate) prompt_cache: std::sync::Mutex<PromptCache>,
+    /// False when the loaded model's KV cache cannot donate cells — see
+    /// `set_prefix_reuse`.
+    prefix_reuse: std::sync::atomic::AtomicBool,
     /// Master switch for KV reuse (`--kv-reuse`). When false, finished sequences are
     /// always cleared and every prompt is prefilled from token 0 — the pre-0.19
     /// behaviour, kept as an escape hatch and as the A/B baseline arm.
@@ -105,6 +108,24 @@ impl std::fmt::Display for SubmitError {
 }
 
 impl Scheduler {
+    /// Whether slot-affinity prefix reuse may skip prefill.
+    pub fn prefix_reuse_enabled(&self) -> bool {
+        self.prefix_reuse.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turn slot-affinity prefix reuse off for a model that cannot donate KV cells.
+    ///
+    /// Reuse is decided in the scheduler but *performed* in llama.cpp, and the two used
+    /// to disagree: the engine knew `supports_seq_copy()` was false while the scheduler
+    /// went on skipping prefill, leaving `llama_memory_seq_cp` to abort the process at
+    /// `llama-kv-cache.cpp:518`. Observed under `FOX_KV_UNIFIED=0`; the same disagreement
+    /// applies to recurrent/hybrid models, where the pre-existing guard in
+    /// `batch.rs` tested `llama_memory_can_shift()` — which returns true for them.
+    pub fn set_prefix_reuse(&self, enabled: bool) {
+        self.prefix_reuse
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
         Self::with_max_queue_depth(kv_cache, max_batch_size, 0)
     }
@@ -121,6 +142,10 @@ impl Scheduler {
             kv_cache,
             work_notify: tokio::sync::Notify::new(),
             slots: std::sync::Mutex::new(SlotTable::new(max_batch_size)),
+            // Default on; Engine::new turns it off for models whose KV cache cannot
+            // donate cells. Kept here rather than passed to `new()` because both
+            // constructors are called before the model is known.
+            prefix_reuse: std::sync::atomic::AtomicBool::new(true),
             prompt_cache: std::sync::Mutex::new(PromptCache::new(0)),
             slot_prompt_similarity: DEFAULT_SLOT_PROMPT_SIMILARITY,
             kv_reuse: true,

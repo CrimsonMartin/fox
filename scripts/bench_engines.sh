@@ -230,6 +230,19 @@ PY
 # One place where the ROCm passthrough is spelled out, so the two arms cannot drift
 # apart in what they are handed. Both images were compiled for gfx1100; the override
 # has to match or the server starts and then faults during decode.
+rocm_run_env() {
+  local image="$1"; shift
+  local -a extra=()
+  local kv
+  for kv in "${FOX_ENV[@]}"; do extra+=(-e "$kv"); done
+  docker run -d --name "$ENG_CONT" \
+    --device=/dev/kfd --device=/dev/dri --group-add video --group-add "$RENDER_GID" \
+    -e HSA_OVERRIDE_GFX_VERSION="$HSA_OVERRIDE" "${extra[@]}" \
+    -v "$MODEL:/models/$(basename "$MODEL"):ro" \
+    -p "127.0.0.1:$PORT:8080" \
+    "$image" "$@" >/dev/null 2>&1
+}
+
 rocm_run() {
   local image="$1"; shift
   docker run -d --name "$ENG_CONT" \
@@ -240,16 +253,23 @@ rocm_run() {
     "$image" "$@" >/dev/null 2>&1
 }
 
+# fox-seq is fox with kv_unified off, from the SAME binary. It exists to price the
+# trade: unified KV is what makes a partial seq_cp metadata-only (prefix sharing), and
+# it is the leading suspect for the decode deficit. Running it as its own arm means the
+# two configurations alternate inside each round instead of being compared across
+# separate runs, where drift alone can manufacture a difference.
+FOX_ENV=()
+
 start_fox() {
   if [ "$BACKEND" = rocm ]; then
-    rocm_run "$FOX_IMAGE" serve --model-path "/models/$(basename "$MODEL")" \
+    rocm_run_env "$FOX_IMAGE" serve --model-path "/models/$(basename "$MODEL")" \
       --host 0.0.0.0 --port 8080 \
       --max-context-len "$CTX_PER_SEQ" --max-batch-size "$SRV_CONC" || return 1
     wait_up /health || return 1
     docker logs "$ENG_CONT" > "$OUT/server_fox.log" 2>&1
     return 0
   fi
-  env LD_LIBRARY_PATH="$(dirname "$FOX_BIN")" "$FOX_BIN" serve \
+  env LD_LIBRARY_PATH="$(dirname "$FOX_BIN")" "${FOX_ENV[@]}" "$FOX_BIN" serve \
     --model-path "$MODEL" --host 127.0.0.1 --port "$PORT" \
     --max-context-len "$CTX_PER_SEQ" --max-batch-size "$SRV_CONC" \
     > "$OUT/server_fox.log" 2>&1 &
@@ -315,6 +335,8 @@ start_ollama() {
 # The model name the client must send differs per engine: fox and llama-server accept
 # the file's basename, Ollama only knows the tag it was imported under.
 client_model() { [ "$1" = ollama ] && echo "$OLLAMA_TAG" || echo "$NAME"; }
+# fox and fox-seq write to the same server log path; they never run at the same time.
+log_name() { [ "${1#fox}" != "$1" ] && echo fox || echo "$1"; }
 
 run_arm() {
   local eng="$1"
@@ -322,12 +344,14 @@ run_arm() {
   # Baseline after stop_all, before the server exists: anything else measures the
   # previous arm's memory as if it were this one's.
   gpu_baseline
+  FOX_ENV=()
   case "$eng" in
     fox)          start_fox ;;
+    fox-seq)      FOX_ENV=(FOX_KV_UNIFIED=0); start_fox ;;
     llama-server) start_llama_server ;;
     ollama)       start_ollama ;;
     *) echo "  motor desconocido: $eng"; return 1 ;;
-  esac || { echo "  $eng: no arrancó (ver $OUT/server_$eng.log)"; sampler_stop; stop_all; return 1; }
+  esac || { echo "  $eng: no arrancó (ver $OUT/server_$(log_name "$eng").log)"; sampler_stop; stop_all; return 1; }
 
   sampler_start "$eng"
   local out

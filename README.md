@@ -1,6 +1,6 @@
 <div align="center">
 
-# fox
+<img src="assets/fox.svg" alt="fox" width="420">
 
 **A local LLM server built for concurrent work. Drop-in replacement for Ollama.**
 

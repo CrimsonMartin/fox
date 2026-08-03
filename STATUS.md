@@ -4,7 +4,7 @@ A living inventory of **everything fox does** and an honest assessment of **what
 and what doesn't**. Use it to decide what to fix, in what order, and to track progress
 per release.
 
-- **Tracks through:** 0.20.0 (branch `feature/0.19`); `main`/`develop` are at 0.13.0
+- **Tracks through:** 0.20.0 (branch `feature/0.20`); `main`/`develop` are at 0.13.0
   as of this writing — 0.14 through 0.20.0 are done and closed but not yet merged up
   (deliberate, releases are being cut gradually). This file describes the code, not
   what's tagged.

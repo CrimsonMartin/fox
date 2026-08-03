@@ -5,7 +5,9 @@
 # below runs with FOX_SKIP_LLAMA=1, so the FFI wrappers, src/cli/bench*, probe and
 # llama_cpp/stub.rs are never compiled and can be broken while all four checks pass.
 # Adding a parameter to LlamaCppModel::load() once left eight call sites broken with
-# a fully green hook. Run `make check-real` after touching anything they call.
+# a fully green hook. `make ci` now covers this; the hook deliberately does not, so a
+# push does not pay for a CMake build. Run `make ci` (or `make check-real`) after
+# touching anything the real-build-only code calls.
 # Installed via: make setup  (or scripts/install-hooks.sh)
 #
 # Checks run:

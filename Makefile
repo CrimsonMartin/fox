@@ -80,11 +80,10 @@ ci:
 	FOX_SKIP_LLAMA=1 cargo clippy --all-targets --features test-helpers -- -D warnings
 	FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
 	@echo ""
-	@echo "NOTE: every check above ran with FOX_SKIP_LLAMA=1, so the llama.cpp module"
-	@echo "      was never compiled. Code that only exists in a real build — the FFI"
-	@echo "      wrappers, src/cli/bench*, probe, golden — can be broken and still pass"
-	@echo "      this. Run 'make check-real' after changing anything they call."
-	@echo "      (GitHub's 'golden' job does build for real and would catch it there.)"
+	@echo "==> everything above ran with FOX_SKIP_LLAMA=1 and never compiled the"
+	@echo "    llama.cpp module. Checking it for real now (slow the first time,"
+	@echo "    incremental afterwards):"
+	@$(MAKE) --no-print-directory check-real
 
 # Type-check against a REAL llama.cpp build. Slow the first time (CMake compiles
 # llama.cpp) and cached afterwards.

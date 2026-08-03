@@ -235,16 +235,27 @@ push it, not when you write it. If a marker is genuinely needed sooner, use an a
 `-rc1` tag: the churn then shows up in history instead of being hidden behind a
 `git tag -d`.
 
-Order:
+Write the CHANGELOG entry first — including what the release does **not** do and any
+measured limits — then let the tooling do the rest:
 
-1. `make ci` (fmt, clippy, tests, and the real-llama.cpp check)
-2. `make e2e E2E_MODEL=...` — the release gate. Unit, golden and stub tests do not see
-   cross-request prefix-cache lifecycle bugs; this is where two of them were caught.
-3. Version bump: `Cargo.toml`, `Cargo.lock`, `README.md` badge, `STATUS.md`,
-   `docs/introduction.md`
-4. CHANGELOG entry — including what the release does **not** do, and any measured limits
-5. `release: X.Y.Z` commit
-6. Push, then tag
+```bash
+make release VERSION=0.21.0    # checks, bump, `release: X.Y.Z` commit
+# merge to develop, snapshot to main (below)
+make publish VERSION=0.21.0    # ONE tag, then verifies a Release run started
+```
+
+`make release` refuses to continue on a dirty tree, from `main`, when the tag already
+exists locally or on the remote, when the CHANGELOG has no entry for the version (or an
+empty one), when `make ci` or `make e2e` fail, or when the bumped version does not end
+up matching in `Cargo.toml`, `Cargo.lock` and the README badge. That last check exists
+because 0.14 through 0.18 shipped with `Cargo.toml` still reading `0.11.0` — six
+releases whose binary reported the wrong version.
+
+`make publish` pushes **one** tag and then asks the API whether a Release run actually
+started. Never `git push --tags`: GitHub fires **no** workflow when more than three tags
+arrive in a single push, which is how ten tags were published and nothing was built.
+`release.yml` also has `workflow_dispatch` now, so a missed trigger is re-run rather
+than fixed by deleting a tag.
 
 ### How `develop` and `main` differ
 

@@ -23,7 +23,7 @@ comparison is of different amounts of work and the run should be repeated with p
 that keep everyone generating.
 
 Usage: bench_decode.py URL MODEL [CONCURRENCY] [MAX_TOKENS]
-Prints: "decode <per_req_tps_p50> <aggregate_tps> <completion_tokens_median>"
+Prints: "decode <per_req_tps_p50> <aggregate_tps> <completion_tokens_median> <itl_p99_ms>"
 """
 import json
 import statistics
@@ -78,6 +78,7 @@ def one(i):
     ttft = None
     ctok = 0
     chunks = 0
+    stamps = []
     with urllib.request.urlopen(req, timeout=600) as r:
         for raw in r:
             if not raw.startswith(b"data: "):
@@ -92,6 +93,7 @@ def one(i):
             ch = d.get("choices") or [{}]
             if ch and ch[0].get("delta", {}).get("content"):
                 chunks += 1
+                stamps.append(time.perf_counter())
                 if ttft is None:
                     ttft = time.perf_counter() - t0
             usage = d.get("usage")
@@ -105,7 +107,8 @@ def one(i):
     decode_s = end - t0 - (ttft or 0)
     # Guard the degenerate cases rather than dividing by ~0 and reporting a fantasy.
     tps = (ctok - 1) / decode_s if ctok > 1 and decode_s > 1e-6 else 0.0
-    return tps, ctok
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    return tps, ctok, gaps
 
 
 t_start = time.perf_counter()
@@ -113,6 +116,10 @@ with ThreadPoolExecutor(max_workers=CONC) as ex:
     out = list(ex.map(one, range(CONC)))
 wall = time.perf_counter() - t_start
 
-rates = sorted(t for t, _ in out)
-toks = [c for _, c in out]
-print(f"decode {statistics.median(rates):.1f} {sum(toks)/wall:.1f} {statistics.median(toks):.0f}")
+rates = sorted(t for t, _, _ in out)
+toks = [c for _, c, _ in out]
+# The p99 gap is the stall a user sees, and it is invisible in a tokens/s average.
+gaps = sorted(g for _, _, gg in out for g in gg)
+itl99 = gaps[min(len(gaps) - 1, int(len(gaps) * 0.99))] * 1000 if gaps else 0
+print(f"decode {statistics.median(rates):.1f} {sum(toks)/wall:.1f} "
+      f"{statistics.median(toks):.0f} {itl99:.1f}")

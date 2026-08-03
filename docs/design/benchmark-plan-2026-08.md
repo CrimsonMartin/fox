@@ -163,6 +163,16 @@ Built already:
 - `scripts/ab_shared_prefix.sh` + `scripts/bench_burst.py` — concurrent burst behind a
   shared system prompt, cold and warm.
 
+Built since (2026-08-03):
+
+- `scripts/bench_engines.sh` — N engines, two backends, four modes (`burst`, `decode`,
+  `sweep`, `noisy`), one server alive at a time, arm order rotated per round.
+- `scripts/bench_decode.py` — the neutral decode-bound control.
+- `scripts/bench_noisy.py` — noisy neighbour: a long prefill injected into live streams.
+- `scripts/bench_vllm.sh` — vLLM on its own terms, separate table.
+- `scripts/probe_cached_tokens.py` — tells "did not reuse" apart from "does not report".
+- `scripts/try_ollama_rocm.sh` — Ollama feasibility gates, including GPU residency.
+
 Still to build, in the order they are worth doing:
 
 1. **Multi-turn chat** — reuses most of the burst driver, and backs the most-quoted
@@ -173,6 +183,24 @@ Still to build, in the order they are worth doing:
 3. **Agentic** — long prefix, short fast turns, parallel sub-agents. Where fox should win
    most, and where n-gram speculative decoding should pay.
 4. Code/FIM (`/infill`) and structured output (validity of produced JSON, not just speed).
+
+KPIs worth adding next, in order of what they would reveal:
+
+- **Extend the sweep to 64 and 128.** The current one stops before fox and `llama-server`
+  bend, so no maximum can be quoted from it.
+- **Goodput under an SLO** (fraction of requests meeting TTFT and ITL targets at each
+  concurrency) — derivable from data already collected, no new runs.
+- **Energy per 1000 tokens.** `power1_average` is exposed under the GPU's hwmon (~40 W
+  idle here). For a product that runs on a laptop this is a differentiator nobody publishes.
+- **Cold start and reload cost.** Ollama unloads after 5 minutes by default; fox has an
+  LRU with `--keep-alive-secs`. A mid-session reload is invisible in every throughput table.
+- **Reproducibility under concurrency.** fox is known to drift at `temperature=0` under
+  concurrent load. Whether the other three do too decides if that is a property of
+  continuous batching or a fox defect — it is currently an untested assumption.
+
+Use cases still unmeasured: model switching (two models alternating — the most common
+local setup), mid-generation cancellation, long-context single prompts (prefill-only,
+where fox's cache cannot help), batch embedding, and offline bulk processing.
 
 ## Benchmarking discipline — non-negotiable, learned the hard way
 
@@ -247,6 +275,114 @@ not lead with the smaller one.
 This is the table that has to sit next to the burst results, at the same prominence.
 fox's case is "much faster when there is a prefix to share, slightly slower when there
 is not", and stating the second half is what makes the first half credible.
+
+### Both backends, measured — there is no single winner
+
+Decided to publish both rather than pick one. `BACKEND=vulkan|rocm scripts/bench_engines.sh`,
+3 rounds each. Cold-burst TTFT p50:
+
+| engine | Vulkan | ROCm | |
+|---|---|---|---|
+| fox | **1121 ms** | 2391 ms | Vulkan 2.1× |
+| `llama-server` | **4327 ms** | 11315 ms | Vulkan 2.6× |
+| Ollama | 5344 ms | **4645 ms** | ROCm 1.15× |
+
+Warm TTFT reverses it — ROCm wins for all three (fox 48 vs 49, `llama-server` 140 vs 180,
+Ollama 370 vs 405 ms) — and decode leans slightly Vulkan. So the older
+`rocm-benchmarking-2026-08.md:107` line, "ROCm is ~15% faster than Vulkan", holds **only
+for decode**; on cold prefill Vulkan is 2-2.6× better for both llama.cpp-derived engines.
+Any backend recommendation has to name the workload.
+
+Practical asymmetry worth stating alongside the numbers: gfx1150 is not officially
+supported by ROCm. Both ROCm images compile for gfx1100 and `HSA_OVERRIDE_GFX_VERSION`
+misrepresents the card to the runtime. Vulkan needs none of that and also runs on Intel
+and NVIDIA. A 15% decode win does not buy that fragility for a default.
+
+### Saturation curves — and the ceiling this sweep did not reach
+
+`MODE=sweep`, decode workload at concurrency 1→32, 3 rounds. Aggregate tok/s and the
+scaling efficiency against a single client:
+
+| conc | fox (Vulkan) | `llama-server` (Vulkan) | Ollama (Vulkan) | fox (ROCm) | `llama-server` (ROCm) | Ollama (ROCm) |
+|---|---|---|---|---|---|---|
+| 1 | 53 | 54 | 48 | 52 | 54 | 48 |
+| 4 | 170 | **192** | 158 | 174 | 184 | 129 |
+| 8 | 249 | **277** | 248 | 277 | 299 | 221 |
+| 16 | 376 | **429** | 337 | 416 | 434 | 140 |
+| 32 | 584 | **663** | 460 | 496 | 496 | 133 |
+| efficiency @32 | 35% | 38% | 30% | 30% | 28% | 9% |
+
+Read honestly, three things come out of this:
+
+- **The sweep never found fox's or `llama-server`'s knee on Vulkan.** Both were still
+  climbing at 32, so "peak at concurrency 32" is the sweep's ceiling, not the engine's.
+  Extend to 64 and 128 before quoting a maximum. Reporting the ceiling as a peak would
+  be the same error class as a silent truncation.
+- **`llama-server` leads the decode sweep at every level.** Consistent with the neutral
+  control; fox's advantage is not throughput.
+- **Ollama on ROCm collapses past 8 clients** — 221 tok/s at 8, then 140 at 16 and 133 at
+  32, with efficiency down to 9% and ITL p99 at 204 ms. On Vulkan it scales normally to
+  32. Something in the ROCm path degrades under concurrency; not root-caused, and it
+  should be reproduced before it goes in a paper.
+
+### Noisy neighbour — the workload where the gap is largest
+
+`MODE=noisy`: 4 interactive clients streaming short chats continuously, then one ~4000-token
+prompt injected. Everything is measured as inter-token latency inside the injection
+window, because all three engines produce identical average throughput over the run — the
+damage is a freeze in somebody else's stream, and an average cannot see it.
+
+| | ITL p99 before | during | factor | long prefill |
+|---|---|---|---|---|
+| **Vulkan** | | | | |
+| fox | 51 ms | **278 ms** | **5.5×** | 1972 ms |
+| `llama-server` | 21 ms | 940 ms | 43.8× | 1760 ms |
+| Ollama | 40 ms | 1059 ms | 26.3× | 2194 ms |
+| **ROCm** | | | | |
+| fox | 60 ms | **664 ms** | **11.1×** | 4819 ms |
+| `llama-server` | 23 ms | 2329 ms | 100.8× | 4618 ms |
+| Ollama | 46 ms | 900 ms | 19.5× | 1894 ms |
+
+This is the largest separation any workload here produces, and it is the one a user feels
+most directly. But it comes with a finding that must be published next to it:
+
+**fox has the worst baseline jitter of the three.** 51-60 ms ITL p99 at rest against
+`llama-server`'s 21-23 ms. fox does not win by having a smoother stream; it wins by not
+freezing the stream when a long prefill arrives. Stating only the factor would be
+misleading — a reader who measures idle jitter would find fox 2.4× worse and conclude the
+whole table was cooked.
+
+### The KPIs that were missing
+
+Two were added because their absence was hiding real behaviour, not to pad the table.
+
+**Inter-token latency.** Adding ITL to the *existing* burst workload revealed what TTFT
+alone had been reporting as a mere 4× difference: in the cold burst, `llama-server`'s ITL
+p99 is **872 ms on Vulkan and 2304 ms on ROCm**, against fox's 74-76 ms. The interference
+effect was in the data all along and no reported metric could see it.
+
+**GPU memory, split VRAM/GTT.** This iGPU carves out only 2 GB as VRAM; everything else
+lands in GTT, system RAM mapped for the GPU. Peaks above an idle baseline, burst workload:
+
+| | VRAM | GTT | GPU busy |
+|---|---|---|---|
+| fox (Vulkan) | 237 MB | 2481 MB | 66% |
+| `llama-server` (Vulkan) | 298 MB | 2069 MB | 84% |
+| Ollama (Vulkan) | 238 MB | 2192 MB | 77% |
+| fox (ROCm) | 2 MB | 2834 MB | 71% |
+| `llama-server` (ROCm) | 3 MB | 2516 MB | 92% |
+
+On ROCm the VRAM figure does not move at all. A VRAM-only memory column would have read
+as "nothing allocated" for every engine on that backend.
+
+**fox uses ~400 MB more GTT than `llama-server`, consistently**, while keeping the GPU
+busy 66-71% against its 84-92%. Less redundant work, more memory held. Both halves belong
+in the table; the second is the cost of the first.
+
+The occupancy number doubles as the assertion that replaced a log that does not exist:
+`llama-server` never states its backend anywhere, and this machine has a documented case
+of `libggml-hip.so` failing to dlopen and the server falling back to CPU silently. Reading
+the driver catches that for every engine. A busy percentage near zero aborts the row.
 
 ### vLLM — its own section, 2026-08-03
 

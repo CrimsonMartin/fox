@@ -432,12 +432,45 @@ fragmentation; it accounts for ~3% at most. **Also not the lever.**
 even at `-lv 4`. fox's own figure is enough to rule out gross fragmentation on fox's
 side, but the comparison is one-sided and should be completed.)
 
-**So ~5-8% remains unexplained**, and every cheap explanation is now spent: it is not
-per-token overhead (fox and `llama-server` tie at concurrency 1 and 2, so any fixed
-per-request cost would have shown there), not unified KV, not batch fill, not the
-`logits.to_vec()` the older docs blamed (~0.5% by arithmetic), not thread count, not
-ROCm version. The next step is a profile of the decode loop — `perf record` on both
-servers under the same workload — not another hypothesis.
+**Found by profiling: it is the sampler's candidate selection.** `perf record` on both
+servers under the same decode workload, 4 clients, one server at a time. (The `perf` on
+`PATH` is a stub with no binary for this kernel; `/usr/lib/linux-tools-6.8.0-136/perf`
+samples user space fine, which is all this needs.)
+
+| self cost | fox | `llama-server` |
+|---|---|---|
+| waiting on the GPU fence | 78.7% | 82.8% |
+| **sorting** | **6.61%** `quicksort::partition` | **1.39%** `llama_token_data_array_partial_sort_inplace` |
+| sampler proper | 2.33% `sample_token` | 2.63% `common_sampler_sample` |
+| output filter | 0.93% | — |
+| **total CPU outside the GPU wait** | **~9.9%** | **~4.0%** |
+
+The ~5.9% difference is the size of the unexplained gap. The mechanism is at
+`src/engine/model/sampling.rs:189`, executed once per token **per sequence**:
+
+```rust
+let mut idx: Vec<usize> = (0..logits.len()).collect();   // 128256 × 8 B = 1 MB, per token
+idx.select_nth_unstable_by(k - 1, |&a, &b| {
+    logits[b].partial_cmp(&logits[a])                    // indirect: chases a 512 KB array
+```
+
+Two costs `llama-server` does not pay: a **1 MB allocation per token**, and a comparator
+that **dereferences into a separate logits array** on every comparison while permuting the
+index array. llama.cpp keeps `llama_token_data` (id and logit adjacent) contiguous and
+partial-sorts it in place, so its comparisons read the value they are sorting by.
+
+This also explains the shape of the curve, which nothing else did. The GPU decode step is
+weight-bound and barely grows from 1 to 4 sequences, while this CPU cost is paid once per
+sequence and grows linearly. So its *share* rises with concurrency: ~2% at 1-2 clients,
+~10% from 4 upward — exactly the measured step.
+
+Note what is **not** implicated: `logits.to_vec()`, which the older docs blamed, really is
+~0.5%. The copy was never the problem; the selection over the copy is.
+
+**Before changing it:** this repo has a precedent of a 4.6× sampling micro-benchmark win
+producing zero end-to-end throughput. Any fix must be validated with
+`scripts/ab_bench.sh` or `MODE=decode scripts/bench_engines.sh` across 3 rounds with
+disjoint ranges, not with a micro-benchmark.
 
 ### vLLM — its own section, 2026-08-03
 

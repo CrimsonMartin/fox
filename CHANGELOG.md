@@ -11,6 +11,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.0] - 2026-08-03
+
+Prompt reuse now works on hybrid and recurrent models, where it had been silently off.
+Minor rather than patch because of one line in particular: `--rs-rollback` defaults to
+`4`, so **a hybrid model allocates ~1.8 GB more than it did in 0.19.1**. On a
+memory-tight box that is a difference you want to read before upgrading, not discover.
+
+### Added
+
+- **`--rs-rollback <N>`** (`FOX_RS_ROLLBACK`, `rs_rollback` in `config.toml`, default
+  `4`) — recurrent-state snapshots kept per sequence so a hybrid or recurrent model can
+  roll its KV cache back far enough to reuse a prompt prefix. Dense models ignore it and
+  allocate nothing; llama.cpp clamps it to `0` for architectures without rollback
+  support.
+
+  The cost is not proportional to the number. Measured on Qwen3.5-9B with 8 concurrent
+  sequences, **~453 MB per snapshot**:
+
+  | `--rs-rollback` | extra memory | covers |
+  |---|---|---|
+  | `0` | none | nothing — no prompt reuse on these models |
+  | `4` (default) | ~1.8 GB | multi-turn chat: the next turn contains the previous reply, so the rollback is one token |
+  | `64` | ~30 GB | re-sending an identical prompt, where a whole reply must be rolled back |
+
+  Raise it only for workloads that re-send prompts verbatim.
+
+### Fixed
+
+- **Hybrid and recurrent models could not reuse prompts at all, and `llama-server`
+  could.** On Qwen3.5-9B with 8 clients behind a shared 1856-token prompt, fox's warm
+  TTFT was **42923 ms with `cached_tokens: 0`** against `llama-server`'s 13264 ms with
+  14680 — the reference reusing on the same architecture, the same llama.cpp and the
+  same GGUF. `registry.json` recommends this family (`qwen3.5`, `qwen3.5:9b`), so fox's
+  main differentiator was off on the models its own catalogue leads with.
+
+  Four separate gates had to be opened, and three were only found by measuring against
+  a real model — the unit tests passed and the log reported the capability as enabled
+  while reuse stayed at zero:
+
+  1. **One capability where there were two.** Inheriting the KV a sequence already
+     holds copies nothing and is legal on hybrids; copying a prefix out of *another*
+     live sequence needs `seq_cp` and is not. Both hung off one flag, so hybrids lost
+     the cheap kind too. Now `Model::supports_slot_reuse()` is separate from
+     `supports_seq_copy()`, and the scheduler carries both.
+  2. **Finished sequences were never parked.** `logits.rs` parked a completed sequence
+     only when the model supported *copying*. With nothing resident, every reuse path
+     downstream was dead no matter what it was permitted to do.
+  3. **`trim_sequence` discarded llama.cpp's result.** A partial `seq_rm` on a
+     recurrent cache legitimately fails outside its snapshot window
+     (`llama-memory-recurrent.cpp:181`) and mutates nothing. Ignoring that left a
+     request skipping a prefix that was no longer there. It now returns the result and
+     the engine re-prefills on refusal — slower, never wrong.
+  4. **`n_rs_seq` defaulted to `0`.** The snapshot window itself is `0` in
+     `llama_context_default_params` (`llama-context.cpp:3457`) and fox inherited it, so
+     every partial rollback failed. `QWEN35` is in `llm_arch_supports_rs_rollback`: the
+     architecture was never the obstacle.
+
+  Result on Qwen3.5-9B, 8 clients, warm burst: TTFT **42923 → 652 ms**,
+  `cached_tokens` **0 → 14856**, trims refused **8 of 8 → 0**. That 66× is what the
+  feature can do with a window sized for the workload, not what the default does — see
+  `--rs-rollback` above.
+
+- **Prompt reuse was decided without checking whether the model could perform it**,
+  which aborted the process instead of degrading. Three entry points — slot affinity,
+  copy-from-a-live-sibling, and the `n>1`/`best_of` fork — all reached
+  `llama_memory_seq_cp` without consulting `supports_seq_copy()`, so the engine could
+  log `prefix caching disabled` while the scheduler went on skipping prefill, ending in
+  `GGML_ASSERT(is_full)` at `llama-kv-cache.cpp:518`. The only guard that existed
+  (`batch.rs:261`) tested `llama_memory_can_shift()`, which the codebase itself
+  documents as the wrong predicate because it returns true for recurrent models. The
+  check now sits on `allow_reuse`, which feeds all three.
+
+### Performance
+
+- **Decode-bound throughput: 45 → 47 tok/s per request at 4 clients** (aggregate 170 →
+  175, ranges disjoint over 3 alternating rounds), closing the gap to `llama-server`
+  from 1.10× to 1.06×.
+
+  Profiling found the sampler's candidate selection, not the copy the older notes
+  blamed: fox spent **6.6% of wall time in `quicksort::partition`** against
+  `llama-server`'s 1.4% in `llama_token_data_array_partial_sort_inplace`. Per token
+  *per sequence* it allocated a 128256-element index vector (1 MB) only to truncate it
+  to `n`, and partitioned it with a comparator that dereferenced into a separate 512 KB
+  logits array on every comparison. `select_top_n` now keeps a sorted buffer of at most
+  `n` entries and streams the logits once — one `f32` compare against a running
+  threshold in the common case, sequential, no indirection.
+
+  Validated end-to-end rather than by micro-benchmark: this repo has a precedent of a
+  4.6× sampling micro-benchmark win producing zero real throughput. The gain shrinks as
+  models grow — on a dense 7B the aggregate figure reaches parity with `llama-server`
+  either way — so it is worth most on small models.
+
+### Internal
+
+- **`make ci` and the pre-push hook now type-check against a real llama.cpp build.**
+  Both ran entirely with `FOX_SKIP_LLAMA=1`, which never compiles the llama.cpp module,
+  so adding a parameter to `LlamaCppModel::load()` left eight call sites broken with
+  every check green. CI's `golden` job would have caught it; the local gate would not,
+  and the hook's banner claimed it mirrored CI. New `make check-real`,
+  `FOX_SKIP_REAL_CHECK=1` to skip, and `cargo check --all-targets` added to the
+  `golden` job so binaries and `tests/` are covered too.
+- **Benchmark harness**: `scripts/bench_engines.sh` runs fox, `llama-server` and Ollama
+  across two backends and four workloads (burst, decode, saturation sweep, noisy
+  neighbour), one server alive at a time with arm order rotated per round; plus
+  `bench_decode.py`, `bench_noisy.py`, `probe_cached_tokens.py`, `bench_vllm.sh` and
+  `try_ollama_rocm.sh`. Findings, including the ones that went against fox, are in
+  `docs/design/benchmark-plan-2026-08.md`.
+
+---
+
 ## [0.19.1] - 2026-08-03
 
 A correctness pass over everything a reader sees before they run anything, plus one

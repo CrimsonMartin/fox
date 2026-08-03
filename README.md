@@ -32,13 +32,13 @@ irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 
 ```bash
 # Pull a model and start
-fox pull llama3.2
+fox pull qwen3.5
 fox serve
 
 # Ask something (OpenAI-compatible)
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+  -d '{"model":"qwen3.5","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 
 # If you already use Ollama — just change the port from 11434 to 8080. That's it.
 ```
@@ -132,7 +132,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-local")
 
 resp = client.chat.completions.create(
-    model="llama3.2",
+    model="qwen3.5",
     messages=[{"role": "user", "content": "Say hi in 5 words."}],
 )
 print(resp.choices[0].message.content)
@@ -146,7 +146,7 @@ import OpenAI from "openai";
 const openai = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "sk-local" });
 
 const resp = await openai.chat.completions.create({
-  model: "llama3.2",
+  model: "qwen3.5",
   messages: [{ role: "user", content: "Say hi in 5 words." }],
 });
 console.log(resp.choices[0].message?.content);
@@ -165,7 +165,7 @@ console.log(resp.choices[0].message?.content);
   "models": [{
     "title": "fox (local)",
     "provider": "openai",
-    "model": "llama3.2",
+    "model": "qwen3.5",
     "apiBase": "http://localhost:8080/v1"
   }]
 }
@@ -254,7 +254,7 @@ fox search gemma
 fox search qwen coder --limit 5
 
 # Pull a model
-fox pull llama3.2            # top result, balanced quantization
+fox pull qwen3.5            # top result, balanced quantization
 fox pull gemma3:12b          # specific size
 fox pull gemma3:12b-q4       # specific quantization
 fox pull bartowski/gemma-3-12b-it-GGUF  # specific HF repo

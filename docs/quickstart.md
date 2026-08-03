@@ -21,13 +21,13 @@ See [Installation](./installation.md) for other platforms and Docker.
 fox can search HuggingFace Hub and download models with a single command. Let's start with Llama 3.2 3B — a capable small model that fits in 2 GB of memory.
 
 ```bash
-fox pull llama3.2
+fox pull qwen3.5
 ```
 
 You will see a progress bar as the model downloads to `~/.cache/ferrumox/models/`.
 
 ```
-Searching HuggingFace for "llama3.2"...
+Searching HuggingFace for "qwen3.5"...
   → bartowski/Llama-3.2-3B-Instruct-GGUF (Q4_K_M)
 Downloading Llama-3.2-3B-Instruct-Q4_K_M.gguf
   [████████████████████] 2.0 GB / 2.0 GB  •  12.4 MB/s  •  done
@@ -72,7 +72,7 @@ In another terminal, send a chat request using curl:
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama3.2",
+    "model": "qwen3.5",
     "messages": [
       {"role": "user", "content": "Explain what a KV cache is in one paragraph."}
     ]
@@ -117,7 +117,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
 
 response = client.chat.completions.create(
-    model="llama3.2",
+    model="qwen3.5",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)
@@ -126,7 +126,7 @@ print(response.choices[0].message.content)
 **Ollama CLI:**
 
 ```bash
-OLLAMA_HOST=http://localhost:8080 ollama run llama3.2
+OLLAMA_HOST=http://localhost:8080 ollama run qwen3.5
 ```
 
 **Open WebUI:**
@@ -162,7 +162,7 @@ Make sure the model name in your request matches a file in `~/.cache/ferrumox/mo
 
 **Out of memory on model load**
 
-Try a smaller quantization. `fox pull llama3.2:8b-q4` uses roughly half the memory of `q8`. You can also reduce the context length: `fox serve --max-context-len 2048`.
+Try a smaller quantization. `fox pull qwen3.5:4b-q4` uses roughly half the memory of `q8`. You can also reduce the context length: `fox serve --max-context-len 2048`.
 
 **Port 8080 is already in use**
 

@@ -18,6 +18,18 @@ build fix. No engine changes.
 
 ### Fixed
 
+- **`FOX_SKIP_LLAMA` did not invalidate the build script, so real builds silently ran
+  as stubs.** `build.rs` declared `cargo:rerun-if-env-changed` for
+  `FOX_CPU_ALL_VARIANTS` and nothing else. Cargo therefore never re-ran the script when
+  `FOX_SKIP_LLAMA` changed: after any stub build, a plain `cargo test` reused the stub
+  artifacts and kept compiling with `cfg(fox_stub)` set. It did not fail — it tested the
+  stub model, which is exactly what the real-model suites exist to catch. **99 tests
+  were being skipped in silence** (425 in a real build, 326 in a stub one), and
+  `make golden` could have been running the golden net against the stub. All six
+  environment variables the script reads are now declared. Found because a test count
+  dropped from 425 to 326 with no code change; all 425 pass in a real build, so nothing
+  had rotted while they were unrun.
+
 - **The ROCm FP8 guard patch is applied by the build instead of by hand.** The fix
   existed only as an uncommitted edit inside the `vendor/llama.cpp` working tree.
   Commit `79935f7` recorded the intent; the change itself was never tracked. A fresh

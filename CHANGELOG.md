@@ -57,16 +57,29 @@ Stated because they are measured, not guessed:
 
 - **Turn 0 costs ~500 ms more** — serialising the state, ~53 MB per sequence on this
   model. Repaid on the following turn and every turn after.
-- **The advantage narrows as a conversation grows.** Across turns 2 → 5 fox's TTFT rose
-  549 → 961 ms as the state being serialised grew with the history. The benchmark reaches
-  498 prompt tokens; **nothing here says what happens at 8000**, and the crossover where
-  checkpointing stops paying has not been found.
+- **The advantage grows with conversation length; there is no crossover up to 5151
+  prompt tokens.** Later-turn TTFT stays flat at 400-600 ms whatever the history size,
+  because the restore cost barely moves while the prefill avoided scales with the
+  prompt:
+
+  | prompt | checkpoint | turn 0 | later turns | gain |
+  |---|---|---|---|---|
+  | 159 tok | 58 MB | 1228 ms | 586 ms | 2.1× |
+  | 991 | 85 MB | 5325 ms | 396 ms | 13.4× |
+  | 2591 | 135 MB | 14821 ms | 466 ms | 31.8× |
+  | 5151 | 215 MB | 28856 ms | 582 ms | **49.6×** |
+
+  (An earlier draft of this entry claimed the advantage narrowed, from a 549 → 961 ms
+  drift inside one 4-conversation run. That was contention between conversations, not a
+  trend against length, and measuring it properly refuted it.)
+
+- **The limit is memory, not time.** A checkpoint is **~50 MB fixed plus ~32 KB per
+  token** (exact fit across the four sizes above). The 2048 MB default therefore holds
+  ~34 checkpoints of a short conversation but only ~9 at 5000 tokens, and behaviour once
+  the budget evicts is still untested. Scaling the default with the context length rather
+  than fixing it is the obvious next step.
 - **2 of the original 20 refused trims remain**, unexplained. Small, but a loose end
   rather than a rounded-down zero.
-- The 2048 MB default holds ~38 checkpoints of this size. Conversations larger or more
-  numerous than that will evict, and the eviction behaviour under that pressure is
-  untested.
-
 ---
 
 ## [0.20.1] - 2026-08-03

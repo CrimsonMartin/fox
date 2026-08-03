@@ -1224,3 +1224,42 @@ requests arrive together there is no idle sequence holding the prefix, and
 So the comparison stands with the reference server configured in its favour. That is the
 claim worth making, and it is only worth making because the check was run rather than
 argued.
+
+## vLLM does run on this iGPU (2026-08-03)
+
+Recorded because the prediction was wrong, and a wrong prediction that gets checked is
+worth more than a right one that does not.
+
+The expectation was that vLLM could not run here. This machine is a Radeon 890M —
+gfx1150, RDNA 3.5, integrated — and vLLM's ROCm builds target gfx90a, gfx942 and the
+discrete RDNA3 parts (gfx1100-1102). gfx1150 is not among them, so the plan was to
+record "not supported on this hardware" as a scope limit.
+
+It runs. `rocm/vllm:latest` with `HSA_OVERRIDE_GFX_VERSION=11.0.0`, which presents the
+iGPU as a discrete RDNA3 card:
+
+```
+torch 2.9.0a0+git1c57644   available: True   count: 1
+device name: (empty)
+Available KV cache memory: 34.30 GiB
+GPU KV cache size: 2,997,008 tokens
+init engine (profile, create kv cache, warmup model) took 7.61 seconds
+ENGINE OK
+' Kaitlin and I am a 17 year old female. I have'
+```
+
+Two things to carry into any comparison rather than trip over later.
+
+`torch.cuda.get_device_name(0)` returns an **empty string**. ROCm sees the device and
+allocates against it, but does not recognise the target well enough to name it. Anything
+that keys behaviour off the device name will misbehave, and it is a reminder that the
+override is a workaround, not support.
+
+The 5.22 tok/s in that run is **not** vLLM's speed and must not be quoted as such: it was
+a 0.5B model under `enforce_eager=True`, which disables CUDA graphs and Inductor
+compilation. That gate existed to answer "does it run", and it does. Measuring it fairly
+means dropping `enforce_eager` and giving it the same tuning effort as every other engine.
+
+Consequence for scope: the three-way comparison — fox, llama.cpp, vLLM, plus Ollama — is
+achievable on this machine. It should be, with the override documented as part of vLLM's
+configuration, since a reader with the same hardware needs it too.

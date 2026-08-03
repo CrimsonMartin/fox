@@ -12,6 +12,8 @@
 
 [![Sponsor](https://img.shields.io/badge/❤️_Sponsor-ea4aaa?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/manuelslemos)
 
+<img src="assets/demo.gif" alt="fox answering the same prompt over its OpenAI and Ollama APIs on one port" width="860">
+
 </div>
 
 Fox is dual-licensed MIT OR Apache-2.0 and stays that way. There is no paid tier and no plan for one.

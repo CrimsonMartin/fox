@@ -86,4 +86,4 @@ curl http://localhost:8080/v1/chat/completions \
 See [CHANGELOG.md](https://github.com/ferrumox/fox/blob/main/CHANGELOG.md) for the full release history,
 and [Benchmarks](benchmarks.md) for measured performance against `llama-server`.
 
-Current version: **v0.19.0**
+Current version: **v0.19.1**

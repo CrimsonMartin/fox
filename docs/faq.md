@@ -39,7 +39,7 @@ GGUF only. EXL2, AWQ, GPTQ, and safetensors formats are not supported.
 
 ### Is fox production-ready?
 
-fox is at v0.19.0 and the version number is the honest answer: it is pre-1.0, and a
+fox is at v0.19.1 and the version number is the honest answer: it is pre-1.0, and a
 premature 1.0 was published once and retracted. The HTTP API has been stable across
 recent releases and follows semantic versioning, Docker and systemd units ship with it,
 and every release must pass an end-to-end suite against a real model and a real server

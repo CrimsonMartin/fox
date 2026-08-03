@@ -150,7 +150,26 @@ else
 fi
 
 # A stale bundle once produced a confident and completely wrong table, so the build
-# stamps go in the log next to the numbers rather than being checked by eye.
+# stamps go in the log next to the numbers. Printing them was not enough: on 2026-08-03
+# a bundle 14 minutes older than the commit that changed a default was benchmarked and
+# the result read as a surprise finding until `strings` on the binary settled it. The
+# stamp was right there in the header and nobody compared it to anything. So compare it
+# here, loudly, instead of trusting a reader to do it.
+stale_check() {
+  local bin_ts src_ts
+  [ "$BACKEND" = vulkan ] || return 0   # image builds carry their own provenance
+  bin_ts=$(date -r "$FOX_BIN" +%s 2>/dev/null) || return 0
+  src_ts=$(git -C "$S/.." log -1 --format=%ct -- src/ build.rs Cargo.toml 2>/dev/null) || return 0
+  if [ "$bin_ts" -lt "$src_ts" ]; then
+    echo "  ################################################################"
+    echo "  # AVISO: el binario de fox es ANTERIOR al último commit de src/"
+    echo "  #   binario: $(date -d "@$bin_ts" '+%F %T')"
+    echo "  #   src/:    $(date -d "@$src_ts" '+%F %T')"
+    echo "  # Estás midiendo código que no es el que está en el árbol."
+    echo "  # Reconstruye antes de creerte nada: make vulkan"
+    echo "  ################################################################"
+  fi
+}
 echo "=== ráfaga concurrente, prompt de sistema compartido ==="
 echo "    backend     $BACKEND"
 echo "    modelo      $MODEL"
@@ -161,6 +180,7 @@ echo "    ollama      $OLLAMA_IMAGE"
 [ -n "$FOX_CHUNK" ] && echo "    fox-chunk   $FOX_CHUNK"
 echo "    commit      $(git -C "$S/.." rev-parse --short HEAD 2>/dev/null)"
 echo "    $CONC clientes · $MAXTOK tokens · ${CTX_PER_SEQ} ctx/secuencia · $ROUNDS rondas"
+stale_check
 echo
 
 stop_all() {

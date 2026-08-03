@@ -68,10 +68,22 @@ memory-tight box that is a difference you want to read before upgrading, not dis
      every partial rollback failed. `QWEN35` is in `llm_arch_supports_rs_rollback`: the
      architecture was never the obstacle.
 
-  Result on Qwen3.5-9B, 8 clients, warm burst: TTFT **42923 → 652 ms**,
-  `cached_tokens` **0 → 14856**, trims refused **8 of 8 → 0**. That 66× is what the
-  feature can do with a window sized for the workload, not what the default does — see
-  `--rs-rollback` above.
+  Result on Qwen3.5-9B, 8 clients, warm burst, with a window sized for the workload
+  (`--rs-rollback 64`): TTFT **42923 → 638 ms**, `cached_tokens` **0 → 14856**, trims
+  refused **8 of 8 → 0**. Against `llama-server` on the same model that is 13296 → 638
+  ms, i.e. fox goes from losing 3.2× to winning 20.8×.
+
+  **At the shipped default it does not, and this workload is the reason to say so.**
+  Re-sending an identical prompt requires rolling back the whole generated reply, which
+  needs a window of that size; `--rs-rollback 4` cannot and falls back to a full
+  prefill. Measured with defaults: fox warm **39970 ms, `cached_tokens` 0** against
+  `llama-server`'s **13214 ms** — still 3.0× behind. Out of the box this release
+  *unblocks* prompt reuse on hybrid models; it does not deliver it for prompts sent
+  verbatim twice unless you raise the window and pay the memory.
+
+  The case the default is chosen for — multi-turn, where the rollback is one token —
+  is **reasoned, not measured**: fox has no multi-turn benchmark yet. Treat the default
+  as a considered hedge rather than a verified win until that driver exists.
 
 - **Prompt reuse was decided without checking whether the model could perform it**,
   which aborted the process instead of degrading. Three entry points — slot affinity,

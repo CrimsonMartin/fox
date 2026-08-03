@@ -1194,3 +1194,33 @@ constraint, so a change to how blocks are *budgeted* has nothing to move. Comput
 sharing and budget sharing are separate wins that show up under separate pressures —
 quoting the accounting fix as the cause of a TTFT number would be attributing it to the
 wrong change.
+
+## Flag audit: was `llama-server` given its best configuration? (2026-08-03)
+
+Published before this check, the concurrent-burst numbers had an obvious line of attack:
+that `llama-server` was run near-default while fox was not. Two of its flags could
+plausibly have closed the gap, so both were checked in the source and one was measured.
+
+**`--slot-prompt-similarity` defaults to `0.10`** (`common/common.h:671`), the same value
+fox defaults to. Its longest-common-prefix slot affinity was therefore *active*
+throughout, which is also why its warm run reports the same `cached_tokens` fox does.
+Nothing was disabled by omission.
+
+**`--cache-reuse` defaults to `0`, disabled** (`common/common.h:620`), and the original
+runs did not set it. Measured with it on, same harness, same model, 8 clients behind the
+1856-token prompt:
+
+| | cold TTFT p50 | warm TTFT p50 | cold `cached_tokens` |
+|---|---|---|---|
+| `--cache-reuse 0` (as published) | 4376 ms | 189 ms | 0 |
+| `--cache-reuse 256` | 4367 ms | 186 ms | 0 |
+
+Unchanged, inside the noise. The flag addresses a different situation: reusing a cache
+across a *deleted gap in the middle* of a prompt via KV shifting. It cannot help here,
+because the problem is not that reuse is refused — it is that at the moment eight
+requests arrive together there is no idle sequence holding the prefix, and
+`get_available_slot()` will not consider a busy one.
+
+So the comparison stands with the reference server configured in its favour. That is the
+claim worth making, and it is only worth making because the check was run rather than
+argued.

@@ -20,7 +20,7 @@ Fox is dual-licensed MIT OR Apache-2.0 and stays that way. There is no paid tier
 
 ---
 
-## Get started
+## Try it in 30 seconds
 
 ```bash
 # Linux / macOS
@@ -31,9 +31,7 @@ irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 ```
 
 ```bash
-# Pull a model and start. qwen3.6 is Qwen3.6 35B-A3B — a mixture of experts, so
-# only ~3B parameters are active per token. It is a 22 GB download; `fox pull
-# qwen3.5` is 2.7 GB if you would rather start smaller.
+# Pull a model and start (qwen3.6 is 22 GB; qwen3.5 is 2.7 GB if you want a quicker first run)
 fox pull qwen3.6
 fox serve
 

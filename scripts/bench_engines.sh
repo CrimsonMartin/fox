@@ -444,6 +444,7 @@ if mode == "sweep":
         print(f"  {e}")
         print(f"    {'conc':>5}{'agregado':>12}{'rango':>16}{'por pet.':>11}{'ITL p99':>11}{'escala':>9}")
         base_agg = None
+        base_lvl = min(by)
         best = (0, 0)
         for lvl in sorted(by):
             aggs = [r[1] for r in by[lvl]]
@@ -454,9 +455,10 @@ if mode == "sweep":
                 base_agg = a
             if a > best[1]:
                 best = (lvl, a)
-            # Scaling efficiency against the single-client number: 1.0 would mean each
-            # added client bought a full client's worth of throughput.
-            eff = a / (base_agg * lvl) if base_agg else 0
+            # Scaling efficiency against the LOWEST LEVEL MEASURED, which is not always
+            # 1 client: a sweep starting at 16 was printing "6%" under a heading that
+            # claimed a single-client baseline, making every engine look broken.
+            eff = (a / lvl) / (base_agg / base_lvl) if base_agg else 0
             # Ranges per level, not just medians: without them a 10% difference that
             # sits inside the round-to-round spread reads as a result.
             print(f"    {int(lvl):>5}{a:>10.0f} t/s"
@@ -465,8 +467,8 @@ if mode == "sweep":
                   f"{statistics.median(itls):>9.0f} ms{eff:>8.0%}")
         print(f"    pico de agregado en concurrencia {int(best[0])} ({best[1]:.0f} tok/s)")
         print()
-    print("  'escala' compara con el cliente único: cuánto de un cliente entero compra")
-    print("  cada cliente añadido. Cuando cae, los clientes de más sólo compran latencia.")
+    print("  'escala' compara con el nivel más bajo medido: cuánto rinde cada cliente")
+    print("  frente a entonces. Cuando cae, los clientes de más sólo compran latencia.")
     raise SystemExit
 
 if mode == "noisy":

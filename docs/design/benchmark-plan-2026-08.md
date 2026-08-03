@@ -539,9 +539,48 @@ bends inside this range — it is still climbing at 128, so its own knee is beyo
 measured (and its 128 range, [680, 871], is wide enough that the level is unstable).
 
 At 128 clients `llama-server` serves **2.03× fox's throughput**. This is a far more
-important result than the sampler fix, and it is not explained: candidates are the
-scheduler's admission budget, KV pool exhaustion forcing queueing, or per-step scheduling
-cost that grows with batch size. Not investigated yet.
+important result than the sampler fix.
+
+**Cause found: the unified KV cache.** Same sweep with the `fox-seq` arm
+(`FOX_KV_UNIFIED=0`, same binary), 3 rounds, ranges disjoint against fox at every level:
+
+| conc | fox | fox-seq | `llama-server` | cost of unified KV |
+|---|---|---|---|---|
+| 16 | 392 [391, 394] | 417 [415, 420] | 435 [431, 439] | 6% |
+| 32 | 568 [561, 572] | 644 [641, 656] | 658 [647, 665] | 13% |
+| 64 | 611 [611, 616] | 778 [771, 790] | 777 [772, 787] | 27% |
+| 128 | **422** [420, 424] | **876** [869, 876] | 845 [794, 858] | **108%** |
+
+`fox-seq` does not bend at all: it matches `llama-server` at 64 (778 vs 777) and passes it
+at 128 (876 vs 845). **The entire collapse is the unified KV cache**, and nothing else in
+fox is implicated — scheduler, admission budget and sampler are common to both arms.
+
+The mechanism follows from `n_stream = 1`: with one shared cell pool, a decode step
+attends over the union of every sequence's cells, so cost grows as N·(N·L) instead of
+N·L. Measured decode-step time confirms the shape — doubling clients from 64 to 128
+multiplies fox's step time by **2.93** and `llama-server`'s by 1.85.
+
+ITL p99 at 128 tells the same story from the user's side: fox 391 ms, fox-seq 176 ms,
+`llama-server` 125 ms.
+
+**This corrects an earlier conclusion in this document.** "Turning unified KV off recovers
+2%, it is not the lever" was measured at **4 clients**, where it is true. As a general
+statement it was wrong: the cost is not a fixed percentage but a curve — 2% at 4 clients,
+108% at 128.
+
+So fox's central design choice is now priced on both sides, and the trade is sharp rather
+than free:
+
+| unified KV buys | unified KV costs |
+|---|---|
+| 5.7× cold TTFT, 117× warm (prefix reuse from a *live* sibling) | 6% throughput at 16 clients, 108% at 128 |
+| the noisy-neighbour advantage is **not** among them — `fox-seq` degrades 6.3× vs fox's 5.5×, so that comes from somewhere else | a concurrency ceiling at ~64 |
+
+The obvious follow-up is a design question, not a measurement: the mode is currently
+compile-time-fixed, and `FOX_KV_UNIFIED` exists only as a measurement switch. Choosing it
+per load — unified while concurrency is low and prefixes are shared, non-unified above the
+knee — is not implemented and would need the switch to be safe to flip on a live model,
+which it is not today.
 
 It also bounds every "fox is within X% of `llama-server`" claim in this document to
 **concurrency ≤ 16**. Above that the gap widens: 15% at 32, 22% at 64, 103% at 128.

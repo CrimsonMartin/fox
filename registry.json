@@ -442,6 +442,98 @@
         "embedding",
         "fast"
       ]
+    },
+    "olmo3": {
+      "aliases": [
+        "olmo"
+      ],
+      "repo": "lmstudio-community/Olmo-3-32B-Think-GGUF",
+      "recommended": "Olmo-3-32B-Think-Q4_K_M.gguf",
+      "description": "AI2 Olmo 3 32B Think — reasoning model, fully open weights and training data",
+      "size_gb": 19.5,
+      "tags": [
+        "chat",
+        "reasoning"
+      ]
+    },
+    "falcon-h1": {
+      "aliases": [
+        "falcon"
+      ],
+      "repo": "tiiuae/Falcon-H1R-7B-GGUF",
+      "recommended": "Falcon-H1R-7B-Q4_K_M.gguf",
+      "description": "TII Falcon-H1R 7B — hybrid attention/state-space. Prompt reuse is disabled for hybrid memory, so it will not show cached_tokens",
+      "size_gb": 4.6,
+      "tags": [
+        "chat",
+        "reasoning",
+        "hybrid"
+      ]
+    },
+    "apertus": {
+      "aliases": [],
+      "repo": "unsloth/Apertus-8B-Instruct-2509-GGUF",
+      "recommended": "Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+      "description": "Apertus 8B — fully open multilingual model, open data and training recipe",
+      "size_gb": 5.1,
+      "tags": [
+        "chat",
+        "multilingual"
+      ]
+    },
+    "nemotron3": {
+      "aliases": [
+        "nemotron"
+      ],
+      "repo": "lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF",
+      "recommended": "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-Q4_K_M.gguf",
+      "mmproj": "mmproj-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16.gguf",
+      "description": "NVIDIA Nemotron 3 Nano Omni 30B-A3B — multimodal reasoning MoE; pair with --moe-cpu",
+      "size_gb": 24.5,
+      "tags": [
+        "chat",
+        "reasoning",
+        "vision",
+        "moe"
+      ]
+    },
+    "hunyuan-mt": {
+      "aliases": [
+        "hunyuan"
+      ],
+      "repo": "Mungert/Hunyuan-MT-7B-GGUF",
+      "recommended": "Hunyuan-MT-7B-q4_k_m.gguf",
+      "description": "Tencent Hunyuan MT 7B — translation-focused",
+      "size_gb": 4.7,
+      "tags": [
+        "translation",
+        "multilingual"
+      ]
+    },
+    "ornith:35b": {
+      "aliases": [],
+      "repo": "deepreinforce-ai/Ornith-1.0-35B-GGUF",
+      "recommended": "ornith-1.0-35b-Q4_K_M.gguf",
+      "description": "Ornith 1.0 35B — the larger sibling of the 9B",
+      "size_gb": 21.2,
+      "tags": [
+        "chat",
+        "general"
+      ]
+    },
+    "granite4": {
+      "aliases": [
+        "granite4:3b"
+      ],
+      "repo": "ibm-granite/granite-4.1-3b-GGUF",
+      "recommended": "granite-4.1-3b-Q4_K_M.gguf",
+      "description": "IBM Granite 4.1 3B — small, permissively licensed, aimed at enterprise use",
+      "size_gb": 2.1,
+      "tags": [
+        "chat",
+        "general",
+        "fast"
+      ]
     }
   }
 }

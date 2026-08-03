@@ -85,7 +85,7 @@ build fix. No engine changes.
 
 ### Added
 
-- **14 current models in the built-in catalog, taking it from 18 entries to 32.** The
+- **21 current models in the built-in catalog, taking it from 18 entries to 39.** The
   catalog was not broken — all 18 existing entries still resolve on HuggingFace — but
   its selection had aged, so `fox pull` offered a 2024/2025 line-up and the README's
   worked example pulled a model from 2024. Added across roles rather than by
@@ -99,9 +99,20 @@ build fix. No engine changes.
   and the mixture-of-experts entries are the first models here that give `--moe-cpu`
   something to demonstrate.
 
+  Vendors beyond Qwen and Gemma: IBM Granite 4.1, AI2 Olmo 3, TII Falcon-H1R, Apertus,
+  NVIDIA Nemotron 3 Nano Omni, Tencent Hunyuan MT, and Ornith. Falcon-H1R is worth
+  singling out — it is hybrid attention/state-space, so prompt reuse is disabled for it
+  and it will report no cached tokens, which makes it the one entry that exercises that
+  path from the catalog.
+
+  Some current families are missing for a reason rather than by oversight: Kimi K3,
+  DeepSeek V4, GLM 5.2, MiniMax M3 and Inkling all publish as multi-part GGUFs, and
+  neither `registry.json` (one `recommended` filename) nor `fox pull` handles sharded
+  downloads. That is a real gap in fox, not a shortage of models.
+
   Every repository, filename, projector and size was verified against the HuggingFace
   API rather than written from memory, and sizes are the real byte counts. The whole
-  catalog is re-checked at 32 of 32 resolving, with no duplicate aliases.
+  catalog is re-checked at 39 of 39 resolving, with no duplicate aliases.
 
 - **The 16 `fox serve` flags that were never documented** — `--speculative`,
   `--spec-ngram`, `--spec-draft-len`, `--draft-model`, `--lora-modules`, `--mmproj`,

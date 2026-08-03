@@ -217,6 +217,35 @@ To add a new model:
 - **PagedAttention-style KV cache** — prevents memory fragmentation under concurrent load. Enables accurate eviction without OOM.
 - **mpsc channel for token streaming** — decouples the engine loop from the HTTP handler. The handler detects client disconnects via `send().is_err()` without polling.
 
+## Cutting a release
+
+The version bump, the CHANGELOG entry and `make e2e` come first. **The tag comes last,
+immediately before pushing** — never earlier.
+
+This is a rule because breaking it costs more than it looks. On 2026-08-03 three tags
+were created the moment their release commit landed, and every one of them had to be
+deleted and recreated when a later measurement showed the CHANGELOG claiming something
+untrue: a default that did not do what the entry said, and an "advantage narrows" line
+that a proper experiment reversed. Nothing was pushed, so nothing broke — but a tag that
+moves is not a marker, and `main`/`develop` currently sit far behind, which makes tags
+the only durable record these releases have.
+
+The `release: X.Y.Z` commit is the marker while work continues. Tag that commit when you
+push it, not when you write it. If a marker is genuinely needed sooner, use an annotated
+`-rc1` tag: the churn then shows up in history instead of being hidden behind a
+`git tag -d`.
+
+Order:
+
+1. `make ci` (fmt, clippy, tests, and the real-llama.cpp check)
+2. `make e2e E2E_MODEL=...` — the release gate. Unit, golden and stub tests do not see
+   cross-request prefix-cache lifecycle bugs; this is where two of them were caught.
+3. Version bump: `Cargo.toml`, `Cargo.lock`, `README.md` badge, `STATUS.md`,
+   `docs/introduction.md`
+4. CHANGELOG entry — including what the release does **not** do, and any measured limits
+5. `release: X.Y.Z` commit
+6. Push, then tag
+
 ## Pull request process
 
 `develop` is the active trunk; `main` is the release branch. Branch from and target `develop`.

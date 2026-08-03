@@ -112,9 +112,19 @@ if [ "$MODE" = sweep ]; then
 fi
 CTX=$((CTX_PER_SEQ * SRV_CONC))   # llama-server splits -c across --parallel slots
 NOISY_CLIENTS="${NOISY_CLIENTS:-4}"
+# Baseline window before the long prefill is injected. 10 s is fine for a 1B and far too
+# short for a 9B: the interactive clients had not produced a single token yet, so two
+# engines reported an ITL p99 of 0 ms — an empty sample, not a smooth stream. Scale it
+# with the model.
+NOISY_BASELINE="${NOISY_BASELINE:-10}"
 CONT="fox-bench-ollama"
 ENG_CONT="fox-bench-engine"     # fox / llama-server when they run from an image
-OLLAMA_DATA="${OLLAMA_DATA:-$OUT/ollama}"
+# NOT under $OUT: on this machine $OUT lands in /tmp, which is a 62 GB tmpfs — i.e.
+# RAM, shared with the GPU. `ollama create` copies the whole GGUF into its blob store,
+# so three runs of a 9B quietly ate 33 GB of the memory the benchmark was measuring, and
+# the fourth failed to start with "no space left". Disk-backed by default, and removed
+# at the end of the run rather than left behind with a printed reminder.
+OLLAMA_DATA="${OLLAMA_DATA:-$HOME/.cache/ferrumox/bench-ollama}"
 # gfx1150 has no ROCm kernels of its own; both images are compiled for gfx1100 and the
 # override makes the runtime present the iGPU as one. Same value Dockerfile.rocm builds
 # against — if they disagree the server loads and then faults mid-decode.
@@ -378,12 +388,17 @@ run_arm() {
              "$eng" "$lvl" "$tps" "$agg" "$itl99" "$ctok"
     done
   elif [ "$MODE" = noisy ]; then
-    out=$(python3 "$S/bench_noisy.py" "$URL" "$(client_model "$eng")" "$NOISY_CLIENTS" 2>&1) || {
+    out=$(python3 "$S/bench_noisy.py" "$URL" "$(client_model "$eng")" "$NOISY_CLIENTS" 110 "$NOISY_BASELINE" 2>&1) || {
       echo "  $eng: el cliente falló"; echo "$out" | tail -3; sampler_stop; stop_all; return 1; }
     read -r _ bp50 bp99 ip50 ip99 ratio lttft win nb ni lptok <<< "$out"
     echo "$bp99 $ip99 $ratio $lttft" >> "$OUT/noisy_$eng.dat"
     printf "  %-13s ITL p99 antes %6s ms → durante %8s ms  (x%s)  prefill largo %s ms / %s tok  ventana %ss  muestras %s/%s\n" \
            "$eng" "$bp99" "$ip99" "$ratio" "$lttft" "$lptok" "$win" "$nb" "$ni"
+    # An empty bucket is not a smooth stream. Without this the table prints 0 ms and
+    # reads as a perfect score for whichever engine was too slow to emit a token.
+    if [ "${nb:-0}" = 0 ] || [ "${ni:-0}" = 0 ]; then
+      echo "  AVISO: muestras vacías (antes=$nb, durante=$ni) — sube NOISY_BASELINE; el 0 ms no es un resultado"
+    fi
     if [ "${lptok:-0}" -gt "$CTX_PER_SEQ" ]; then
       echo "  AVISO: el prompt largo ($lptok) no cabe en el contexto por secuencia ($CTX_PER_SEQ)"
     fi
@@ -573,4 +588,10 @@ else:
 PY
 echo
 echo "datos y logs en $OUT"
-echo "(borra $OLLAMA_DATA cuando acabes: el import de Ollama duplica el GGUF)"
+# The blob store is a copy of the model, not a result. Removing it here rather than
+# telling the reader to do it is the difference between a rule and a habit.
+if [ -d "$OLLAMA_DATA" ]; then
+  docker run --rm -v "$OLLAMA_DATA:/d" alpine sh -c 'rm -rf /d/..?* /d/.[!.]* /d/*' >/dev/null 2>&1
+  rmdir "$OLLAMA_DATA" 2>/dev/null
+  echo "(borrado el almacén de blobs de Ollama en $OLLAMA_DATA)"
+fi

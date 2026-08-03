@@ -61,6 +61,40 @@ more interesting paper than "fox is 4× faster", but it only works if told whole
 - memory: ~400 MB more GTT for the same workload
 - concurrency: collapses above 64; `llama-server` was still climbing at 128
 
+### The size axis, isolated — Qwen2.5-7B (dense GQA)
+
+Qwen3.5-9B changed size *and* architecture at once, and the architecture dominated (next
+section). Qwen2.5-7B-Instruct-Q4_K_M is dense GQA, the same family as Llama-3.2-1B, so it
+isolates size. 3 rounds, disjoint ranges, Vulkan, same workloads.
+
+| | 1B | 7B dense |
+|---|---|---|
+| cold TTFT, fox | 1102 ms | 5130 ms |
+| cold TTFT, `llama-server` | 4327 ms | 33207 ms |
+| **fox's cold advantage** | 3.9× | **6.5×** |
+| warm TTFT, fox vs `llama-server` | 3.7× | 2.3× |
+| decode, per request | 1.06× behind | 1.05× behind |
+| decode, aggregate | 1.05× behind | **parity** (ranges overlap) |
+| noisy neighbour, absolute stall | fox 273 ms / ls 933 ms | fox 1712 ms / ls 5630 ms |
+| idle ITL p99 | fox 50 / ls 21 ms | fox 188 / ls 67 ms |
+
+**The signs hold and the main advantage grows with model size** — 3.9× → 6.5× cold, which
+follows from prefill costing more on a bigger model, so avoiding it is worth more.
+`llama-server` takes **33 seconds** to first token against fox's 5.1, with `cached_tokens`
+0 against 12901: the same mechanism as the 1B, more expensive.
+
+Two rows move against fox:
+
+- **The warm advantage narrows** (3.7× → 2.3×). Both engines reuse there; what remains
+  weighs relatively less when the model itself is slow.
+- **Decode aggregate is now parity** rather than 5% behind — the sampler cost is per token
+  and constant while the GPU step lengthens, so its share shrinks. That also means **the
+  sampler fix matters less the larger the model**; it was worth most on the 1B.
+
+The noisy-neighbour ratio between engines is unchanged at 3.3× of absolute stall, matching
+the 4× prefill-chunk ratio again, so that explanation carries across model sizes. fox's
+worse idle jitter carries across too (188 ms vs 67 ms).
+
 ### The 9B run found something bigger than a benchmark number
 
 Qwen3.5 is a **hybrid** architecture — `LLM_ARCH_QWEN35` sits in llama.cpp's
@@ -101,8 +135,8 @@ The whole comparison is **Llama-3.2-1B-Q8_0 on one iGPU**, i.e. one size and one
 architecture (dense GQA). The Qwen3.5-9B attempt above is not a size comparison — it
 changed architecture at the same time, and the architecture dominated the result.
 
-Still unmeasured: a *dense* model at 7-9B (to isolate size), multi-turn, RAG and agentic
-workloads, sliding-window attention, and MoE. Nothing here should be published as a
+Still unmeasured: multi-turn, RAG and agentic workloads, sliding-window attention, and
+MoE. (The dense 7B size axis is now measured — see above.) Nothing here should be published as a
 general claim about fox.
 
 The 9B run is also inconclusive as a *performance* comparison for separate reasons worth
@@ -333,6 +367,13 @@ where fox's cache cannot help), batch embedding, and offline bulk processing.
 - **Before publishing an advantage, try to hand it to the reference with a flag.** The
   noisy-neighbour result was `--max-prefill-chunk 512` against `n_batch 2048`, and `-b
   512` erased it. If a one-flag change closes the gap, it was never a design difference.
+- **Check where the benchmark's own scratch space lives.** `$OUT` here defaults under
+  `/tmp`, which on this machine is a **62 GB tmpfs — RAM, shared with the GPU**. Each
+  Ollama arm copies the whole GGUF into its blob store, so three 9B runs silently held
+  33 GB of the memory being measured and the next run failed to start. The fix is the
+  store living on disk and the script deleting it, not a printed reminder: a cleanup rule
+  that depends on remembering is not a rule. (Re-measured with RAM free, fox's 7B cold
+  TTFT moved 5130 → 5062 ms, so the affected runs stand — but that was luck, not design.)
 - **Prefer absolute latencies to ratios against each engine's own baseline.** The
   noisy-neighbour "factor" rewarded whichever engine had rougher idle streams: at a
   matched chunk `llama-server` scored a worse factor while stalling less.

@@ -61,11 +61,56 @@ more interesting paper than "fox is 4× faster", but it only works if told whole
 - memory: ~400 MB more GTT for the same workload
 - concurrency: collapses above 64; `llama-server` was still climbing at 128
 
+### The 9B run found something bigger than a benchmark number
+
+Qwen3.5 is a **hybrid** architecture — `LLM_ARCH_QWEN35` sits in llama.cpp's
+`llm_arch_is_hybrid` list (`llama-arch.cpp:946`) alongside `QWEN3NEXT`, `FALCON_H1` and
+`JAMBA`. fox's `supports_seq_copy()` returns false for hybrids, so it logs
+`prefix caching disabled (model cannot donate KV cells)` and **turns prompt reuse off
+entirely**. Measured on Qwen3.5-9B-Q4_K_M, 8 clients, shared 1856-token prompt:
+
+| warm burst | fox | `llama-server` |
+|---|---|---|
+| TTFT p50 | 43166 ms | **13264 ms** |
+| `cached_tokens` | **0** | 14680 |
+
+**fox's headline advantage does not merely shrink here — it inverts.** `llama-server` is
+3.25× faster warm because it still reuses and fox does not.
+
+This is not only a paper problem. `registry.json` recommends `qwen3.5` (4B) as "a good
+default to try fox with" and `qwen3.5:9b` as the step up — the **same hybrid family**. On
+the models fox's own catalogue leads with, its main differentiator is off.
+
+The guard is also broader than the hardware requires, and `llama-server` proves it on the
+same llama.cpp: reuse comes in two kinds, and only one needs cross-sequence copying.
+
+| kind | needs | works on hybrids |
+|---|---|---|
+| inherit a slot's own KV and skip prefill | nothing copied | **yes — `llama-server` does it, 14680 tokens** |
+| copy a prefix out of another (live) sequence | `seq_cp` + unified KV | no |
+
+fox gates both on one flag (`allow_reuse`), so a hybrid model loses the cheap, no-copy
+kind too. Splitting the capability in two would restore parity with `llama-server` on this
+whole family. Not implemented — it carries real correctness risk on recurrent state, which
+is why the conservative guard exists, and it is a design decision rather than a
+measurement.
+
 ### What has not been done
 
-The whole comparison is **Llama-3.2-1B-Q8_0 on one iGPU**. The 9B model, the multi-turn,
-RAG and agentic workloads, and every architecture other than dense GQA are unmeasured.
-Nothing here should be published as a general claim about fox.
+The whole comparison is **Llama-3.2-1B-Q8_0 on one iGPU**, i.e. one size and one
+architecture (dense GQA). The Qwen3.5-9B attempt above is not a size comparison — it
+changed architecture at the same time, and the architecture dominated the result.
+
+Still unmeasured: a *dense* model at 7-9B (to isolate size), multi-turn, RAG and agentic
+workloads, sliding-window attention, and MoE. Nothing here should be published as a
+general claim about fox.
+
+The 9B run is also inconclusive as a *performance* comparison for separate reasons worth
+recording so nobody re-runs it unchanged: fox's burst ranges spanned [43109, 57537] ms
+(33% spread), decode ranges overlapped at every pairing, and the noisy-neighbour driver
+reported 0 ms ITL for two engines because its 10 s baseline is too short for a model this
+slow — the interactive clients had not produced a token yet. A slow model needs the
+baseline window scaled, not the same constants.
 
 
 ## Method, agreed

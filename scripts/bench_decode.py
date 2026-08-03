@@ -60,9 +60,16 @@ PROMPTS = [
 
 
 def one(i):
+    # The index goes FIRST so that two clients never share a prefix. With 16 base
+    # prompts and `i % 16`, concurrency 32 handed two clients byte-identical prompts —
+    # and an identical prompt is precisely what fox's prefix cache is built to reuse,
+    # so the neutral control quietly turned into the favourable workload at exactly the
+    # concurrencies where the sweep was making its strongest claims. Leading with the
+    # index costs one token of shared prefix instead of the whole prompt.
+    prompt = f"[{i}] {PROMPTS[i % len(PROMPTS)]}"
     body = json.dumps({
         "model": MODEL,
-        "messages": [{"role": "user", "content": PROMPTS[i % len(PROMPTS)]}],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": MAXTOK,
         "temperature": 0.8,
         "top_p": 0.9,

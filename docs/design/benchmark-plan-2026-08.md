@@ -481,31 +481,74 @@ precedent of a 4.6× sampling micro-benchmark win producing zero real throughput
 | fox aggregate | 170 tok/s | **175 tok/s** |
 | gap vs `llama-server` | 1.10× | **1.06×** |
 
-Saturation curve, aggregate tok/s — the gain grows with concurrency, exactly as a
-per-sequence cost predicts:
-
-| conc | fox before | fox after | `llama-server` before → after |
-|---|---|---|---|
-| 1 | 53 | 53 | 54 → 54 |
-| 4 | 170 | 178 | 192 → 191 |
-| 16 | 376 | **423** | 429 → 431 |
-| 32 | 584 | **641** | 663 → 664 |
-
-**The deficit at 32 clients goes from 13.5% to 3.5%.**
-
-What makes this credible rather than drift: `llama-server` was not touched, and its six
-levels move by at most 1.5% between the two sessions. fox at concurrency 1 does not move
-either, which is what a per-sequence cost predicts — with one sequence it was already
-amortised by the GPU step.
-
 No regression in the burst workload: cold TTFT 1108 → 1100 ms, warm 51 → 47 ms, and
 `cached_tokens` identical at 12908/14840, so prefix reuse is untouched.
 
-Two limits on this validation, stated rather than buried: the sweep prints medians per
-level but **not ranges**, so the +12.5% and +9.8% lack a formal overlap test (only the
-decode block has disjoint ranges); and the new unit tests **do not run in CI** — the whole
-sampling module is `#[cfg(not(fox_stub))]` and CI runs with `FOX_SKIP_LLAMA=1` (331 tests
-there against 430 in a real build). A sampler regression would not be caught by `make ci`.
+**The sweep-based claims first published for this fix were withdrawn** — see "the
+neutral control was not neutral" below. Only the conc-4 decode figures above survive,
+because they come from arms alternating inside one run with disjoint ranges. Validating
+the fix at higher concurrency needs an old-sampler arm inside the same run, the way
+`fox-seq` was done; comparing sweeps across sessions cannot carry it.
+
+The new unit tests **do not run in CI**: the whole sampling module is
+`#[cfg(not(fox_stub))]` and CI runs with `FOX_SKIP_LLAMA=1` (331 tests there against 430
+in a real build). A sampler regression would not be caught by `make ci`.
+
+### The neutral control was not neutral above 16 clients
+
+`bench_decode.py` held 16 prompts and handed them out with `i % 16`, so from 32 clients
+upward two clients got **byte-identical prompts** — precisely what fox's prefix cache
+exists to reuse. The control turned into the favourable workload at exactly the
+concurrencies where the sweep was making its strongest claims. Fixed by putting the
+client index first, so two clients share one token instead of a whole prompt.
+
+The bias was real and one-sided, which is itself a demonstration of the paper's thesis:
+
+| conc 32, aggregate | duplicate prompts | unique prompts |
+|---|---|---|
+| fox | 641 | **570** (−11%) |
+| `llama-server` | 664 | 673 (+1%) |
+
+fox gained 11% from the duplicates and `llama-server` nothing, because `llama-server`
+cannot reuse from a live sibling and fox can. **Every sweep figure at 32 published before
+this fix is inflated in fox's favour and is retracted**, including "the deficit at 32
+goes from 13.5% to 3.5%" — measured cleanly the deficit at 32 is **15%**.
+
+A second lesson from the same comparison: two post-fix runs at 16 clients gave 423 and
+400 tok/s, a 5.7% spread between sessions, while the within-run ranges were ±1%. Sweep
+numbers are **not comparable across sessions** at better than ~6%, so any A/B on them
+must run both arms inside one alternating run.
+
+### Saturation, to 128 clients — fox has a ceiling and `llama-server` does not
+
+3 rounds, alternating arms, unique prompts, Vulkan.
+
+| conc | fox | range | `llama-server` | range |
+|---|---|---|---|---|
+| 1 | 53 | [53, 53] | 54 | [54, 54] |
+| 4 | 176 | [174, 176] | 190 | [187, 190] |
+| 8 | 250 | [249, 255] | 275 | [269, 278] |
+| 16 | 400 | [399, 404] | 432 | [431, 435] |
+| 32 | 570 | [570, 570] | 673 | [673, 675] |
+| 64 | **610** | [604, 617] | 782 | [780, 789] |
+| 128 | **416** | [414, 416] | **843** | [680, 871] |
+
+**fox peaks at 64 clients and then collapses**: 610 → 416 tok/s, scaling efficiency down
+to 6%, and ITL p99 at **400 ms** against `llama-server`'s 124 ms. `llama-server` never
+bends inside this range — it is still climbing at 128, so its own knee is beyond what was
+measured (and its 128 range, [680, 871], is wide enough that the level is unstable).
+
+At 128 clients `llama-server` serves **2.03× fox's throughput**. This is a far more
+important result than the sampler fix, and it is not explained: candidates are the
+scheduler's admission budget, KV pool exhaustion forcing queueing, or per-step scheduling
+cost that grows with batch size. Not investigated yet.
+
+It also bounds every "fox is within X% of `llama-server`" claim in this document to
+**concurrency ≤ 16**. Above that the gap widens: 15% at 32, 22% at 64, 103% at 128.
+
+Memory at 128 clients: `llama-server` peaks at **+17.5 GB of GTT**, which is the KV cache
+for 128 × 4096 tokens. It fits only because this machine shares 123 GB of system RAM with
+the GPU.
 
 ### vLLM — its own section, 2026-08-03
 

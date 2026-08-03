@@ -442,7 +442,7 @@ if mode == "sweep":
         for lvl, tps, agg, itl in rows:
             by.setdefault(lvl, []).append((tps, agg, itl))
         print(f"  {e}")
-        print(f"    {'conc':>5}{'agregado':>12}{'por pet.':>11}{'ITL p99':>11}{'escala':>9}")
+        print(f"    {'conc':>5}{'agregado':>12}{'rango':>16}{'por pet.':>11}{'ITL p99':>11}{'escala':>9}")
         base_agg = None
         best = (0, 0)
         for lvl in sorted(by):
@@ -457,7 +457,11 @@ if mode == "sweep":
             # Scaling efficiency against the single-client number: 1.0 would mean each
             # added client bought a full client's worth of throughput.
             eff = a / (base_agg * lvl) if base_agg else 0
-            print(f"    {int(lvl):>5}{a:>10.0f} t/s{statistics.median(tpss):>9.1f} t/s"
+            # Ranges per level, not just medians: without them a 10% difference that
+            # sits inside the round-to-round spread reads as a result.
+            print(f"    {int(lvl):>5}{a:>10.0f} t/s"
+                  f"{f'[{min(aggs):.0f}, {max(aggs):.0f}]':>16}"
+                  f"{statistics.median(tpss):>9.1f} t/s"
                   f"{statistics.median(itls):>9.0f} ms{eff:>8.0%}")
         print(f"    pico de agregado en concurrencia {int(best[0])} ({best[1]:.0f} tok/s)")
         print()

@@ -85,6 +85,24 @@ build fix. No engine changes.
 
 ### Added
 
+- **14 current models in the built-in catalog, taking it from 18 entries to 32.** The
+  catalog was not broken — all 18 existing entries still resolve on HuggingFace — but
+  its selection had aged, so `fox pull` offered a 2024/2025 line-up and the README's
+  worked example pulled a model from 2024. Added across roles rather than by
+  popularity: Qwen3.5 4B and 9B, Qwen3.6 35B-A3B and 27B, Gemma 4 26B-A4B, 12B and
+  E4B, Qwen3-Coder 30B-A3B, Qwen3-VL 4B, Ornith 1.0 9B, EmbeddingGemma 300M, Qwen3
+  Embedding 0.6B, and two rerankers. Existing entries are kept, since removing them
+  would break anyone's `fox pull llama3.2`.
+
+  Two gaps this closes are features that shipped without anything to run them on:
+  `/rerank` and `--reranking` landed in 0.19 with no reranker in the catalog at all,
+  and the mixture-of-experts entries are the first models here that give `--moe-cpu`
+  something to demonstrate.
+
+  Every repository, filename, projector and size was verified against the HuggingFace
+  API rather than written from memory, and sizes are the real byte counts. The whole
+  catalog is re-checked at 32 of 32 resolving, with no duplicate aliases.
+
 - **The 16 `fox serve` flags that were never documented** — `--speculative`,
   `--spec-ngram`, `--spec-draft-len`, `--draft-model`, `--lora-modules`, `--mmproj`,
   `--reranking`, `--kv-reuse`, `--slot-prompt-similarity`, `--cache-ram`,

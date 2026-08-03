@@ -99,12 +99,14 @@ build fix. No engine changes.
   holds several differently-sized sets at once, so grouping keys on the split count as
   well as the name — mixing two sets yields a model that cannot load.
 
-  Worth knowing before reaching for it: these models are large even at their smallest
-  quantisation. The smallest complete Kimi K3 set is 594 GB and the smallest DeepSeek
-  V4 Flash is 82 GB, so this unblocks the download rather than making them run on a
-  laptop.
+  The four models this unblocks are in the catalogue, each labelled with its real
+  size: DeepSeek V4 Flash (82 GB), MiniMax M3 (90 GB), GLM 5.2 (217 GB) and Kimi K3
+  (594 GB). Those figures are the *smallest complete set published* for each, at IQ1_S,
+  so the description says outright that this is the set that loads rather than the best
+  the model does. Listing them without that would be worse than omitting them: a
+  `fox pull` sitting next to 2 GB entries should not quietly start a 594 GB download.
 
-- **21 current models in the built-in catalog, taking it from 18 entries to 39.** The
+- **25 current models in the built-in catalog, taking it from 18 entries to 43.** The
   catalog was not broken — all 18 existing entries still resolve on HuggingFace — but
   its selection had aged, so `fox pull` offered a 2024/2025 line-up and the README's
   worked example pulled a model from 2024. Added across roles rather than by
@@ -131,7 +133,7 @@ build fix. No engine changes.
 
   Every repository, filename, projector and size was verified against the HuggingFace
   API rather than written from memory, and sizes are the real byte counts. The whole
-  catalog is re-checked at 39 of 39 resolving, with no duplicate aliases.
+  catalog is re-checked at 43 of 43 resolving, with no duplicate aliases.
 
 - **The 16 `fox serve` flags that were never documented** — `--speculative`,
   `--spec-ngram`, `--spec-draft-len`, `--draft-model`, `--lora-modules`, `--mmproj`,

@@ -534,6 +534,66 @@
         "general",
         "fast"
       ]
+    },
+    "deepseek-v4": {
+      "aliases": [
+        "deepseek-v4:flash"
+      ],
+      "repo": "unsloth/DeepSeek-V4-Flash-GGUF",
+      "recommended": "UD-IQ1_S/DeepSeek-V4-Flash-UD-IQ1_S-00001-of-00003.gguf",
+      "description": "DeepSeek V4 Flash — 3 shards, 82 GB at IQ1_S. Needs ~90 GB of RAM or VRAM, and IQ1_S is an aggressive quantisation; treat it as the smallest set that loads, not the best this model does",
+      "size_gb": 82.5,
+      "tags": [
+        "chat",
+        "reasoning",
+        "moe",
+        "huge",
+        "sharded"
+      ]
+    },
+    "minimax-m3": {
+      "aliases": [],
+      "repo": "bartowski/MiniMax-M3-GGUF",
+      "recommended": "MiniMax-M3-IQ1_S/MiniMax-M3-IQ1_S-00001-of-00003.gguf",
+      "description": "MiniMax M3 — 3 shards, 90 GB at IQ1_S. Q4_K_M exists in the same repository at 261 GB if you have the room",
+      "size_gb": 90.5,
+      "tags": [
+        "chat",
+        "reasoning",
+        "huge",
+        "sharded"
+      ]
+    },
+    "glm5": {
+      "aliases": [
+        "glm5.2"
+      ],
+      "repo": "unsloth/GLM-5.2-GGUF",
+      "recommended": "UD-IQ1_S/GLM-5.2-UD-IQ1_S-00001-of-00006.gguf",
+      "description": "GLM 5.2 — 6 shards, 217 GB at IQ1_S. Workstation or server territory, not a laptop",
+      "size_gb": 216.7,
+      "tags": [
+        "chat",
+        "reasoning",
+        "huge",
+        "sharded"
+      ]
+    },
+    "kimi-k3": {
+      "aliases": [
+        "kimi"
+      ],
+      "repo": "unsloth/Kimi-K3-GGUF",
+      "recommended": "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00001-of-00014.gguf",
+      "description": "Kimi K3 — 14 shards, 594 GB at IQ1_S, the smallest complete set published. Server hardware only",
+      "size_gb": 594.0,
+      "tags": [
+        "chat",
+        "reasoning",
+        "moe",
+        "huge",
+        "sharded"
+      ]
     }
   }
 }

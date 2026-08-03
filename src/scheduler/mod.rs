@@ -63,6 +63,9 @@ pub struct Scheduler {
     /// False when the loaded model's KV cache cannot donate cells — see
     /// `set_prefix_reuse`.
     prefix_reuse: std::sync::atomic::AtomicBool,
+    /// False only when a model cannot even reuse the KV a sequence already holds.
+    /// Separate from `prefix_reuse` on purpose: see `set_slot_reuse`.
+    slot_reuse: std::sync::atomic::AtomicBool,
     /// Master switch for KV reuse (`--kv-reuse`). When false, finished sequences are
     /// always cleared and every prompt is prefilled from token 0 — the pre-0.19
     /// behaviour, kept as an escape hatch and as the A/B baseline arm.
@@ -126,6 +129,24 @@ impl Scheduler {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether a request may inherit the KV its chosen slot already holds.
+    pub fn slot_reuse_enabled(&self) -> bool {
+        self.slot_reuse.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turn off reuse of a slot's *own* resident KV.
+    ///
+    /// This is the weaker of the two capabilities and almost every model has it —
+    /// nothing is copied, the request simply keeps what its sequence already holds and
+    /// prefills the rest. It is set apart from [`Self::set_prefix_reuse`] because
+    /// gating both on "can this model donate cells" silently disabled prompt reuse for
+    /// every hybrid architecture (Qwen3.5, Qwen3-Next, Falcon-H1, Jamba), which
+    /// `llama-server` performs on the same models without difficulty.
+    pub fn set_slot_reuse(&self, enabled: bool) {
+        self.slot_reuse
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
         Self::with_max_queue_depth(kv_cache, max_batch_size, 0)
     }
@@ -146,6 +167,7 @@ impl Scheduler {
             // donate cells. Kept here rather than passed to `new()` because both
             // constructors are called before the model is known.
             prefix_reuse: std::sync::atomic::AtomicBool::new(true),
+            slot_reuse: std::sync::atomic::AtomicBool::new(true),
             prompt_cache: std::sync::Mutex::new(PromptCache::new(0)),
             slot_prompt_similarity: DEFAULT_SLOT_PROMPT_SIMILARITY,
             kv_reuse: true,
@@ -1543,5 +1565,77 @@ mod tests {
                 .expect("unbounded queue must accept many more requests than the batch size");
         }
         assert_eq!(sched.queue_depth(), 50);
+    }
+
+    /// A model that cannot donate KV between sequences must still reuse its own slot.
+    ///
+    /// This is the hybrid case (Qwen3.5, Qwen3-Next, Falcon-H1, Jamba): `seq_cp` on
+    /// recurrent state is not a partial operation, so cross-sequence copying is off —
+    /// but inheriting the KV a sequence already holds copies nothing and stays legal.
+    /// Gating both on one flag silently cost fox all prompt reuse on those models while
+    /// `llama-server` kept it, so the split is pinned here.
+    #[test]
+    fn slot_reuse_survives_when_cross_sequence_copying_is_off() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        sched.set_prefix_reuse(false); // no seq_cp — the hybrid case
+        sched.set_slot_reuse(true); // but the slot's own KV is still inheritable
+
+        let tokens: Vec<i32> = (1..=18).collect();
+        run_and_park(&sched, 42, tokens.clone(), &[777]);
+        sched.schedule_step();
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                99,
+                tokens,
+                5,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 99).expect("99 running");
+        assert_eq!(
+            req.skip_prefix_tokens, 17,
+            "the slot's resident KV must still be inherited without seq_cp"
+        );
+        assert!(
+            req.prefix_seq_id.is_none(),
+            "nothing may be copied out of another sequence when seq_cp is unavailable"
+        );
+    }
+
+    /// With slot reuse off too, nothing is reused and the prompt is prefilled whole.
+    #[test]
+    fn no_reuse_at_all_when_both_capabilities_are_off() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        sched.set_prefix_reuse(false);
+        sched.set_slot_reuse(false);
+
+        let tokens: Vec<i32> = (1..=18).collect();
+        run_and_park(&sched, 42, tokens.clone(), &[777]);
+        sched.schedule_step();
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                99,
+                tokens,
+                5,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 99).expect("99 running");
+        assert_eq!(req.skip_prefix_tokens, 0, "no reuse of any kind");
+        assert!(req.prefix_seq_id.is_none());
     }
 }

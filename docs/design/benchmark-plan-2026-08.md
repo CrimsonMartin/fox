@@ -123,11 +123,55 @@ same llama.cpp: reuse comes in two kinds, and only one needs cross-sequence copy
 | inherit a slot's own KV and skip prefill | nothing copied | **yes — `llama-server` does it, 14680 tokens** |
 | copy a prefix out of another (live) sequence | `seq_cp` + unified KV | no |
 
-fox gates both on one flag (`allow_reuse`), so a hybrid model loses the cheap, no-copy
-kind too. Splitting the capability in two would restore parity with `llama-server` on this
-whole family. Not implemented — it carries real correctness risk on recurrent state, which
-is why the conservative guard exists, and it is a design decision rather than a
-measurement.
+fox gated both on one flag, so a hybrid model lost the cheap, no-copy kind too.
+
+**Fixed, 2026-08-03.** It took four changes, and three of them were only found by testing
+against the real model — the unit tests passed and the log said the capability was on
+while reuse still did not happen:
+
+1. `Model::supports_slot_reuse()` split out from `supports_seq_copy()`; the scheduler
+   carries both flags and `schedule.rs` gates slot affinity on the weak one and the
+   live-sibling fork on the strict one.
+2. `logits.rs` parked a finished sequence only when the model supported *copying*. With
+   nothing parked, everything downstream was dead regardless of what it was allowed to
+   do. This was the gate that kept reuse at zero after the first two were fixed.
+3. `trim_sequence` returned `()`, discarding llama.cpp's bool. A partial `seq_rm` on a
+   recurrent cache legitimately fails outside its snapshot window
+   (`llama-memory-recurrent.cpp:181`) and mutates nothing; ignoring that would leave a
+   request skipping a prefix that is no longer there. It now returns the result and
+   `run.rs` re-prefills on refusal.
+4. `n_rs_seq` — the snapshot window itself — defaults to **0** in llama.cpp
+   (`llama-context.cpp:3457`), and fox inherited it. With it at 0 every partial rollback
+   fails, so the capability was present and switched off. `QWEN35` is in
+   `llm_arch_supports_rs_rollback`, so nothing about the architecture prevented this.
+
+Measured on Qwen3.5-9B, 8 clients, warm burst:
+
+| | before | after |
+|---|---|---|
+| warm TTFT p50 | 42923 ms | **652 ms** (66×) |
+| `cached_tokens` | 0 | 14856 |
+| trims refused | 8 of 8 | 0 |
+
+The snapshot window is a memory trade and the numbers are steep — ~453 MB per snapshot
+at 8 sequences on this model:
+
+| snapshots | GTT | warm TTFT | reuse |
+|---|---|---|---|
+| 0 | 6.9 GB | 43093 ms | none |
+| 4 (default) | 8.7 GB | 40294 ms | none *in this benchmark* |
+| 64 | 36.5 GB | 652 ms | full |
+
+The default is 4, not 64. It buys the **multi-turn** case — where the next turn contains
+the previous reply, the common prefix runs past it and the rollback is one token — for
+~1.8 GB. Covering a *repeated* prompt, which is what `bench_burst.py` sends, needs a
+window the size of the reply and costs 30 GB on a laptop; that is `FOX_RS_ROLLBACK`,
+opt-in. So the 66× above is what the feature can do, not what the default does, and the
+benchmark that produced it is the adverse case rather than the representative one.
+
+Still owed: `FOX_RS_ROLLBACK` is an environment variable only. The repo's convention is
+that every knob has a CLI flag, an env var and a config key, and this one has a 30 GB
+failure mode, so it should be promoted.
 
 ### What has not been done
 

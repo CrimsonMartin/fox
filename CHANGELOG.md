@@ -85,6 +85,25 @@ build fix. No engine changes.
 
 ### Added
 
+- **`fox pull` downloads sharded GGUFs.** Large models are published split across
+  `name-00001-of-00014.gguf` … and llama.cpp loads the whole set when handed the first
+  part, so fetching one part left an unusable file. Several of the most-downloaded
+  models on HuggingFace — Kimi K3, DeepSeek V4, GLM 5.2, MiniMax M3 — were therefore
+  unreachable through `fox pull` and could not be listed in the catalogue at all.
+  Handed any part, fox now resolves the whole set, downloads each part, and reports
+  the first one, which is what llama.cpp must be pointed at.
+
+  Two details came from checking real repositories rather than assuming the layout.
+  Parts are nested in a per-quant subdirectory (`UD-IQ1_S/Model-UD-IQ1_S-00001-of-…`),
+  so the destination's parent directory has to be created; and a repository commonly
+  holds several differently-sized sets at once, so grouping keys on the split count as
+  well as the name — mixing two sets yields a model that cannot load.
+
+  Worth knowing before reaching for it: these models are large even at their smallest
+  quantisation. The smallest complete Kimi K3 set is 594 GB and the smallest DeepSeek
+  V4 Flash is 82 GB, so this unblocks the download rather than making them run on a
+  laptop.
+
 - **21 current models in the built-in catalog, taking it from 18 entries to 39.** The
   catalog was not broken — all 18 existing entries still resolve on HuggingFace — but
   its selection had aged, so `fox pull` offered a 2024/2025 line-up and the README's

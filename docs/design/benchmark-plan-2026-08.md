@@ -100,6 +100,42 @@ The comparison therefore stands with the reference configured in its favour.
 - The override belongs in vLLM's *documented configuration*, not a footnote — a reader
   with this hardware needs it too.
 
+## Backend topology — no single run holds all four engines
+
+Discovered while wiring the Ollama arm, and it changes the shape of the paper: **there is
+no configuration in which all four engines run on the same compute backend against the
+same model file.**
+
+| engine | Vulkan | ROCm | consumes the GGUF |
+|---|---|---|---|
+| fox | yes (`Dockerfile.vulkan`) | yes (`Dockerfile.rocm`) | yes |
+| `llama-server` | yes (`Dockerfile.llama-server-vulkan`) | yes | yes |
+| Ollama | yes, but only the `:latest` image (0.30.10) | yes, only the `:rocm` image (0.32.5) | yes, via Modelfile |
+| vLLM | **no Vulkan path at all** | yes | no — needs its own artifact |
+
+So the bank splits in two, and each half must say what it is:
+
+1. **Vulkan trio** — fox, `llama-server`, Ollama. Same backend, same GPU, same GGUF file.
+   This is the config-matched axis, and it is where the serving-layer claim lives.
+   `scripts/bench_engines.sh`.
+2. **vLLM, separately, on ROCm, with its own model artifact.** Two variables move at
+   once against the trio, so its number is not comparable to theirs at the serving-layer
+   level and must not be put in the same column. What it *can* answer is the question a
+   user actually asks: what does the best-known serving stack do on this hardware.
+
+Reporting vLLM inside the trio's table would publish a backend difference as if it were
+an engine difference — the exact failure mode the "equal tuning effort" rule exists to
+prevent, arriving through the back door.
+
+Two further caveats the trio table has to carry:
+
+- fox and `llama-server` are built from the **same vendored llama.cpp**; Ollama ships its
+  own fork (ggml 0.17 against the vendored 0.15.3). The fox↔`llama-server` comparison
+  isolates the serving layer; the Ollama comparison does not isolate it as cleanly.
+- fox runs `kv_unified = true`, both others `false`. That is not a tuning knob handed to
+  fox — sharing cells via `seq_cp` under a unified KV *is* the mechanism under test — but
+  it is a real difference and belongs in the configuration table, not in a footnote.
+
 ## Model
 
 `qwen3.5:9b` (`unsloth/Qwen3.5-9B-GGUF`, 5.7 GB) for the main comparison — current, and
@@ -146,6 +182,64 @@ Still to build, in the order they are worth doing:
 - **Report measured prompt tokens.** An oversized prompt fails differently per engine:
   `llama-server` returns 400, fox rolls the context window and silently disables reuse.
 - Kill servers and delete downloaded models after **every** test, not at the end.
+
+## Results — Vulkan trio, 2026-08-03
+
+`scripts/bench_engines.sh`, 3 rounds, arm order rotated each round so every engine leads
+exactly once. 8 clients, 1856-token shared system prompt, 64 output tokens, 4096 ctx per
+sequence, Llama-3.2-1B-Q8_0, Vulkan on the 890M. One server alive at a time.
+
+| workload | fox | `llama-server` | Ollama |
+|---|---|---|---|
+| cold TTFT p50 | **1102 ms** | 4339 ms | 5377 ms |
+| cold range | [1100, 1119] | [4312, 4341] | [5137, 5392] |
+| cold burst wall | **3.00 s** | 8.43 s | 9.18 s |
+| warm TTFT p50 | **50 ms** | 184 ms | 400 ms |
+| warm range | [48, 53] | [184, 191] | [390, 411] |
+| `cached_tokens`, cold | 12908 | 0 | not reported |
+
+All ranges disjoint. fox is 3.94× `llama-server` and 4.88× Ollama cold; 3.68× and 8.00×
+warm. The fox↔`llama-server` figures reproduce the earlier separate run (1129/4550 cold,
+50/190 warm) on a freshly rebuilt bundle, which is the harness agreeing with itself.
+
+Two things this table does **not** establish, and the write-up must not let it imply:
+
+- **Ollama's warm TTFT is the odd number here**, 2.2× `llama-server`'s despite both being
+  llama.cpp underneath, and nothing measured so far explains it. Its config was verified
+  from its own log — `n_ctx = 32768`, `n_ctx_seq = 4096`, 8 slots, `flash_attn = auto`,
+  matching the `llama-server` arm exactly — so it is not the obvious misconfiguration.
+  Ollama ships a different llama.cpp (ggml 0.17 vs the vendored 0.15.3). Until the cause
+  is found this is an observation, not a mechanism, and should be published as one.
+- Nothing about **decode throughput**, which is the workload where fox has historically
+  sat *below* `llama-server` at 96%. See the control below.
+
+### The neutral control — where fox loses
+
+`MODE=decode scripts/bench_engines.sh`, same rounds and rotation, 4 clients, 4 unrelated
+short prompts, 128 output tokens each. Nothing to reuse, so this is the sampling and
+batching path with prefill out of the picture. All three engines produced exactly 128
+tokens per request, so they did the same work.
+
+| metric | fox | `llama-server` | Ollama |
+|---|---|---|---|
+| per-request decode p50 | 45.3 tok/s | **49.6 tok/s** | 45.2 tok/s |
+| range | [45.2, 45.4] | [49.0, 49.8] | [44.7, 46.0] |
+| aggregate | 170.3 tok/s | **185.5 tok/s** | 158.3 tok/s |
+| range | [170.0, 171.8] | [183.4, 186.9] | [155.3, 160.3] |
+
+`llama-server` wins this one: **1.09× per request, 1.09× aggregate, ranges disjoint.**
+fox and Ollama tie on the per-request rate (their ranges overlap, so no winner), but fox
+finishes the batch 1.08× sooner on the aggregate with disjoint ranges — same per-stream
+speed, better batching.
+
+Note the gap against `llama-server` measured this way is **8-9%, not the 4%** quoted
+elsewhere in this document. Different workload — 4 clients × 128 tokens here — so both
+can be true, but the paper must quote the figure with the workload attached and should
+not lead with the smaller one.
+
+This is the table that has to sit next to the burst results, at the same prominence.
+fox's case is "much faster when there is a prefix to share, slightly slower when there
+is not", and stating the second half is what makes the first half credible.
 
 ## Results so far
 

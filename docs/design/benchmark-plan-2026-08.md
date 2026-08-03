@@ -467,10 +467,45 @@ sequence and grows linearly. So its *share* rises with concurrency: ~2% at 1-2 c
 Note what is **not** implicated: `logits.to_vec()`, which the older docs blamed, really is
 ~0.5%. The copy was never the problem; the selection over the copy is.
 
-**Before changing it:** this repo has a precedent of a 4.6× sampling micro-benchmark win
-producing zero end-to-end throughput. Any fix must be validated with
-`scripts/ab_bench.sh` or `MODE=decode scripts/bench_engines.sh` across 3 rounds with
-disjoint ranges, not with a micro-benchmark.
+**Fixed and validated, 2026-08-03.** `select_top_n` (`src/engine/model/sampling.rs`)
+keeps a sorted buffer of at most n entries and streams the logits once: the common case
+per element is one `f32` compare against a running threshold, sequential, no indirection,
+no allocation proportional to the vocabulary.
+
+Validated end-to-end over 3 rounds, not with a micro-benchmark — this repo has a
+precedent of a 4.6× sampling micro-benchmark win producing zero real throughput.
+
+| decode, conc 4 | before | after |
+|---|---|---|
+| fox per request | 45 tok/s [45, 46] | **47 tok/s [47, 47]** |
+| fox aggregate | 170 tok/s | **175 tok/s** |
+| gap vs `llama-server` | 1.10× | **1.06×** |
+
+Saturation curve, aggregate tok/s — the gain grows with concurrency, exactly as a
+per-sequence cost predicts:
+
+| conc | fox before | fox after | `llama-server` before → after |
+|---|---|---|---|
+| 1 | 53 | 53 | 54 → 54 |
+| 4 | 170 | 178 | 192 → 191 |
+| 16 | 376 | **423** | 429 → 431 |
+| 32 | 584 | **641** | 663 → 664 |
+
+**The deficit at 32 clients goes from 13.5% to 3.5%.**
+
+What makes this credible rather than drift: `llama-server` was not touched, and its six
+levels move by at most 1.5% between the two sessions. fox at concurrency 1 does not move
+either, which is what a per-sequence cost predicts — with one sequence it was already
+amortised by the GPU step.
+
+No regression in the burst workload: cold TTFT 1108 → 1100 ms, warm 51 → 47 ms, and
+`cached_tokens` identical at 12908/14840, so prefix reuse is untouched.
+
+Two limits on this validation, stated rather than buried: the sweep prints medians per
+level but **not ranges**, so the +12.5% and +9.8% lack a formal overlap test (only the
+decode block has disjoint ranges); and the new unit tests **do not run in CI** — the whole
+sampling module is `#[cfg(not(fox_stub))]` and CI runs with `FOX_SKIP_LLAMA=1` (331 tests
+there against 430 in a real build). A sampler regression would not be caught by `make ci`.
 
 ### vLLM — its own section, 2026-08-03
 

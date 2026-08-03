@@ -269,22 +269,22 @@ fox run "Explain ownership in Rust"  # single-shot
 
 # Manage models
 fox list                     # list downloaded models
-fox show llama3.2            # model info: architecture, quantization, size
+fox show qwen3.5            # model info: architecture, quantization, size
 fox ps                       # list currently loaded models
 fox models                   # browse curated model catalogue
-fox rm llama3.2              # remove a downloaded model
+fox rm qwen3.5              # remove a downloaded model
 
 # Manage aliases
 fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
 fox alias list
 
 # Benchmark
-fox bench llama3.2
-fox bench llama3.2 --runs 10
+fox bench qwen3.5
+fox bench qwen3.5 --runs 10
 
 # Benchmark KV cache quantization types side by side
-fox bench-kv llama3.2
-fox bench-kv llama3.2 --types f16,q8_0,q4_0 --runs 3
+fox bench-kv qwen3.5
+fox bench-kv qwen3.5 --types f16,q8_0,q4_0 --runs 3
 ```
 
 ---
@@ -431,17 +431,17 @@ split_mode = "layer"   # none | layer | row
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
-  --model llama3.2
+  --model qwen3.5
 
 # JSON output for CI
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
-  --model llama3.2 \
+  --model qwen3.5 \
   --output json
 
 # Reproducible benchmark vs Ollama
-./scripts/benchmark.sh llama3.2 4 50
+./scripts/benchmark.sh qwen3.5 4 50
 ```
 
 Output shape (run it for your own numbers):

@@ -38,7 +38,7 @@ GPU. Read from `/sys/class/kfd/kfd/topology/nodes/*/properties`.
 |---|---|---|
 | fox | ready | `Dockerfile.vulkan` → bundle; `make vulkan` |
 | `llama-server` | ready, **flags audited** | `Dockerfile.llama-server-vulkan`, same vendored llama.cpp |
-| vLLM | **runs**, verified | `rocm/vllm:latest` + `HSA_OVERRIDE_GFX_VERSION=11.0.0` |
+| vLLM | **serves, measured** | `rocm/vllm:latest` + `HSA_OVERRIDE_GFX_VERSION=11.0.0`; `scripts/bench_vllm.sh` |
 | Ollama | **runs on GPU**, verified | `ollama/ollama:rocm` + `OLLAMA_IGPU_ENABLE=1`; `scripts/try_ollama_rocm.sh` |
 
 All four engines run on this hardware. No engine has to be excluded from the comparison.
@@ -139,9 +139,16 @@ Two further caveats the trio table has to carry:
 ## Model
 
 `qwen3.5:9b` (`unsloth/Qwen3.5-9B-GGUF`, 5.7 GB) for the main comparison — current, and
-small enough that three rounds across four engines finishes. vLLM does not consume GGUF
-natively in the same way; check whether it needs the safetensors repo instead, and record
-whichever was used.
+small enough that three rounds across four engines finishes.
+
+The measurements above are on **Llama-3.2-1B-Q8_0**, not qwen3.5:9b — it is the model the
+earlier fox↔`llama-server` runs used, so reusing it let the new harness be checked
+against a known answer before anything new was claimed. Repeat on the larger model before
+publishing.
+
+vLLM's artifact question is settled: it does not take the GGUF, and it was given
+`unsloth/Llama-3.2-1B-Instruct` safetensors at BF16 (ungated, no HF token needed). That
+is a real difference in what is being executed, recorded everywhere its numbers appear.
 
 Note the architecture axis matters and is not covered by one model: sliding-window
 attention (Gemma), hybrid attention/state-space (`falcon-h1` in the catalogue, where fox
@@ -240,6 +247,50 @@ not lead with the smaller one.
 This is the table that has to sit next to the burst results, at the same prominence.
 fox's case is "much faster when there is a prefix to share, slightly slower when there
 is not", and stating the second half is what makes the first half credible.
+
+### vLLM — its own section, 2026-08-03
+
+`scripts/bench_vllm.sh`, 3 rounds, server restarted per round. `rocm/vllm:latest`
+(v0.11.2.dev), `HSA_OVERRIDE_GFX_VERSION=11.0.0`, `--max-model-len 4096 --max-num-seqs 8
+--enable-prefix-caching --gpu-memory-utilization 0.55`, BF16 safetensors
+(`unsloth/Llama-3.2-1B-Instruct`), ROCm. Startup 40-46 s per round. Same clients, same
+workloads as the trio.
+
+| workload | vLLM |
+|---|---|
+| cold TTFT p50 | 1995 ms, range [1975, 2058] |
+| warm TTFT p50 | 669 ms, range [654, 711] |
+| decode per request | 19.3 tok/s |
+| decode aggregate | 75.6 tok/s |
+
+**Do not put this column next to the trio's.** Backend and weight format both differ.
+The decode figure in particular is mostly explained by the weights, not the serving
+layer: BF16 moves roughly twice the bytes per token that Q8_0 does, and decode on this
+iGPU is memory-bound, which is about the whole of the 45 → 19 tok/s difference. Saying
+"fox decodes 2.3× faster than vLLM" from this table would be quoting a quantisation
+choice as an engine result.
+
+The first vLLM run of the day reported a **2758 ms** cold TTFT against the 1995 ms
+measured here. The difference is `torch.compile`'s cache being cold on the very first
+start; it is discarded rather than averaged in, and any future run should throw away its
+first start for the same reason. Nothing equivalent applies to the other three.
+
+### `cached_tokens` reads 0 for two different reasons — checked, not assumed
+
+`scripts/probe_cached_tokens.py` sends the same prompt twice, streamed and non-streamed,
+and reports whether `prompt_tokens_details` comes back at all.
+
+| engine | `prompt_tokens_details` | so its 0 means |
+|---|---|---|
+| fox | present (12908 cold, 14840 warm) | real reuse, measured |
+| `llama-server` | present (0 cold, 14840 warm) | real: none cold, full warm |
+| Ollama | **absent**, both streamed and not | not reported |
+| vLLM | **absent**, both streamed and not | not reported |
+
+Both engines that report nothing show a large warm TTFT drop (Ollama 5377 → 400 ms, vLLM
+1995 → 669 ms), so they are reusing prefixes and simply not exposing the counter.
+Publishing their 0 in a "cached tokens" column would state the opposite of what happened,
+which is why the column has to carry the distinction rather than the number alone.
 
 ## Results so far
 

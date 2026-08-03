@@ -50,6 +50,7 @@ async fn load_draft_model(
             None,  // mmproj_path — draft models are text-only speculation proposers
             &[],   // lora_modules — adapters apply to the primary model, not the draft
             false, // reranking — a draft model only ever proposes tokens
+            0,     // rs_rollback — the draft holds no reusable prefix of its own
         )
     })
     .await
@@ -78,6 +79,7 @@ pub(super) async fn load_model(
     let path = path.to_path_buf();
     let name = name.to_string();
     let max_batch_size = cfg.max_batch_size;
+    let rs_rollback = cfg.rs_rollback;
     let max_queue_depth = cfg.max_queue_depth;
     let max_prefill_chunk = cfg.max_prefill_chunk;
     // None disables context rolling; Some(n_keep) enables it, preserving n_keep head tokens.
@@ -132,6 +134,7 @@ pub(super) async fn load_model(
             mmproj.as_deref(),
             &lora_modules,
             reranking,
+            rs_rollback,
         )
     })
     .await

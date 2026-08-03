@@ -121,47 +121,6 @@ fn meta_str(model: *const ffi::llama_model, key: &str) -> Option<String> {
 /// doubling math throughput and typically costs performance for this workload.
 /// Falls back to half the logical CPUs (a reasonable SMT-aware guess) and then
 /// to llama.cpp's own 4.
-/// Recurrent-state snapshots kept per sequence, for partial rollback.
-///
-/// llama.cpp defaults this to 0 — no rollback — and fox inherited that silently, which
-/// made every partial `seq_rm` on a hybrid model fail and cost fox all prompt reuse on
-/// the Qwen3.5 family (`llm_arch_supports_rs_rollback` returns true for it, so the
-/// capability was there and simply switched off).
-///
-/// The rollback distance fox asks for is the parked tail it has to discard, and the two
-/// cases are far apart:
-///
-///   - **multi-turn**, the case that motivates parking at all: the next turn contains
-///     the previous reply, so the common prefix runs past it and the rollback is a
-///     single token. Needs 1-2 snapshots.
-///   - **the same prompt sent again** (what `bench_burst.py` does): the whole generated
-///     reply has to be discarded, so the rollback is the reply length.
-///
-/// Measured on Qwen3.5-9B at 8 concurrent sequences — the cost is linear and steep, at
-/// ~453 MB per snapshot:
-///
-/// | snapshots | GTT | warm TTFT | reuse |
-/// |---|---|---|---|
-/// | 0 | 6.9 GB | 43093 ms | none |
-/// | 4 | 8.7 GB | 40294 ms | none (a 65-token rollback does not fit) |
-/// | 64 | 36.5 GB | **652 ms** | full |
-///
-/// So 4 is the default: it buys the multi-turn case, which is the product claim, for
-/// ~1.8 GB. Covering a repeated prompt costs 30 GB on a laptop and has to be opted into
-/// with `FOX_RS_ROLLBACK`, not inflicted by default. A first attempt defaulted to 64 and
-/// was measured before being kept, which is the only reason this table exists.
-///
-/// Only allocated for architectures that support rollback — llama.cpp clamps it to 0
-/// for the rest (`llama-context.cpp:55`), so setting it unconditionally is safe, and
-/// dense models pay nothing.
-#[cfg(not(fox_stub))]
-fn rs_rollback_snapshots() -> u32 {
-    std::env::var("FOX_RS_ROLLBACK")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(4)
-}
-
 /// Whether to use llama.cpp's unified KV cache. True everywhere except when
 /// `FOX_KV_UNIFIED=0` is set.
 ///
@@ -521,6 +480,7 @@ impl LlamaCppModel {
         mmproj_path: Option<&std::path::Path>,
         lora_modules: &[(String, std::path::PathBuf, f32)],
         reranking: bool,
+        rs_rollback: u32,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -737,7 +697,7 @@ impl LlamaCppModel {
         // donated, non-dense seq_id silently fragments the batch (measured: 1.74
         // of a possible 4 under sustained load) — see
         // docs/design/rocm-benchmarking-2026-08.md's "Known limitation".
-        ctx_params.n_rs_seq = rs_rollback_snapshots();
+        ctx_params.n_rs_seq = rs_rollback;
         ctx_params.kv_unified = kv_unified_setting();
         if !ctx_params.kv_unified {
             // Logged at info, not debug: a benchmark arm running with prefix sharing
@@ -900,6 +860,7 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        rs_rollback: u32,
     ) -> Result<Self> {
         let model = self._model;
 
@@ -933,7 +894,7 @@ impl LlamaCppModel {
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
-        ctx_params.n_rs_seq = rs_rollback_snapshots(); // see load() for why
+        ctx_params.n_rs_seq = rs_rollback; // see load() for why
         ctx_params.kv_unified = kv_unified_setting(); // see load() for why
         let n_threads = resolve_n_threads(); // see load() for why
         ctx_params.n_threads = n_threads;

@@ -2,11 +2,11 @@
 
 # fox
 
-**The fastest local LLM server. Drop-in replacement for Ollama.**
+**A local LLM server built for concurrent work. Drop-in replacement for Ollama.**
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.19.0-green.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
 
@@ -14,7 +14,7 @@
 
 </div>
 
-**Fox is free forever.** No asterisks. No "free for now." No pivot to paid. Dual-licensed MIT OR Apache-2.0, always.
+Fox is dual-licensed MIT OR Apache-2.0 and stays that way. There is no paid tier and no plan for one.
 
 ---
 
@@ -43,29 +43,68 @@ curl http://localhost:8080/v1/chat/completions \
 
 ---
 
-## Performance vs Ollama
+## Performance
 
-RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
+Fox wraps llama.cpp, so a single request decoding on its own runs the same kernels
+`llama-server` runs. There is no room for fox to be dramatically faster at that, and it
+isn't. Where fox pulls ahead is when requests arrive together and share a prompt.
 
-<!-- BENCH_TABLE_START -->
-| Metric | fox | Ollama | Improvement |
-|--------|-----|--------|-------------|
-| First token (P50) | 87ms | 310ms | **+72%** |
-| First token (P95) | 134ms | 480ms | **+72%** |
-| Response time (P50) | 412ms | 890ms | **+54%** |
-| Response time (P95) | 823ms | 1740ms | **+53%** |
-| Throughput | 312 t/s | 148 t/s | **+111%** |
-<!-- BENCH_TABLE_END -->
+Radeon 890M, Vulkan, Llama-3.2-1B-Instruct-Q8_0, 1856-token shared system prompt.
+Both servers built from the same vendored llama.cpp, one running at a time, arms
+alternated across 3 rounds. All ranges below are disjoint.
 
-> Reproduce: `./scripts/benchmark.sh llama3.2 4 50`
+| Workload | fox | llama-server |
+|---|---|---|
+| 8 clients, shared prompt, cold — TTFT p50 | **1129 ms** | 4550 ms |
+| 16 clients, shared prompt, cold — TTFT p50 | **1402 ms** | 8064 ms |
+| 16 clients, whole burst wall clock | **3.8 s** | 16.2 s |
+| 4 clients, short unrelated prompts — throughput | 96% of llama-server | baseline |
+
+Doubling the clients costs fox 24% more time to first token and `llama-server` 79%.
+
+That last row is not a typo and it is not buried on purpose: on single-turn requests with
+short prompts, fox is about 4% behind. That workload cannot see any of the work fox does,
+because there is no prompt worth reusing. If your traffic looks like that, fox will not
+make it faster.
+
+Reproduce either one:
+
+```bash
+scripts/ab_shared_prefix.sh    # concurrent burst behind a shared prompt
+scripts/ab_bench.sh            # decode-bound throughput
+```
+
+Full methodology, including two ways these benchmarks produced convincing wrong answers
+before they produced right ones, is in `docs/design/rocm-benchmarking-2026-08.md`.
+
+Numbers against Ollama are pending re-measurement on current hardware. The figures that
+used to sit here were from an RTX 4060 with no recorded methodology, and this project's
+rule is that a before/after claim comes from `scripts/ab_bench.sh` or it does not get
+published.
 
 ---
 
-## Why is fox faster?
+## How it works
 
-**Conversations get faster over time.** Fox remembers the context it already processed — system prompts and previous messages aren't re-read from scratch on every turn. Ollama does. In a long conversation, fox skips up to 75% of that work from the second message onward, which is why the first token arrives much sooner.
+**Sequences remember what they hold.** Every sequence keeps the tokens resident in its
+KV cache, including the tokens it generated. A new request is matched to the sequence
+sharing the longest prefix with it and skips the prefill for that overlap. In a chat, the
+second turn does not re-read the first.
 
-**Multiple users don't block each other.** Fox processes several requests at the same time instead of waiting for one to finish before starting the next. A long generation for one user doesn't delay a quick question from another.
+**Requests can copy a prefix from a live sequence.** This is the part other llama.cpp
+servers do not do. Slot affinity normally reuses an idle sequence, so when eight requests
+carrying the same system prompt arrive at once, none of them can reuse anything and all
+eight prefill the same tokens. Fox copies the shared prefix out of a sibling that is
+already decoding. `llama-server` cannot: its slot selection skips busy slots in both its
+similarity pass and its LRU fallback.
+
+**A shared prefix is paid for once.** Sequences sharing a prefix share the block budget
+for it instead of each reserving a copy, so the server admits as much concurrency as the
+hardware actually holds.
+
+**Requests do not queue behind each other.** Continuous batching decodes concurrent
+requests in the same pass, so a long generation for one client does not delay a short
+question from another.
 
 ---
 

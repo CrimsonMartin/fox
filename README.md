@@ -539,6 +539,7 @@ build cover CPU, CUDA, ROCm, Vulkan and Metal.
 
 - **Bug reports**: [GitHub Issues](https://github.com/ferrumox/fox/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/ferrumox/fox/discussions)
+- **Feature status**: [STATUS.md](STATUS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md)
 - **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 

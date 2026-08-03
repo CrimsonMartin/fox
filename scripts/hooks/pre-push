@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Pre-push hook — mirrors CI exactly so pushes never fail the pipeline.
+# Pre-push hook — mirrors CI's STUB jobs so pushes rarely fail the pipeline.
+#
+# It does NOT mirror CI's `golden` job, which builds llama.cpp for real. Everything
+# below runs with FOX_SKIP_LLAMA=1, so the FFI wrappers, src/cli/bench*, probe and
+# llama_cpp/stub.rs are never compiled and can be broken while all four checks pass.
+# Adding a parameter to LlamaCppModel::load() once left eight call sites broken with
+# a fully green hook. Run `make check-real` after touching anything they call.
 # Installed via: make setup  (or scripts/install-hooks.sh)
 #
 # Checks run:

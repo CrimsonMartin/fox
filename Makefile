@@ -79,6 +79,26 @@ ci:
 	FOX_SKIP_LLAMA=1 cargo fmt --all -- --check
 	FOX_SKIP_LLAMA=1 cargo clippy --all-targets --features test-helpers -- -D warnings
 	FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
+	@echo ""
+	@echo "NOTE: every check above ran with FOX_SKIP_LLAMA=1, so the llama.cpp module"
+	@echo "      was never compiled. Code that only exists in a real build — the FFI"
+	@echo "      wrappers, src/cli/bench*, probe, golden — can be broken and still pass"
+	@echo "      this. Run 'make check-real' after changing anything they call."
+	@echo "      (GitHub's 'golden' job does build for real and would catch it there.)"
+
+# Type-check against a REAL llama.cpp build. Slow the first time (CMake compiles
+# llama.cpp) and cached afterwards.
+#
+# Exists because `make ci` cannot see this class of error at all: adding a parameter
+# to LlamaCppModel::load() left eight call sites broken while fmt, clippy and the
+# whole test suite stayed green, because none of them compile that module. The stub
+# in llama_cpp/stub.rs mirrors those signatures by hand, so it breaks from the other
+# side just as silently.
+#
+# --all-targets on purpose: the binaries and integration tests are outside the lib,
+# and `cargo test --lib` (what the golden job runs) does not reach them.
+check-real:
+	cargo check --all-targets --features test-helpers
 
 # Golden regression tests — assert model-facing invariants against a REAL model
 # (ModelInfo numbers, non-degenerate embeddings, tokenize round-trip). Requires a

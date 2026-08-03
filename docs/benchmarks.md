@@ -163,6 +163,7 @@ fox-bench \
 
 ```json
 {
+  "_comment": "illustrative values, not measurements — run fox-bench for real ones",
   "url": "http://localhost:8080",
   "model": "llama3.2",
   "concurrency": 8,

@@ -81,9 +81,23 @@ memory-tight box that is a difference you want to read before upgrading, not dis
   *unblocks* prompt reuse on hybrid models; it does not deliver it for prompts sent
   verbatim twice unless you raise the window and pay the memory.
 
-  The case the default is chosen for — multi-turn, where the rollback is one token —
-  is **reasoned, not measured**: fox has no multi-turn benchmark yet. Treat the default
-  as a considered hedge rather than a verified win until that driver exists.
+  **The case the default was chosen for does not hold either, now that it has been
+  measured.** The reasoning was that a multi-turn conversation needs a rollback of one
+  token, because the next turn contains the previous reply. `scripts/bench_multiturn.py`
+  refutes it on this model: 4 conversations × 6 turns produced **20 slot hits and 20
+  refused trims**, `cached_tokens` 0 throughout. The refusals report `keep_from=155`
+  against a turn-0 prompt of ~157 tokens, i.e. the shared prefix ends at the first user
+  message and the assistant reply does not match at all — the parked sequence holds the
+  raw generated tokens while the next request carries that reply re-wrapped by the chat
+  template. Where those two do not coincide, the required rollback is the whole reply,
+  not one token.
+
+  So the premise was wrong, not the arithmetic. On Llama-3.2-1B the chain does line up
+  (fox reuses 342 tokens per turn), so this is model- and template-dependent and not a
+  blanket property. **`--rs-rollback 4` should be read as "enough for models whose
+  template makes a conversation a token-exact prefix chain", which is not all of them,
+  and is not the catalogue's own Qwen3.5.** Left at 4 rather than raised because the
+  window that would cover it is the reply length, at ~453 MB per snapshot.
 
 - **Prompt reuse was decided without checking whether the model could perform it**,
   which aborted the process instead of degrading. Three entry points — slot affinity,

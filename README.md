@@ -442,18 +442,18 @@ split_mode = "layer"   # none | layer | row
 ./scripts/benchmark.sh llama3.2 4 50
 ```
 
-Sample output:
+Output shape (run it for your own numbers):
 
 ```
 ┌─────────────────┬──────────────┬──────────────┬──────────┐
 │ Metric          │     fox      │    ollama    │ Δ        │
 ├─────────────────┼──────────────┼──────────────┼──────────┤
-│ TTFT P50        │          87ms│         310ms│ +72%     │
-│ TTFT P95        │         134ms│         480ms│ +72%     │
-│ Latency P50     │         412ms│         890ms│ +54%     │
-│ Latency P95     │         823ms│        1740ms│ +53%     │
-│ Latency P99     │        1204ms│        2600ms│ +54%     │
-│ Throughput      │    312.4 t/s │    148.1 t/s │ +111%    │
+│ TTFT P50        │           ...│           ...│ ...      │
+│ TTFT P95        │           ...│           ...│ ...      │
+│ Latency P50     │           ...│           ...│ ...      │
+│ Latency P95     │           ...│           ...│ ...      │
+│ Latency P99     │           ...│           ...│ ...      │
+│ Throughput      │           ...│           ...│ ...      │
 └─────────────────┴──────────────┴──────────────┴──────────┘
 ```
 

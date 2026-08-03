@@ -152,6 +152,21 @@ vulkan:
 		echo "Vulkan bundle -> $(VULKAN_OUT)/  (fox, fox-bench, libggml-vulkan.so)"; \
 		echo "Run: ./$(VULKAN_OUT)/fox serve --model-path <model.gguf>"
 
+# Prepare a release: refuses to continue if the tree is dirty, the CHANGELOG has no
+# entry, ci or e2e fail, or the version does not end up matching in every file. Stops at
+# the release commit — tagging is `make publish`, deliberately a separate step.
+#   make release VERSION=0.21.0
+release:
+	@test -n "$(VERSION)" || (echo "uso: make release VERSION=X.Y.Z" && exit 1)
+	./scripts/release.sh $(VERSION)
+
+# Tag ONE release from main and verify a Release run actually started. Never
+# `git push --tags`: GitHub fires no workflow when more than three tags arrive at once.
+#   make publish VERSION=0.21.0
+publish:
+	@test -n "$(VERSION)" || (echo "uso: make publish VERSION=X.Y.Z" && exit 1)
+	./scripts/publish.sh $(VERSION)
+
 # Install the pre-push git hook so CI checks run automatically on every push.
 setup:
 	bash scripts/install-hooks.sh

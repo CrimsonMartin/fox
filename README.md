@@ -20,7 +20,7 @@ Fox is dual-licensed MIT OR Apache-2.0 and stays that way. There is no paid tier
 
 ---
 
-## Try it in 30 seconds
+## Get started
 
 ```bash
 # Linux / macOS
@@ -31,14 +31,16 @@ irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 ```
 
 ```bash
-# Pull a model and start
-fox pull qwen3.5
+# Pull a model and start. qwen3.6 is Qwen3.6 35B-A3B — a mixture of experts, so
+# only ~3B parameters are active per token. It is a 22 GB download; `fox pull
+# qwen3.5` is 2.7 GB if you would rather start smaller.
+fox pull qwen3.6
 fox serve
 
 # Ask something (OpenAI-compatible)
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+  -d '{"model":"qwen3.6","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 
 # If you already use Ollama — just change the port from 11434 to 8080. That's it.
 ```
@@ -132,7 +134,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-local")
 
 resp = client.chat.completions.create(
-    model="qwen3.5",
+    model="qwen3.6",
     messages=[{"role": "user", "content": "Say hi in 5 words."}],
 )
 print(resp.choices[0].message.content)
@@ -146,7 +148,7 @@ import OpenAI from "openai";
 const openai = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "sk-local" });
 
 const resp = await openai.chat.completions.create({
-  model: "qwen3.5",
+  model: "qwen3.6",
   messages: [{ role: "user", content: "Say hi in 5 words." }],
 });
 console.log(resp.choices[0].message?.content);
@@ -165,7 +167,7 @@ console.log(resp.choices[0].message?.content);
   "models": [{
     "title": "fox (local)",
     "provider": "openai",
-    "model": "qwen3.5",
+    "model": "qwen3.6",
     "apiBase": "http://localhost:8080/v1"
   }]
 }
@@ -254,7 +256,7 @@ fox search gemma
 fox search qwen coder --limit 5
 
 # Pull a model
-fox pull qwen3.5            # top result, balanced quantization
+fox pull qwen3.6            # top result, balanced quantization
 fox pull gemma3:12b          # specific size
 fox pull gemma3:12b-q4       # specific quantization
 fox pull bartowski/gemma-3-12b-it-GGUF  # specific HF repo
@@ -269,22 +271,22 @@ fox run "Explain ownership in Rust"  # single-shot
 
 # Manage models
 fox list                     # list downloaded models
-fox show qwen3.5            # model info: architecture, quantization, size
+fox show qwen3.6            # model info: architecture, quantization, size
 fox ps                       # list currently loaded models
 fox models                   # browse curated model catalogue
-fox rm qwen3.5              # remove a downloaded model
+fox rm qwen3.6              # remove a downloaded model
 
 # Manage aliases
-fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
+fox alias set q36 Qwen3.6-35B-A3B-UD-Q4_K_M
 fox alias list
 
 # Benchmark
-fox bench qwen3.5
-fox bench qwen3.5 --runs 10
+fox bench qwen3.6
+fox bench qwen3.6 --runs 10
 
 # Benchmark KV cache quantization types side by side
-fox bench-kv qwen3.5
-fox bench-kv qwen3.5 --types f16,q8_0,q4_0 --runs 3
+fox bench-kv qwen3.6
+fox bench-kv qwen3.6 --types f16,q8_0,q4_0 --runs 3
 ```
 
 ---
@@ -418,7 +420,7 @@ split_mode = "layer"   # none | layer | row
 
 ```toml
 [aliases]
-"llama3"   = "Llama-3.2-3B-Instruct-Q4_K_M"
+"q36"      = "Qwen3.6-35B-A3B-UD-Q4_K_M"
 "mistral"  = "Mistral-7B-Instruct-v0.3-Q4_K_M"
 ```
 
@@ -431,17 +433,17 @@ split_mode = "layer"   # none | layer | row
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
-  --model qwen3.5
+  --model qwen3.6
 
 # JSON output for CI
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
-  --model qwen3.5 \
+  --model qwen3.6 \
   --output json
 
 # Reproducible benchmark vs Ollama
-./scripts/benchmark.sh qwen3.5 4 50
+./scripts/benchmark.sh qwen3.6 4 50
 ```
 
 Output shape (run it for your own numbers):
@@ -516,7 +518,7 @@ make bench           Run fox-bench against a running server
 make docker          Build Docker image
 make docker-run      Start via docker compose
 make install-rust    Install Rust toolchain
-make download-model  Download default model (Llama-3.2-3B Q4_K_M)
+make download-model  Download default model (Qwen3.5 0.8B Q4_K_M)
 ```
 
 ---

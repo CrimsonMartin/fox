@@ -99,7 +99,12 @@ impl InferenceEngine {
         }
         let model_stop_tokens = model.stop_tokens();
         if !model_stop_tokens.is_empty() {
-            tracing::info!("model stop tokens: {:?}", model_stop_tokens);
+            // Count at info, list at debug. Llama 3 declares 247 reserved special
+            // tokens, so printing the list made starting the server emit a wall of
+            // `<|reserved_special_token_N|>` that buried every other startup line.
+            // The number is what an operator needs; the names are a debugging detail.
+            tracing::info!(count = model_stop_tokens.len(), "model stop tokens loaded");
+            tracing::debug!("model stop tokens: {:?}", model_stop_tokens);
         }
         let speculative = options.speculative.map(|cfg| match cfg {
             SpeculativeConfig::Ngram { ngram, draft_len } => {

@@ -331,10 +331,12 @@ fn parse_tensor_split(s: &str) -> Vec<f32> {
 /// "Known issues" for the max_models item and why the default itself stays 1.
 fn max_models_default_hint(max_models: usize) -> Option<&'static str> {
     (max_models <= 1).then_some(
-        "only 1 model will be kept resident at a time (--max-models 1, the default) — \
-         requesting a second model evicts the first once it's idle. Pass --max-models N \
-         to keep more resident if you have the VRAM; fox does not yet track how much VRAM \
-         already-loaded models are using when deciding whether another will fit.",
+        // Kept visible at startup on purpose, but said in one line: this fires on the
+        // default configuration, so every user reads it on every start, and a paragraph
+        // there costs more attention than the trade-off is worth. The VRAM-accounting
+        // caveat lives in STATUS.md's known issues, where someone hitting the limit
+        // will look.
+        "--max-models 1 (default): loading a second model evicts the first once idle",
     )
 }
 
@@ -383,9 +385,16 @@ fn setup_logging(json: bool) {
             .with(tracing_subscriber::fmt::layer().json())
             .init();
     } else {
+        // `.compact()`, not `.pretty()`. The pretty formatter is built for reading a
+        // debug session: it prints an indented `at src/file.rs:line` under every event
+        // and a blank line between them, so starting the server produced three lines
+        // per log entry and a screenful of source paths before it had served anything.
+        // That is the first thing a new user sees. Source locations belong in a
+        // debugger or in `--json-logs`, which carries them as fields for anything
+        // machine-read.
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().pretty())
+            .with(tracing_subscriber::fmt::layer().compact())
             .init();
     }
 }

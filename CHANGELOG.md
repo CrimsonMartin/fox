@@ -18,6 +18,21 @@ build fix. No engine changes.
 
 ### Fixed
 
+- **Starting the server printed a screenful of noise before it had served
+  anything.** Three separate causes, all in the first thing a new user sees. The
+  human log format was `tracing`'s `.pretty()`, built for reading a debug session:
+  it prints an indented `at src/file.rs:line` under every event and a blank line
+  between them, so each entry took three lines. Underneath that, the stop-token log
+  dumped the model's entire special-token list — 247 `<|reserved_special_token_N|>`
+  entries for Llama 3, which buried every other line. And `model ready` was logged
+  twice per model, once after the weights loaded and once after the engine was
+  built, which read as two models loading. Startup is now nine lines. The token
+  list moved to `debug`, the count stays at `info`, and `--json-logs` still carries
+  source locations as fields for anything machine-read. The `--max-models 1` notice
+  stays — making that trade-off visible was a deliberate fix — but says it in one
+  line instead of a paragraph, since it fires on the default configuration and
+  therefore greets everyone.
+
 - **`FOX_SKIP_LLAMA` did not invalidate the build script, so real builds silently ran
   as stubs.** `build.rs` declared `cargo:rerun-if-env-changed` for
   `FOX_CPU_ALL_VARIANTS` and nothing else. Cargo therefore never re-ran the script when

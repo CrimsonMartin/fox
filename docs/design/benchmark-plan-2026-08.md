@@ -335,8 +335,9 @@ vLLM's artifact question is settled: it does not take the GGUF, and it was given
 is a real difference in what is being executed, recorded everywhere its numbers appear.
 
 Note the architecture axis matters and is not covered by one model: sliding-window
-attention (Gemma), hybrid attention/state-space (`falcon-h1` in the catalogue, where fox
-disables prompt reuse entirely), and MoE all change the prefill/decode balance. A paper
+attention (Gemma), hybrid attention/state-space (`falcon-h1` and the whole Qwen3.5
+family in the catalogue — where fox disabled prompt reuse entirely until 0.20.0), and
+MoE all change the prefill/decode balance. A paper
 measuring only dense GQA and concluding "4-6×" is refutable with a modern Gemma.
 
 ## Workloads

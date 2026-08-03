@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.19.0] - 2026-08-03
+
 ### Fixed
 
 - **The intermittent `make e2e` failure, found and fixed — it was the test.** Checks 1
@@ -311,6 +315,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreproduced `make e2e` failure (1 in ~52 runs, zero in the 51 since) whose cause
   remains unknown and which the drift above is the wrong magnitude to explain.
 
+- **Concurrent requests now copy a shared prefix from a *live* sequence.** Slot
+  affinity can only inherit an *idle* sequence, so N requests arriving together
+  behind one system prompt could reuse nothing from each other — each prefilled the
+  shared prompt. A busy sequence cannot be inherited without stealing a live
+  request's KV, but it *can* be copied from: under `kv_unified`, `seq_cp` shares
+  llama.cpp's cells rather than duplicating the buffer. Requests behind a donor that
+  is still prefilling are deferred and re-queued rather than left at the queue head,
+  since they are blocked on a sibling and not on capacity. Measured against
+  `llama-server` (both from the same vendored llama.cpp, Radeon 890M / Vulkan, 3
+  rounds, disjoint ranges): **4.0× faster cold TTFT at 8 concurrent clients behind a
+  1856-token system prompt, 5.75× at 16**, with the whole-burst wall clock at 3.8 s
+  against 16.2 s. Doubling the clients costs fox 24% more cold TTFT and
+  `llama-server` 79%. `llama-server` cannot do this by construction: its
+  `get_available_slot()` skips `is_processing()` slots in both its similarity pass
+  and its LRU fallback, so its concurrent arrivals report `cached_tokens` 0.
+
+- **A shared prefix is charged to the block budget once, not once per sharer.**
+  Sharing the prefill left the accounting duplicated: each sharer skipped the
+  prefill and still reserved its own blocks for the positions it had just copied.
+  Blocks are an admission budget rather than addresses, so this wasted no GPU memory
+  — llama.cpp's cells really are shared — but it made fox admit less concurrency
+  than the hardware holds. Pool occupancy on 6 concurrent clients behind a 673-token
+  prompt: **282 → 72 blocks**. The reservation is now sized before allocating, so
+  the capacity check agrees with reality instead of turning a burst away for
+  capacity it was never going to hold. Only *whole* blocks are shared: the block
+  straddling the divergence point stays private, which is what guarantees a shared
+  block never receives a write — and is why the decode path deliberately has no
+  copy-on-write pass.
+
+
 ### Added
 
 - **`--repeat-last-n` / `FOX_REPEAT_LAST_N` — bounded penalty window.** The
@@ -329,6 +363,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently changed output for every existing caller. One deliberate divergence
   from llama.cpp, documented at the call site: fox's window covers only
   *generated* tokens, never the prompt, which is what fox has always done.
+
+## [0.18.0]
+
+### Added
 
 - **LoRA adapter support** (`--lora-modules <name>=<path>[:<scale>][,...]` /
   `FOX_LORA_MODULES`) — loads one or more named LoRA adapters onto the primary

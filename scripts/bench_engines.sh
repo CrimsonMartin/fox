@@ -86,6 +86,7 @@ ENGINES="${ENGINES:-fox llama-server ollama}"
 # decode = N unrelated short prompts, nothing to reuse (the neutral control)
 # sweep  = the decode workload at rising concurrency, to find where each engine bends
 # noisy  = one long prefill injected into streams that are already running
+# multiturn = real conversations, each turn carrying the previous reply as its prefix
 # All four belong in the write-up. Publishing only the first would be marketing, and
 # `decode` is where fox has historically sat *below* llama-server.
 MODE="${MODE:-burst}"
@@ -112,6 +113,8 @@ if [ "$MODE" = sweep ]; then
 fi
 CTX=$((CTX_PER_SEQ * SRV_CONC))   # llama-server splits -c across --parallel slots
 NOISY_CLIENTS="${NOISY_CLIENTS:-4}"
+MT_CONVERSATIONS="${MT_CONVERSATIONS:-4}"
+MT_TURNS="${MT_TURNS:-6}"
 # Baseline window before the long prefill is injected. 10 s is fine for a 1B and far too
 # short for a 9B: the interactive clients had not produced a single token yet, so two
 # engines reported an ITL p99 of 0 ms — an empty sample, not a smooth stream. Scale it
@@ -407,6 +410,16 @@ run_arm() {
       printf "  %-13s c=%-3s decode p50 %6s tok/s  agregado %7s tok/s  ITL p99 %7s ms  salida %s tok\n" \
              "$eng" "$lvl" "$tps" "$agg" "$itl99" "$ctok"
     done
+  elif [ "$MODE" = multiturn ]; then
+    out=$(python3 "$S/bench_multiturn.py" "$URL" "$(client_model "$eng")" \
+          "$MT_CONVERSATIONS" "$MT_TURNS" 2>&1) || {
+      echo "  $eng: el cliente falló"; echo "$out" | tail -3; sampler_stop; stop_all; return 1; }
+    while read -r _ mt_idx mt_ttft mt_cached mt_ptok mt_n; do
+      [ -z "${mt_ttft:-}" ] && continue
+      echo "$mt_idx $mt_ttft $mt_cached $mt_ptok" >> "$OUT/multiturn_$eng.dat"
+      printf "  %-13s turno %-2s TTFT p50 %7s ms  cached %6s  prompt %6s tok  (%s convs)\n" \
+             "$eng" "$mt_idx" "$mt_ttft" "$mt_cached" "$mt_ptok" "$mt_n"
+    done <<< "$out"
   elif [ "$MODE" = noisy ]; then
     out=$(python3 "$S/bench_noisy.py" "$URL" "$(client_model "$eng")" "$NOISY_CLIENTS" 110 "$NOISY_BASELINE" 2>&1) || {
       echo "  $eng: el cliente falló"; echo "$out" | tail -3; sampler_stop; stop_all; return 1; }
@@ -447,16 +460,20 @@ run_arm() {
   stop_all
 }
 
-rm -f "$OUT"/cold_*.dat "$OUT"/warm_*.dat "$OUT"/decode_*.dat "$OUT"/mem_*.dat "$OUT"/sweep_*.dat "$OUT"/noisy_*.dat
+rm -f "$OUT"/cold_*.dat "$OUT"/warm_*.dat "$OUT"/decode_*.dat "$OUT"/mem_*.dat "$OUT"/sweep_*.dat "$OUT"/noisy_*.dat "$OUT"/multiturn_*.dat
 read -r -a ARMS <<< "$ENGINES"
 for r in $(seq 1 "$ROUNDS"); do
   echo "ronda $r/$ROUNDS:"
   # Rotate left by (r-1) so every engine leads a round: with 3 arms and 3 rounds each
   # one runs first exactly once, which is the multi-arm version of ab_shared_prefix's
   # alternation.
-  n=${#ARMS[@]}
-  for i in $(seq 0 $((n - 1))); do
-    run_arm "${ARMS[$(( (i + r - 1) % n ))]}"
+  # `n_arms`, no `n`: un bucle `read` dentro de run_arm pisó una variable llamada `n`
+  # y la rotación empezó a dividir por cero, con el resultado de que sólo corrió el
+  # primer motor de tres. El fallo no abortó la tirada — imprimió una tabla con una
+  # sola columna, que es exactamente lo que parece un resultado.
+  n_arms=${#ARMS[@]}
+  for i in $(seq 0 $((n_arms - 1))); do
+    run_arm "${ARMS[$(( (i + r - 1) % n_arms ))]}"
   done
 done
 
@@ -476,6 +493,45 @@ def col(phase, eng, idx):
 # In burst mode the headline is a latency (lower wins); in decode mode a rate (higher
 # wins). Getting that backwards would not crash, it would just print the winner's name
 # in the loser's place, so the direction is carried explicitly.
+if mode == "multiturn":
+    # Per turn index, because the shape is the claim: turn 0 pays for the preamble and
+    # every later turn should pay only for what was added since. A flat line means the
+    # history is being re-read every time.
+    print("  CONVERSACIÓN MULTI-TURNO (TTFT p50 por turno)")
+    rows = {}
+    for e in engines:
+        try:
+            v = [[float(x) for x in l.split()] for l in open(f"{d}/multiturn_{e}.dat")
+                 if l.strip()]
+        except FileNotFoundError:
+            continue
+        if v:
+            rows[e] = v
+    if rows:
+        turns = sorted({int(r[0]) for v in rows.values() for r in v})
+        header = "".join(f"{e:>16}" for e in rows)
+        print(f"    {'turno':<7}{'prompt tok':>12}{header}")
+        for t in turns:
+            ptok = statistics.median([r[3] for v in rows.values() for r in v if int(r[0]) == t])
+            cells = ""
+            for e, v in rows.items():
+                vals = [r[1] for r in v if int(r[0]) == t]
+                cells += f"{statistics.median(vals):>13.0f} ms" if vals else f"{'—':>16}"
+            print(f"    {t:<7}{ptok:>12.0f}{cells}")
+        print()
+        for e, v in rows.items():
+            first = statistics.median([r[1] for r in v if int(r[0]) == 0])
+            later = [r[1] for r in v if int(r[0]) > 0]
+            cach = [r[2] for r in v if int(r[0]) > 0]
+            if later:
+                print(f"    {e}: turno 0 {first:.0f} ms → turnos siguientes {statistics.median(later):.0f} ms "
+                      f"({first / statistics.median(later):.1f}x), cached {statistics.median(cach):.0f}")
+    print()
+    print("  Un motor que reutiliza paga el prompt entero sólo en el turno 0. Si la")
+    print("  columna se mantiene plana mientras 'prompt tok' crece, está releyendo la")
+    print("  conversación completa en cada turno.")
+    raise SystemExit
+
 if mode == "sweep":
     # One table per engine: the curve matters more than any single point on it.
     for e in engines:

@@ -173,6 +173,39 @@ Still owed: `FOX_RS_ROLLBACK` is an environment variable only. The repo's conven
 that every knob has a CLI flag, an env var and a config key, and this one has a 30 GB
 failure mode, so it should be promoted.
 
+### Multi-turn, measured at last — and the claim is narrower than the docs say
+
+The most-quoted product claim had no number under it until now. `scripts/bench_multiturn.py`
+runs real conversations: each turn's prompt is the previous prompt plus the model's
+*actual* reply plus a new user message, so the history is a genuine prefix that grows.
+Each conversation opens with a unique marker, so this isolates within-conversation reuse
+from the shared-system-prompt case the burst benchmark already covers.
+
+4 concurrent conversations, 8 turns, prompt growing 157 → 498 tokens, 3 rounds,
+Llama-3.2-1B, ranges disjoint:
+
+| | turn 0 | turns 1-7 | speed-up within a conversation |
+|---|---|---|---|
+| fox | 372 ms [367, 374] | **53 ms** [49, 59] | 7.0× |
+| `llama-server` | 383 ms [381, 385] | 87 ms [71, 108] | 4.4× |
+| Ollama | 632 ms [519, 661] | 259 ms [214, 335] | 2.4× |
+
+**"Conversations get faster over time" is true for fox — and also for `llama-server`.**
+It reuses here too (`cached_tokens` 350 against fox's 342), because between turns a
+conversation's sequence is *idle*, and inheriting an idle slot is exactly what
+`llama-server` does well. Its limitation is inheriting from a sequence that is still
+decoding, and a sequential conversation never exercises it.
+
+So the honest figures for this workload are **1.64× over `llama-server`** and **4.9× over
+Ollama** — not the 3.9× the concurrent burst produces. The burst and the conversation are
+different claims and the docs currently blur them.
+
+Which comparison to lead with is a positioning decision, not a measurement one: fox
+describes itself as a drop-in replacement for **Ollama**, and against Ollama this is 4.9×.
+Against `llama-server` — which has no model management, no pull, no catalogue and no
+Ollama API — it is 1.64×. Quoting the larger number against the weaker competitor is fine
+if the comparison is named; leaving it unnamed is not.
+
 ### What has not been done
 
 The whole comparison is **Llama-3.2-1B-Q8_0 on one iGPU**, i.e. one size and one

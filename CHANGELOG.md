@@ -11,6 +11,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.5] - 2026-08-04
+
+`fox run` has been sending the model malformed prompts since it was written. Fixing
+that, and turning the chat session into one you can actually use.
+
+### Fixed
+
+- **`fox run` tokenised its prompts as raw text, so the model never saw turn markers.**
+  The command rendered the chat template and then passed the result to `tokenize()`,
+  which is the *raw text* tokenizer: `add_special = true`, `parse_special = false`. The
+  template's `<start_of_turn>` / `<end_of_turn>` went in as literal text instead of the
+  control tokens they are, and a second BOS was prepended on top of the one the template
+  already emits. The HTTP handlers have always used `build_prompt_tokens`, which picks
+  the flags to match how the prompt was rendered; the CLI reimplemented the same two
+  steps by hand and got them wrong.
+
+  The visible symptom was an empty reply. Seeing a conversation with no turn structure,
+  the model answered often enough by writing a literal `<start_of_turn>model` — the
+  token ids it generated (`236820`, `3041`, `236779`) are exactly the ones the broken
+  tokenisation produces for that string. The output filter recognised the pattern,
+  correctly held the text back, and reported `StopSequence`, so nothing reached the
+  screen. Both the filter and the engine were doing their job.
+
+  On gemma-3-1b, four rounds of each scenario: empty replies went from 1-of-3 (no
+  cancellation involved) and 3-of-4 (after a cancelled turn) to **0-of-4 in both**. The
+  same prompt now tokenises to 27 tokens where it took 38.
+
+  This was never only about empty replies — every `fox run` session was degraded, and
+  the empty ones were just where it became impossible to miss.
+
+- **The same mistake in `fox bench`, `fox bench-kv` and `fox bench-spec`**, all three
+  fixed the same way. Their reported prompt lengths change as a result, so numbers from
+  these commands are **not comparable across this version**. The four-engine benchmark
+  is unaffected: it drives the server over HTTP.
+
+- **An empty reply was reported as a full context window, and the conversation was
+  wiped.** The diagnosis was a guess and usually a wrong one — the window sat at 400 of
+  32768. It now checks the context before claiming that, says what actually happened
+  otherwise, and keeps the history either way.
+
+### Added
+
+- **Line editing and history in the chat session** (rustyline). The terminal was left in
+  canonical mode, where the line discipline does not interpret arrow keys: pressing Up
+  to recall the previous message typed a literal `^[[A`, and a typo could only be fixed
+  by backspacing to it. History now persists between sessions in
+  `~/.config/ferrumox/chat_history`, and bracketed paste means a multi-line paste is no
+  longer submitted a line at a time.
+
+- **Ctrl+C stops the reply instead of killing the session.** It only becomes a signal
+  during generation — while the editor is reading, the terminal is raw with `ISIG` off
+  and rustyline sees the byte — so the two cases do not collide. Dropping the token
+  receiver is what cancels the work: the engine's `send()` fails, and it preempts the
+  request and frees the KV blocks. What was generated is kept, trimmed back to the last
+  sentence or word so the history does not end mid-token.
+
+- **`/help` and `/clear`.** The banner named two of the five commands, which left
+  `/clear` with no way to be discovered.
+
+### Changed
+
+- `fox run` is described as what it does: *"Chat with a model in the terminal, or answer
+  one prompt and exit"*. It has opened an interactive session since it was written, and
+  the help said only "single-shot inference".
+
+---
+
 ## [0.20.4] - 2026-08-04
 
 The binary published in 0.20.3 did not start. This fixes the packaging and makes a

@@ -125,6 +125,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ contains(github.ref_name, '-rc') }}
+          # install.sh and install.ps1 ride along with every release. The README has
+          # always advertised
+          #   curl -fsSL .../releases/latest/download/install.sh | sh
+          # and that URL 404'd, because the only assets uploaded were the tarball and
+          # its checksum. The advertised way to install fox did not work.
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET_SHA256 }}
+            install.sh
+            install.ps1

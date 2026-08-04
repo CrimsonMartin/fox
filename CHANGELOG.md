@@ -41,10 +41,16 @@ that, and turning the chat session into one you can actually use.
   This was never only about empty replies — every `fox run` session was degraded, and
   the empty ones were just where it became impossible to miss.
 
-- **The same mistake in `fox bench`, `fox bench-kv` and `fox bench-spec`**, all three
-  fixed the same way. Their reported prompt lengths change as a result, so numbers from
-  these commands are **not comparable across this version**. The four-engine benchmark
-  is unaffected: it drives the server over HTTP.
+- **The same mistake in `fox bench`, `fox bench-kv`, `fox bench-spec` and
+  `fox bench-prefill`** — every CLI command that builds a chat prompt had it. A sweep of
+  the whole tree found the fourth; the first three were found by reading the code around
+  the first. Their reported prompt lengths change as a result, so numbers from these
+  commands are **not comparable across this version**. The four-engine benchmark is
+  unaffected: it drives the server over HTTP.
+
+  The one remaining `apply_chat_template` + `tokenize` pair is the `Model` trait's own
+  default `build_prompt_tokens`, which is correct: a backend with no Jinja template has
+  no special tokens to parse, and `LlamaCppModel` overrides it.
 
 - **An empty reply was reported as a full context window, and the conversation was
   wiped.** The diagnosis was a guess and usually a wrong one — the window sat at 400 of
@@ -69,6 +75,13 @@ that, and turning the chat session into one you can actually use.
 
 - **`/help` and `/clear`.** The banner named two of the five commands, which left
   `/clear` with no way to be discovered.
+
+- **`scripts/check_prompt_tokenization.py`, wired into `make ci` and CI.** It fails when
+  a function renders a chat template and then calls `tokenize()` on the result, which is
+  the shape of the bug above. Verified both ways: clean on the fixed tree, and it does
+  report the defect when it is deliberately put back. The mistake survived for as long as
+  it did because it is invisible to every test fox has — `make e2e` passed 22 of 22 with
+  it present, since those tests go over HTTP.
 
 ### Changed
 

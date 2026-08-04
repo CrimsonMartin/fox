@@ -72,6 +72,15 @@ jobs:
       - name: cargo test
         run: cargo test --all --features test-helpers
 
+      - name: Docs name only things that exist
+        # Prose cannot be compiled; the names in it can be checked. Five documents were
+        # once found asserting a behaviour that a release had changed, and the only
+        # reason anyone noticed was acting on them. This catches the mechanical half:
+        # a flag or FOX_* variable that was renamed or invented.
+        run: |
+          cargo build --bin fox -q
+          python3 scripts/check_docs_flags.py
+
   build-release:
     name: Release Build
     runs-on: ubuntu-latest

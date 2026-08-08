@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.21.0] - 2026-08-08
+
+Three changes about being able to tell what the server is doing: a number for the
+work its scheduler avoids, a document for what its interface promises, and a
+`model` label so its metrics say which model an observation belongs to. The last
+one renames every metric, which is why this is a minor rather than a patch.
+
 ### Changed
 
 - **BREAKING (Tier 2): the Prometheus metrics move from `ferrumox_*` to `fox_*`.**

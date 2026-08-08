@@ -60,7 +60,9 @@ Real interfaces that people build on, but where a change costs a dashboard edit 
 than a broken client. Changed on a minor bump with a CHANGELOG entry; no deprecation
 window is promised.
 
-- **Prometheus metrics** — the `ferrumox_*` names on `/metrics` and their label sets.
+- **Prometheus metrics** — the `fox_*` names on `/metrics` and their label sets. Every
+  metric carries a `model` label, capped at 32 distinct values per process with the
+  remainder collapsed into `model="<other>"`; the cap is a Tier 2 number and may move.
 - **Introspection routes** — `/slots`, `/props`, `/lora-adapters`, and the body of
   `/health`. These report internal state by design, so they move when the internals do.
 - **Diagnostic subcommands** — `probe`, `bench`, `bench-kv`, `bench-prefill`,
@@ -209,14 +211,14 @@ to prevent repeating.
 - [ ] **Prebuilt binaries for macOS and Windows.** Today the release workflow builds
       Linux x86_64 only, and the other platforms are told to build from source or use
       WSL2. A 1.0 that most desktop users cannot install is not a 1.0.
-- [ ] **Metric names settled.** The `/metrics` prefix is `ferrumox_` while the binary,
-      the docs and every user-facing string say `fox`. Renaming the prefix breaks every
-      dashboard, so it happens once, before 1.0, or never.
-- [ ] **A per-model dimension on metrics, with a cardinality bound.** Fox serves several
-      models at once (`--max-models`) and no metric says which one is responsible. The
-      label cannot be added without a cap, because model names come from arbitrary
-      HuggingFace repos and an unbounded label set is a denial-of-service on the scrape
-      endpoint.
+- [x] **Metric names settled.** Done in 0.21: the prefix is `fox_`, matching the binary
+      and every user-facing string. It was `ferrumox_` through 0.20, and renaming broke
+      existing dashboards — which is precisely why it had to happen before 1.0 rather
+      than after, when it could not have happened at all.
+- [x] **A per-model dimension on metrics, with a cardinality bound.** Done in 0.21: every
+      metric carries `model`, capped at 32 distinct values with the remainder collapsed
+      into `model="<other>"`. The cap is not optional — model names come from arbitrary
+      HuggingFace repos, so the label set is influenced from outside the server.
 - [ ] **A decision on `/api/version`.** Either keep reporting fox's version and document
       it as the answer, or report a compatibility version clients can gate on. Not both,
       and not by accident.

@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (Tier 2): the Prometheus metrics move from `ferrumox_*` to `fox_*`.**
+  The binary, the CLI, the docs and everything a user types say `fox`; the metrics
+  endpoint was the only place that said `ferrumox`. Renaming breaks every existing
+  dashboard, which is exactly why it happens now: after 1.0 the prefix is frozen and the
+  inconsistency would be permanent.
+
+  Migration: `s/ferrumox_/fox_/` in dashboards, alerts and recording rules. All thirteen
+  names change prefix only — type and meaning are identical.
+
+  Per [`COMPATIBILITY.md`](COMPATIBILITY.md) this is Tier 2: observable, changed on a
+  minor bump with a CHANGELOG entry and no promised deprecation window.
+
+- **Every metric now carries a `model` label.** Fox serves several models at once with
+  `--max-models`, and until now nothing on `/metrics` said which one was responsible: a
+  saturated KV cache, a deep queue and a bad p99 all looked like properties of the server
+  rather than of one model inside it.
+
+  The label **could not be added without a cap**. Model names are whatever the client asks
+  for — `fox pull` accepts arbitrary HuggingFace repos — so the label set is influenced
+  from outside the server, and an unbounded one turns `/metrics` into a memory leak that
+  every scrape then has to serialise. The cap is 32 distinct values per process; past that
+  everything collapses into `model="<other>"`, with a warning emitted once per process.
+  Serving is never degraded by this.
+
+  The cap counts models **ever seen**, not loaded at once: a load/evict/load cycle reuses
+  its slot instead of consuming a new one, so nobody can walk the limit upward by churning
+  models.
+
+  Evicting a model retires its series. Counters could have been left alone — a monotonic
+  total that stops advancing is still true — but the gauges could not:
+  `fox_kv_cache_usage_ratio` for an evicted model would sit at its last value forever, and
+  a dashboard would go on reporting a full KV cache for a model that no longer holds a
+  single block.
+
+  `scripts/e2e_smoke.py` read two of these metrics by line prefix and now sums the series
+  instead of keeping the last, which with more than one model loaded would have reported a
+  single model's drafting.
+
+  A side effect of labelling, checked against a real server: **a metric no longer appears
+  on `/metrics` until its first observation.** Previously, unlabelled, all thirteen were
+  registered at startup and always emitted at zero. Now a series exists once something
+  touches it, so a freshly started server shows only the three gauges the engine loop
+  refreshes, and `fox_requests_total` does not appear until the first request finishes.
+  This is normal Prometheus behaviour for labelled metrics, but a panel that assumed
+  "always present, possibly zero" now gets an empty result: use `or vector(0)` in those
+  queries.
+
 ### Added
 
 - **`COMPATIBILITY.md`** — what fox promises not to break, and what it does not. Fox is a
@@ -32,9 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Three findings from reading the code to write it, all on the 1.0 checklist:
   `/api/version` reports fox's own version rather than an Ollama one, so a client gating on
-  a version comparison compares against the wrong number; the metrics prefix is
-  `ferrumox_` while everything user-facing says `fox`, and renaming breaks every dashboard;
-  and no metric says which model is responsible even though fox serves several at once.
+  a version comparison compares against the wrong number; the metrics prefix was
+  `ferrumox_` while everything user-facing said `fox`; and no metric said which model was
+  responsible even though fox serves several at once. The last two are resolved above, in
+  this same version.
 
   `scripts/check_docs_flags.py` now covers `COMPATIBILITY.md`: the flags and variables it
   names are checked against `fox --help` and the source. A policy promising stability for a

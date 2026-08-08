@@ -18,6 +18,11 @@ work its scheduler avoids, a document for what its interface promises, and a
 `model` label so its metrics say which model an observation belongs to. The last
 one renames every metric, which is why this is a minor rather than a patch.
 
+And then a fourth, found by pointing a client at a server with real models on it:
+the model listing endpoints were unusable on any machine with more than a few
+gigabytes of GGUFs. Fixing that changes what `digest` means, which is Tier 1, so
+it lands here rather than in a patch.
+
 ### Changed
 
 - **BREAKING (Tier 2): the Prometheus metrics move from `ferrumox_*` to `fox_*`.**
@@ -66,6 +71,47 @@ one renames every metric, which is why this is a minor rather than a patch.
   This is normal Prometheus behaviour for labelled metrics, but a panel that assumed
   "always present, possibly zero" now gets an empty result: use `or vector(0)` in those
   queries.
+
+- **BREAKING (Tier 1): the `digest` in `/api/tags`, `/api/ps` and `/api/show` is derived
+  from the model file's name, size and mtime, not from its contents.** It is still
+  `sha256:<hex>` and still changes whenever the file is replaced, but it is now an opaque
+  identifier rather than a content hash.
+
+  This is the fix for the hang below, not a cosmetic change: a digest that is a content
+  hash cannot be produced without reading every byte of the file, and there is nowhere on
+  a listing request to put that work. Ollama can report a real hash because its blobs are
+  content-addressed and hashed once at pull; fox stores plain GGUF files in a directory
+  that users also drop models into by hand.
+
+  Nothing in fox resolves a model by digest — it identifies, it does not address — and
+  `/api/pull` already emitted `sha256:<filename>` rather than a content hash, so no fox
+  client could have been verifying one. Per [`COMPATIBILITY.md`](COMPATIBILITY.md),
+  changing a field's meaning is Tier 1 and belongs on a minor bump with an entry saying
+  so. This is that entry.
+
+### Fixed
+
+- **`GET /api/tags` no longer hangs with a core pinned at 100%.** It computed the SHA-256
+  of every `.gguf` in the models directory before it could answer: measured on a 27 GB
+  directory, 51.6 s for the first call. `/api/ps` and `/api/show` did the same.
+
+  What turned a slow endpoint into an apparently dead server is that the digest cache was
+  only written once a hash *finished*, and identical work in flight was never shared. Each
+  retry — a `curl` re-run, an Open WebUI refresh, a page reload — started a full re-hash of
+  the whole directory on another blocking thread. Retrying, the natural response to no
+  response, is what saturated the CPU. `GET /` stayed instant throughout, because it
+  touches no disk, which made the server look up rather than stuck.
+
+  The same directory now answers in 22 ms, and eight concurrent requests complete in 30 ms
+  total. `/api/ps` additionally re-read the models directory once per resident model; it
+  now reads it once.
+
+- **`modified_at` reported the wrong date.** The RFC 3339 formatter computed the calendar
+  by approximation — `year = 1970 + days/365`, `month = day_of_year/30 + 1`, 30-day months
+  — so it ignored leap years and drifted within every year: a file touched on 2025-08-04
+  was reported as 2025-08-20, and the error grows. It now uses an exact civil-from-days
+  conversion, checked against the real calendar day by day across 200 years. Affects
+  `modified_at` in `/api/tags` and `general.modified_at` in `/api/show`.
 
 ### Added
 

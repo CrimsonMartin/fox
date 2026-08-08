@@ -550,6 +550,7 @@ build cover CPU, CUDA, ROCm, Vulkan and Metal.
 - **Discussions**: [GitHub Discussions](https://github.com/ferrumox/fox/discussions)
 - **Feature status**: [STATUS.md](STATUS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md)
+- **Compatibility policy**: [COMPATIBILITY.md](COMPATIBILITY.md) — what fox promises not to break, and what it does not
 - **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 To run tests:

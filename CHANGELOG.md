@@ -11,6 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`COMPATIBILITY.md`** — what fox promises not to break, and what it does not. Fox is a
+  drop-in replacement for Ollama and an OpenAI-compatible server, so its interface is
+  consumed by Open WebUI, Continue.dev, the `ollama` CLI and the `openai` SDKs: software
+  fox does not control, which breaks silently and remotely when a response shape changes.
+  The CHANGELOG records what happened; the document of what is promised was missing.
+
+  The axis is not public versus private but **who breaks**. Tier 1 (contract): the 29 HTTP
+  routes, the user-facing subcommands, the documented flags, `config.toml`, `aliases.toml`,
+  the model store, and the release tarball layout — `fox` is linked `RPATH=$ORIGIN`, so
+  moving the `.so` files breaks every existing install, and that is Tier 1 even though it
+  is not code. Tier 2 (observable): metrics, `/slots`, `/props`, the body of `/health`, and
+  the diagnostic subcommands. Tier 3 (no commitment): undocumented environment variables,
+  the crate — which is not published to crates.io — the pinned llama.cpp commit, and
+  `perf-budgets.json`.
+
+  It states what does **not** count as breaking, which matters just as much: additions, and
+  any change in speed, batching or scheduling decisions with identical output. The
+  performance budgets watch those numbers; they do not promise them.
+
+  Three findings from reading the code to write it, all on the 1.0 checklist:
+  `/api/version` reports fox's own version rather than an Ollama one, so a client gating on
+  a version comparison compares against the wrong number; the metrics prefix is
+  `ferrumox_` while everything user-facing says `fox`, and renaming breaks every dashboard;
+  and no metric says which model is responsible even though fox serves several at once.
+
+  `scripts/check_docs_flags.py` now covers `COMPATIBILITY.md`: the flags and variables it
+  names are checked against `fox --help` and the source. A policy promising stability for a
+  misspelled flag promises nothing. The cost is that a deprecation example can no longer
+  invent a flag; that is noted in the script.
+
 - **Performance budgets for the scheduler** — `perf-budgets.json` at the repository root,
   generated and enforced by `scheduler::budgets`. Five scenarios (8- and 16-client bursts
   behind a shared prompt, admission pressure, a 3-turn chat, and a control of 4 disjoint

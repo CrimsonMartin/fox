@@ -219,6 +219,10 @@ To add a new model:
 
 ## Cutting a release
 
+Decide the bump before writing the entry: [COMPATIBILITY.md](COMPATIBILITY.md) says which
+surfaces are a promise and which are not, and therefore whether a change is a patch or a
+minor. A Tier 1 change in a patch release is the mistake that policy exists to catch.
+
 The version bump, the CHANGELOG entry and `make e2e` come first. **The tag comes last,
 immediately before pushing** — never earlier.
 

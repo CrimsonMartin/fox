@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Performance budgets for the scheduler** — `perf-budgets.json` at the repository root,
+  generated and enforced by `scheduler::budgets`. Five scenarios (8- and 16-client bursts
+  behind a shared prompt, admission pressure, a 3-turn chat, and a control of 4 disjoint
+  prompts), each in two arms: fox as shipped, and with `--kv-reuse` off.
+
+  These are **counts, not times**: prompt tokens handed to the model, peak KV blocks,
+  prefix hits and admitted requests, measured by driving `schedule_step` with no model
+  behind it. Deterministic on any machine, so the check is exact equality and an
+  *improvement* fails as loudly as a regression — the number belongs in the commit that
+  earned it. A millisecond gate on a shared runner would flake, and a check that flakes
+  gets ignored.
+
+  Runs inside `cargo test --all`, so it is already in `make ci` and in CI without touching
+  a workflow. To re-record after an intended change: `make budgets`.
+
+  What it is **not**: a regression net the existing tests lacked. Three regressions were
+  injected into the copy-from-a-live-sequence path — disabling it outright, removing the
+  donor deferral, and copying only half the shared prefix while leaving `prefix_hits`
+  intact — and the existing suite caught all three. What the file adds is the aggregate
+  magnitude, which no unit test expresses, at a scale (8 and 16 requests) none of them
+  reaches.
+
+  Building it produced a measurement that did not exist before: with a 512-block pool the
+  no-reuse arm admits 14 of 16 requests and the reuse arm admits 16 of 16. That is the
+  README's "sharing widens concurrency" claim, until now unmeasured anywhere. It is
+  pinned by `shared_prefix_admission_pressure_16_clients`.
+
 ---
 
 ## [0.20.5] - 2026-08-04

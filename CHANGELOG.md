@@ -9,6 +9,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (Tier 2): the Prometheus metrics move from `ferrumox_*` to `fox_*`.**
+  The binary, the CLI, the docs and everything a user types say `fox`; the metrics
+  endpoint was the only place that said `ferrumox`. Renaming breaks every existing
+  dashboard, which is exactly why it happens now: after 1.0 the prefix is frozen and the
+  inconsistency would be permanent.
+
+  Migration: `s/ferrumox_/fox_/` in dashboards, alerts and recording rules. All thirteen
+  names change prefix only — type and meaning are identical.
+
+  Per [`COMPATIBILITY.md`](COMPATIBILITY.md) this is Tier 2: observable, changed on a
+  minor bump with a CHANGELOG entry and no promised deprecation window.
+
+- **Every metric now carries a `model` label.** Fox serves several models at once with
+  `--max-models`, and until now nothing on `/metrics` said which one was responsible: a
+  saturated KV cache, a deep queue and a bad p99 all looked like properties of the server
+  rather than of one model inside it.
+
+  The label **could not be added without a cap**. Model names are whatever the client asks
+  for — `fox pull` accepts arbitrary HuggingFace repos — so the label set is influenced
+  from outside the server, and an unbounded one turns `/metrics` into a memory leak that
+  every scrape then has to serialise. The cap is 32 distinct values per process; past that
+  everything collapses into `model="<other>"`, with a warning emitted once per process.
+  Serving is never degraded by this.
+
+  The cap counts models **ever seen**, not loaded at once: a load/evict/load cycle reuses
+  its slot instead of consuming a new one, so nobody can walk the limit upward by churning
+  models.
+
+  Evicting a model retires its series. Counters could have been left alone — a monotonic
+  total that stops advancing is still true — but the gauges could not:
+  `fox_kv_cache_usage_ratio` for an evicted model would sit at its last value forever, and
+  a dashboard would go on reporting a full KV cache for a model that no longer holds a
+  single block.
+
+  `scripts/e2e_smoke.py` read two of these metrics by line prefix and now sums the series
+  instead of keeping the last, which with more than one model loaded would have reported a
+  single model's drafting.
+
+  A side effect of labelling, checked against a real server: **a metric no longer appears
+  on `/metrics` until its first observation.** Previously, unlabelled, all thirteen were
+  registered at startup and always emitted at zero. Now a series exists once something
+  touches it, so a freshly started server shows only the three gauges the engine loop
+  refreshes, and `fox_requests_total` does not appear until the first request finishes.
+  This is normal Prometheus behaviour for labelled metrics, but a panel that assumed
+  "always present, possibly zero" now gets an empty result: use `or vector(0)` in those
+  queries.
+
+### Added
+
+- **`COMPATIBILITY.md`** — what fox promises not to break, and what it does not. Fox is a
+  drop-in replacement for Ollama and an OpenAI-compatible server, so its interface is
+  consumed by Open WebUI, Continue.dev, the `ollama` CLI and the `openai` SDKs: software
+  fox does not control, which breaks silently and remotely when a response shape changes.
+  The CHANGELOG records what happened; the document of what is promised was missing.
+
+  The axis is not public versus private but **who breaks**. Tier 1 (contract): the 29 HTTP
+  routes, the user-facing subcommands, the documented flags, `config.toml`, `aliases.toml`,
+  the model store, and the release tarball layout — `fox` is linked `RPATH=$ORIGIN`, so
+  moving the `.so` files breaks every existing install, and that is Tier 1 even though it
+  is not code. Tier 2 (observable): metrics, `/slots`, `/props`, the body of `/health`, and
+  the diagnostic subcommands. Tier 3 (no commitment): undocumented environment variables,
+  the crate — which is not published to crates.io — the pinned llama.cpp commit, and
+  `perf-budgets.json`.
+
+  It states what does **not** count as breaking, which matters just as much: additions, and
+  any change in speed, batching or scheduling decisions with identical output. The
+  performance budgets watch those numbers; they do not promise them.
+
+  Three findings from reading the code to write it, all on the 1.0 checklist:
+  `/api/version` reports fox's own version rather than an Ollama one, so a client gating on
+  a version comparison compares against the wrong number; the metrics prefix was
+  `ferrumox_` while everything user-facing said `fox`; and no metric said which model was
+  responsible even though fox serves several at once. The last two are resolved above, in
+  this same version.
+
+  `scripts/check_docs_flags.py` now covers `COMPATIBILITY.md`: the flags and variables it
+  names are checked against `fox --help` and the source. A policy promising stability for a
+  misspelled flag promises nothing. The cost is that a deprecation example can no longer
+  invent a flag; that is noted in the script.
+
+- **Performance budgets for the scheduler** — `perf-budgets.json` at the repository root,
+  generated and enforced by `scheduler::budgets`. Five scenarios (8- and 16-client bursts
+  behind a shared prompt, admission pressure, a 3-turn chat, and a control of 4 disjoint
+  prompts), each in two arms: fox as shipped, and with `--kv-reuse` off.
+
+  These are **counts, not times**: prompt tokens handed to the model, peak KV blocks,
+  prefix hits and admitted requests, measured by driving `schedule_step` with no model
+  behind it. Deterministic on any machine, so the check is exact equality and an
+  *improvement* fails as loudly as a regression — the number belongs in the commit that
+  earned it. A millisecond gate on a shared runner would flake, and a check that flakes
+  gets ignored.
+
+  Runs inside `cargo test --all`, so it is already in `make ci` and in CI without touching
+  a workflow. To re-record after an intended change: `make budgets`.
+
+  What it is **not**: a regression net the existing tests lacked. Three regressions were
+  injected into the copy-from-a-live-sequence path — disabling it outright, removing the
+  donor deferral, and copying only half the shared prefix while leaving `prefix_hits`
+  intact — and the existing suite caught all three. What the file adds is the aggregate
+  magnitude, which no unit test expresses, at a scale (8 and 16 requests) none of them
+  reaches.
+
+  Building it produced a measurement that did not exist before: with a 512-block pool the
+  no-reuse arm admits 14 of 16 requests and the reuse arm admits 16 of 16. That is the
+  README's "sharing widens concurrency" claim, until now unmeasured anywhere. It is
+  pinned by `shared_prefix_admission_pressure_16_clients`.
+
+---
+
+## [0.20.5] - 2026-08-04
+
+`fox run` has been sending the model malformed prompts since it was written. Fixing
+that, and turning the chat session into one you can actually use.
+
+### Fixed
+
+- **`fox run` tokenised its prompts as raw text, so the model never saw turn markers.**
+  The command rendered the chat template and then passed the result to `tokenize()`,
+  which is the *raw text* tokenizer: `add_special = true`, `parse_special = false`. The
+  template's `<start_of_turn>` / `<end_of_turn>` went in as literal text instead of the
+  control tokens they are, and a second BOS was prepended on top of the one the template
+  already emits. The HTTP handlers have always used `build_prompt_tokens`, which picks
+  the flags to match how the prompt was rendered; the CLI reimplemented the same two
+  steps by hand and got them wrong.
+
+  The visible symptom was an empty reply. Seeing a conversation with no turn structure,
+  the model answered often enough by writing a literal `<start_of_turn>model` — the
+  token ids it generated (`236820`, `3041`, `236779`) are exactly the ones the broken
+  tokenisation produces for that string. The output filter recognised the pattern,
+  correctly held the text back, and reported `StopSequence`, so nothing reached the
+  screen. Both the filter and the engine were doing their job.
+
+  On gemma-3-1b, four rounds of each scenario: empty replies went from 1-of-3 (no
+  cancellation involved) and 3-of-4 (after a cancelled turn) to **0-of-4 in both**. The
+  same prompt now tokenises to 27 tokens where it took 38.
+
+  This was never only about empty replies — every `fox run` session was degraded, and
+  the empty ones were just where it became impossible to miss.
+
+- **The same mistake in `fox bench`, `fox bench-kv`, `fox bench-spec` and
+  `fox bench-prefill`** — every CLI command that builds a chat prompt had it. A sweep of
+  the whole tree found the fourth; the first three were found by reading the code around
+  the first. Their reported prompt lengths change as a result, so numbers from these
+  commands are **not comparable across this version**. The four-engine benchmark is
+  unaffected: it drives the server over HTTP.
+
+  The one remaining `apply_chat_template` + `tokenize` pair is the `Model` trait's own
+  default `build_prompt_tokens`, which is correct: a backend with no Jinja template has
+  no special tokens to parse, and `LlamaCppModel` overrides it.
+
+- **An empty reply was reported as a full context window, and the conversation was
+  wiped.** The diagnosis was a guess and usually a wrong one — the window sat at 400 of
+  32768. It now checks the context before claiming that, says what actually happened
+  otherwise, and keeps the history either way.
+
+### Added
+
+- **Line editing and history in the chat session** (rustyline). The terminal was left in
+  canonical mode, where the line discipline does not interpret arrow keys: pressing Up
+  to recall the previous message typed a literal `^[[A`, and a typo could only be fixed
+  by backspacing to it. History now persists between sessions in
+  `~/.config/ferrumox/chat_history`, and bracketed paste means a multi-line paste is no
+  longer submitted a line at a time.
+
+- **Ctrl+C stops the reply instead of killing the session.** It only becomes a signal
+  during generation — while the editor is reading, the terminal is raw with `ISIG` off
+  and rustyline sees the byte — so the two cases do not collide. Dropping the token
+  receiver is what cancels the work: the engine's `send()` fails, and it preempts the
+  request and frees the KV blocks. What was generated is kept, trimmed back to the last
+  sentence or word so the history does not end mid-token.
+
+- **`/help` and `/clear`.** The banner named two of the five commands, which left
+  `/clear` with no way to be discovered.
+
+- **`scripts/check_prompt_tokenization.py`, wired into `make ci` and CI.** It fails when
+  a function renders a chat template and then calls `tokenize()` on the result, which is
+  the shape of the bug above. Verified both ways: clean on the fixed tree, and it does
+  report the defect when it is deliberately put back. The mistake survived for as long as
+  it did because it is invisible to every test fox has — `make e2e` passed 22 of 22 with
+  it present, since those tests go over HTTP.
+
+### Changed
+
+- `fox run` is described as what it does: *"Chat with a model in the terminal, or answer
+  one prompt and exit"*. It has opened an interactive session since it was written, and
+  the help said only "single-shot inference".
+
 ---
 
 ## [0.20.4] - 2026-08-04

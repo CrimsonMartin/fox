@@ -106,6 +106,22 @@ it lands here rather than in a patch.
   total. `/api/ps` additionally re-read the models directory once per resident model; it
   now reads it once.
 
+- **Diffusion models are refused at load instead of served as gibberish.** LLaDA, Dream,
+  RND1 and the rest do not generate left to right — they unmask a sequence over a fixed
+  number of steps, which is why llama.cpp ships a separate `diffusion` tool for them.
+  fox's decode loop is autoregressive, and loading one anyway did not fail: it produced
+  replies with mask tokens (`<|mask_start|>`) embedded in them, fragments out of order,
+  duplicated spans and truncation. Reported as an output-formatting bug, which is exactly
+  what it looks like from the client side. `llama_model_is_diffusion()` is now checked
+  after load and the model is rejected with an explanation.
+
+- **An unrecognised `--type-kv` or `--split-mode` value is an error, not a shrug.** Both
+  parsers answered anything they did not recognise with the default and no message, so
+  `type_kv = "turbo3"` in `config.toml` quantised nothing, said nothing, and left the
+  operator believing the setting had applied. A config file has no completion and no type
+  checking; this warning was the only feedback available and it was not being given.
+  Rejected at startup now, before anything loads, naming the accepted values.
+
 - **A missing GPU dependency no longer stops fox compiling at all.** `build.rs` enabled
   the Vulkan backend on the strength of any single signal — `VULKAN_SDK` set, or `glslc`
   on `PATH`, or `vulkan.h` present. ggml-vulkan then opens with

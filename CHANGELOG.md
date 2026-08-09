@@ -106,6 +106,28 @@ it lands here rather than in a patch.
   total. `/api/ps` additionally re-read the models directory once per resident model; it
   now reads it once.
 
+- **A missing GPU dependency no longer stops fox compiling at all.** `build.rs` enabled
+  the Vulkan backend on the strength of any single signal — `VULKAN_SDK` set, or `glslc`
+  on `PATH`, or `vulkan.h` present. ggml-vulkan then opens with
+  `find_package(Vulkan COMPONENTS glslc REQUIRED)` and `find_package(SPIRV-Headers CONFIG
+  REQUIRED)`, and a missing one of those is a fatal CMake error rather than a fallback.
+  So detecting *half* a toolchain did not produce a CPU build, it failed the whole cargo
+  build — and with no way to turn Vulkan off, the user could not build fox at all. Reported
+  from Windows with a LunarG SDK 1.3.246, which ships `glslc` and the loader but no
+  `SPIRV-HeadersConfig.cmake`.
+
+  All three pieces are now checked before the backend is switched on, on Linux and
+  Windows alike, and a partial toolchain produces a CPU build plus a warning naming what
+  is missing and how to install it. `FOX_NO_VULKAN=1` forces it off, `FOX_FORCE_VULKAN=1`
+  forces it on — the second doubling as the way to re-run the check, since installing a
+  package does not invalidate a build script.
+
+  `GGML_VULKAN=OFF` is now passed explicitly instead of being left unset. CMake caches the
+  switch in `target/`, so once any build had configured with it ON, every later build in
+  that tree inherited ON regardless — someone who hit this and then fixed their toolchain
+  would have kept failing, with `cargo clean` and a full llama.cpp rebuild as the apparent
+  only cure.
+
 - **Releases are published with notes.** `softprops/action-gh-release` was only ever
   handed files, so every release page was a bare list of six assets and nothing else.
   Two of those assets are tarballs differing by a `-vulkan` suffix, which meant the page

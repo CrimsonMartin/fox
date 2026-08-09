@@ -106,6 +106,24 @@ it lands here rather than in a patch.
   total. `/api/ps` additionally re-read the models directory once per resident model; it
   now reads it once.
 
+- **Releases are published with notes.** `softprops/action-gh-release` was only ever
+  handed files, so every release page was a bare list of six assets and nothing else.
+  Two of those assets are tarballs differing by a `-vulkan` suffix, which meant the page
+  never said that a GPU build existed or which file to take — and the one *without* a
+  suffix reads as the default. It cost someone a bug report: `libggml-vulkan.so` looked
+  missing from the release, when it was in the other tarball all along.
+
+  The body is now this version's CHANGELOG section (`scripts/release_notes.py`) plus a
+  table of which download is which, how to verify it, and the note that `fox probe`
+  reports the backend actually in use. Written by a job that runs after both builds, so
+  the two matrix jobs cannot race over it.
+
+  Found alongside it: outside a tag push, `github.ref_name` is a *branch*, so the manual
+  `workflow_dispatch` re-run — which exists because GitHub silently fires no workflow when
+  more than three tags arrive at once — built tarballs named after a branch and uploaded
+  them to the wrong ref. The recovery path was broken in the situation it was written for.
+  Both jobs now resolve the tag once and the build checks out that tag.
+
 - **`modified_at` reported the wrong date.** The RFC 3339 formatter computed the calendar
   by approximation — `year = 1970 + days/365`, `month = day_of_year/30 + 1`, 30-day months
   — so it ignored leap years and drifted within every year: a file touched on 2025-08-04

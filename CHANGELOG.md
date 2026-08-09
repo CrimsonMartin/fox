@@ -106,6 +106,21 @@ it lands here rather than in a patch.
   total. `/api/ps` additionally re-read the models directory once per resident model; it
   now reads it once.
 
+- **`GET /health` no longer loads a model to answer.** It called `get_or_load`, so the
+  liveness probe blocked for as long as a multi-gigabyte load took — `curl -m 3` against
+  a server whose model was not resident simply timed out — and it could *cause* a load,
+  which under the default `--max-models 1` evicts whatever is serving traffic. An
+  orchestrator polling `/health` during startup gets a timeout and restarts the process
+  before it ever finishes loading: the probe becomes the outage. Found while verifying an
+  unrelated fix on a server holding a 10 GB model.
+
+  It now reports residency instead of establishing it, answering in 6 ms, and does not
+  count as a use — a probe that refreshed the LRU would keep a model resident forever and
+  `--keep-alive-secs` would never fire. The response gains `model_loaded`, because
+  otherwise "not loaded yet" and "loaded and idle" are the same body; that state was
+  nearly unreachable while the handler loaded on demand and is now the normal one before
+  the first request.
+
 - **Diffusion models are refused at load instead of served as gibberish.** LLaDA, Dream,
   RND1 and the rest do not generate left to right — they unmask a sequence over a fixed
   number of steps, which is why llama.cpp ships a separate `diffusion` tool for them.

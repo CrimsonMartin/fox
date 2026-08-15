@@ -330,6 +330,41 @@ pub trait Model: Send + Sync {
         Ok(out.into_iter().map(|(_, l)| l).collect())
     }
 
+    /// Whether this model carries a trained multi-token-prediction head, attached at
+    /// load time from a paired `mtp-*.gguf`. Default: no.
+    fn has_mtp(&self) -> bool {
+        false
+    }
+
+    /// Tell the MTP head a new generation is starting on `seq_id` with `prompt`.
+    /// Default: nothing to tell.
+    fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+        let _ = (seq_id, prompt);
+    }
+
+    /// Draft up to `draft_len` tokens from the MTP head, continuing after `id_last` at
+    /// position `n_past`. `seq` is the request's full logical sequence so far.
+    ///
+    /// Only ever called on a model whose `has_mtp` is true. Default: empty, which the
+    /// caller treats as "no draft this step" and falls back to an ordinary decode.
+    fn mtp_propose(
+        &self,
+        seq_id: i32,
+        n_past: i32,
+        id_last: i32,
+        seq: &[i32],
+        draft_len: usize,
+    ) -> Vec<i32> {
+        let _ = (seq_id, n_past, id_last, seq, draft_len);
+        Vec::new()
+    }
+
+    /// Report how many drafted tokens the target accepted, so the head can keep its
+    /// per-sequence state aligned with what was actually committed.
+    fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+        let _ = (seq_id, n_accepted);
+    }
+
     /// Feed `new_tokens` into this model's own KV at `seq_id` (starting at `base_pos`),
     /// then greedily (no penalty context — a draft proposer only needs to be
     /// plausible, not calibrated) decode up to `draft_len` further tokens, extending

@@ -53,6 +53,7 @@ pub fn make_test_registry(
         tensor_split: vec![],
         moe_offload_cpu: false,
         mmproj: None,
+        mtp_model: None,
         lora_modules: Vec::new(),
         primary_model: None,
     };
@@ -121,6 +122,7 @@ pub fn make_test_state_with_queue_depth(
         tensor_split: vec![],
         moe_offload_cpu: false,
         mmproj: None,
+        mtp_model: None,
         lora_modules: Vec::new(),
         primary_model: None,
     };
@@ -178,6 +180,7 @@ pub fn make_test_state_speculative(
         tensor_split: vec![],
         moe_offload_cpu: false,
         mmproj: None,
+        mtp_model: None,
         lora_modules: Vec::new(),
         primary_model: None,
     };
@@ -233,6 +236,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         tensor_split: vec![],
         moe_offload_cpu: false,
         mmproj: None,
+        mtp_model: None,
         lora_modules: Vec::new(),
         primary_model: None,
     };

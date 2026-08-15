@@ -165,6 +165,16 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
 
+    /// Name/path of the multi-token-prediction head GGUF paired with the main model
+    /// (published as `mtp-<model>.gguf`), enabling MTP speculative decoding. Requires
+    /// `--speculative true`; a value set without it is ignored, with a startup warning.
+    /// Unlike `--draft-model` this is not a second model that generates on its own: it
+    /// is a trained NextN block reading the target's hidden states, so it is both far
+    /// smaller and steadier than n-gram drafting on text that does not repeat. A head
+    /// belonging to a different model is rejected at load time by hidden-state width.
+    #[arg(long, env = "FOX_MTP_MODEL")]
+    pub mtp_model: Option<String>,
+
     /// Named LoRA adapters to load alongside the primary model, so a client can
     /// select one by name in the `model` field (OpenAI/Ollama) instead of the
     /// base model — e.g. `--lora-modules support-es=adapters/es.gguf,legal=
@@ -529,6 +539,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         spec_draft_len: args.spec_draft_len,
         draft_model: args.draft_model,
         mmproj: args.mmproj,
+        mtp_model: args.mtp_model,
         lora_modules: args
             .lora_modules
             .as_deref()

@@ -82,6 +82,7 @@ mod tests {
                     tensor_split: vec![],
                     moe_offload_cpu: false,
                     mmproj: None,
+                    mtp_model: None,
                     lora_modules: Vec::new(),
                     primary_model: None,
                 },

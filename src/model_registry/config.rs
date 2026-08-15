@@ -66,6 +66,13 @@ pub struct RegistryConfig {
     /// whatever model is currently loaded. A mismatched pairing (mmproj for a
     /// different architecture) fails at load time rather than corrupting output.
     pub mmproj: Option<String>,
+    /// Name/path of the multi-token-prediction head GGUF paired with the main model
+    /// (`mtp-*.gguf`), enabling MTP speculative decoding. Like `draft_model` and
+    /// `mmproj`, one global pairing against whichever model is loaded. Only takes
+    /// effect when `speculative` is also true. Unlike `draft_model`, the head is not a
+    /// standalone model: it is a trained NextN block that reads the target's hidden
+    /// states, so a head belonging to another model is rejected at load time by width.
+    pub mtp_model: Option<String>,
     /// Named LoRA adapters `(name, path, scale)` loaded alongside the primary
     /// model. A client selects one by naming it in the `model` field instead
     /// of the base model name — resolved the same way as `draft_model`/`mmproj`

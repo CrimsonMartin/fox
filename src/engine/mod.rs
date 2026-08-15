@@ -1,6 +1,7 @@
 // Inference engine - main loop coordinating scheduler, model, and KV cache.
 
 mod ffi;
+mod ffi_mtp;
 mod logits;
 pub mod model;
 mod output_filter;
@@ -19,7 +20,7 @@ use crate::metrics::Metrics;
 use crate::scheduler::InferenceRequest;
 
 use self::model::Model;
-use self::speculative::{DraftModelProposer, NgramProposer, Proposer};
+use self::speculative::{DraftModelProposer, MtpProposer, NgramProposer, Proposer};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries. Replace with space so words don't concatenate.
 const SPM_SPACE: char = '\u{2581}';
@@ -32,6 +33,10 @@ pub enum SpeculativeConfig {
     /// Draft-model (0.16): a second, smaller resident model predicts ahead. Requires
     /// `InferenceEngine::new`'s `draft_model` parameter to be `Some`.
     Draft { draft_len: usize },
+    /// Multi-token prediction: the model's own trained NextN head drafts from the
+    /// target's hidden states. Requires the model to have been loaded with a paired
+    /// MTP GGUF (`--mtp-model`), which is what `Model::has_mtp` reports.
+    Mtp { draft_len: usize },
 }
 
 /// Tunable engine behaviors. `Default` disables everything (single-shot prefill,
@@ -144,6 +149,12 @@ impl InferenceEngine {
                     draft_len,
                 )
             }
+            SpeculativeConfig::Mtp { draft_len } => (
+                // The head lives inside the target model, so the proposer drafts through
+                // the model itself rather than holding a second one.
+                Arc::new(MtpProposer::new(model.clone())) as Arc<dyn Proposer>,
+                draft_len,
+            ),
         });
         // Resolved once, here, rather than at each observation: the `model` label
         // is fixed for the life of an engine, and the per-token counter is far too

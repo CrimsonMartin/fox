@@ -242,33 +242,67 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         // (always inside any non-empty candidate pool) has probability
         // `exp(max_l - max_l)/sum == 1/sum`.
         let min_p_threshold = if min_p > 0.0 { min_p / sum } else { 0.0 };
-        let mut bound = 64usize.min(logits.len());
-        let idx = loop {
-            let cand: Vec<usize> = if bound < logits.len() {
-                select_top_n(&logits, bound)
-            } else {
-                (0..logits.len()).collect()
+        // `top_p >= 1.0` asks for the whole distribution and `min_p <= 0` removes the
+        // other reason the pool could stop early, so the answer is the entire
+        // vocabulary — known up front, not something to discover. The adaptive loop
+        // below would reach the same set by growing 64 → 256 → … → n, paying a
+        // `select_top_n` pass and a fresh allocation at every step and never once
+        // satisfying `covered >= 1.0` (a float sum of probabilities does not reach
+        // exactly 1.0). On Qwen3.8-27B's 248,320-entry vocabulary that is seven
+        // discarded passes per token, and `top_p: 1.0` is what `fox bench` and the
+        // OpenAI defaults both ask for.
+        if top_p_needed >= 1.0 && min_p <= 0.0 {
+            ((0..logits.len()).collect::<Vec<usize>>(), sum)
+        } else {
+            let mut bound = 64usize.min(logits.len());
+            let idx = loop {
+                let cand: Vec<usize> = if bound < logits.len() {
+                    select_top_n(&logits, bound)
+                } else {
+                    (0..logits.len()).collect()
+                };
+                if bound >= logits.len() {
+                    break cand;
+                }
+                let mut covered = 0.0f32;
+                let mut min_prob_in_pool = f32::INFINITY;
+                for &i in &cand {
+                    let prob = (logits[i] - max_l).exp() / sum;
+                    covered += prob;
+                    min_prob_in_pool = min_prob_in_pool.min(prob);
+                }
+                // `top_p == 1.0` truncates nothing, so it imposes no requirement on the
+                // pool and must not hold the loop open — `covered` is a float sum of
+                // probabilities and never reaches exactly 1.0, so testing it would grow
+                // the pool to the whole vocabulary no matter what the other filters
+                // wanted. Reaching here at all means some filter *does* truncate (the
+                // no-truncation case took the whole-vocabulary branch above), so this
+                // lets that filter alone decide how big the pool has to be: `min_p`
+                // with `top_p: 1.0` went from 5.2 to 25 tok/s on Qwen3.8-27B.
+                let top_p_satisfied = top_p_needed >= 1.0 || covered >= top_p_needed;
+                let min_p_satisfied = min_p <= 0.0 || min_prob_in_pool < min_p_threshold;
+                if top_p_satisfied && min_p_satisfied {
+                    break cand;
+                }
+                bound = (bound * 4).min(logits.len());
             };
-            if bound >= logits.len() {
-                break cand;
-            }
-            let mut covered = 0.0f32;
-            let mut min_prob_in_pool = f32::INFINITY;
-            for &i in &cand {
-                let prob = (logits[i] - max_l).exp() / sum;
-                covered += prob;
-                min_prob_in_pool = min_prob_in_pool.min(prob);
-            }
-            let top_p_satisfied = covered >= top_p_needed;
-            let min_p_satisfied = min_p <= 0.0 || min_prob_in_pool < min_p_threshold;
-            if top_p_satisfied && min_p_satisfied {
-                break cand;
-            }
-            bound = (bound * 4).min(logits.len());
-        };
-        (idx, sum)
+            (idx, sum)
+        }
     };
-    candidates.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal));
+    // Descending order exists solely so the truncation steps below can keep a *prefix*.
+    // When none of them will run, the pool goes to the weighted draw whole, and a draw
+    // over a fixed set is order-independent: the same tokens carry the same
+    // probabilities, so the distribution is identical either way. Sorting the entire
+    // vocabulary to then truncate nothing is the other half of the `top_p: 1.0` cost.
+    //
+    // Behaviour note: with a fixed `seed` this changes *which* token a given draw lands
+    // on (the linear walk over the pool now visits it in vocabulary order). Seeded
+    // reproducibility is intact — the order is deterministic — but a seed does not map
+    // to the same token it did before this change.
+    let truncates = min_p > 0.0 || top_n_sigma > 0.0 || top_p < 1.0;
+    if truncates {
+        candidates.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal));
+    }
     let mut probs: Vec<(usize, f32)> = candidates
         .iter()
         .map(|&i| (i, (logits[i] - max_l).exp() / exp_sum))
@@ -561,6 +595,88 @@ mod tests {
             "tokens outside top-K window should never be sampled; got {:?}",
             seen
         );
+    }
+
+    /// Base params for the pool-size regression tests below: every filter disabled, so
+    /// the sampler must draw from the entire vocabulary.
+    fn unfiltered(seed: u64) -> SamplerParams<'static> {
+        SamplerParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_p: 0.0,
+            repetition_penalty: 1.0,
+            repeat_last_n: -1,
+            top_n_sigma: 0.0,
+            min_keep: 0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias: None,
+            generated_ids: &[],
+            seed: Some(seed),
+            token_count: 0,
+        }
+    }
+
+    /// `top_p = 1.0` with no other filter truncates NOTHING, so the whole vocabulary
+    /// stays reachable — including the tail.
+    ///
+    /// This guards the shortcut that makes that case fast. The adaptive candidate pool
+    /// starts at 64 and grows only while a filter still demands more; with no filter
+    /// demanding anything, a plausible-looking "optimisation" is to stop at the first
+    /// bound, which would silently make every token past the 64th unsamplable. The
+    /// vocabulary here is uniform, so a correct sampler reaches deep into it.
+    #[test]
+    fn unfiltered_sampling_can_reach_beyond_the_initial_pool() {
+        let logits = vec![0.0f32; 1000]; // uniform: every token equally likely
+        let deepest = (0u64..200)
+            .map(|seed| sample_token(&logits, unfiltered(seed)))
+            .max()
+            .expect("200 draws");
+        assert!(
+            deepest >= 64,
+            "the pool must span the vocabulary when nothing truncates; deepest={deepest}"
+        );
+    }
+
+    /// The same shortcut must not cost the tail its weight: on a uniform vocabulary the
+    /// draws should spread across it, not cluster in whatever prefix the pool started at.
+    #[test]
+    fn unfiltered_sampling_spreads_across_the_vocabulary() {
+        let logits = vec![0.0f32; 1000];
+        let seen: std::collections::HashSet<i32> = (0u64..200)
+            .map(|seed| sample_token(&logits, unfiltered(seed)))
+            .collect();
+        let beyond_pool = seen.iter().filter(|&&t| t >= 64).count();
+        assert!(
+            beyond_pool > 100,
+            "a uniform vocabulary should be sampled broadly; only {beyond_pool} of \
+             {} distinct draws landed past the initial pool",
+            seen.len()
+        );
+    }
+
+    /// `min_p` with `top_p = 1.0` still truncates exactly.
+    ///
+    /// This pair used to be the sampler's worst case: `top_p`'s pool requirement was
+    /// tested as `covered >= 1.0`, which a float sum of probabilities never reaches, so
+    /// the pool grew to the whole vocabulary and was then fully sorted — 5.2 tok/s
+    /// against 25 on Qwen3.8-27B. `top_p = 1.0` now imposes no requirement, leaving
+    /// `min_p` to size the pool; this asserts the truncation it performs is unchanged.
+    #[test]
+    fn min_p_truncates_with_top_p_disabled() {
+        // Token 3 dominates; min_p = 0.9 keeps only tokens within 90% of its probability.
+        let logits = vec![0.0f32, 0.0, 0.0, 20.0];
+        for seed in 0u64..40 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    min_p: 0.9,
+                    ..unfiltered(seed)
+                },
+            );
+            assert_eq!(t, 3, "min_p must still drop the tail when top_p is 1.0");
+        }
     }
 
     #[test]

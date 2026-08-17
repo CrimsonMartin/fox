@@ -504,6 +504,7 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        n_gpu_layers: i32,
         main_gpu: i32,
         split_mode: u32,
         tensor_split: &[f32],
@@ -586,8 +587,16 @@ impl LlamaCppModel {
         let path_c = CString::new(path_cstr)?;
 
         let mut model_params = unsafe { ffi::llama_model_default_params() };
-        // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
-        model_params.n_gpu_layers = -1;
+        // How many transformer layers go to the GPU; -1 = all (the default). On CPU-only
+        // builds llama.cpp ignores this.
+        //
+        // This used to be hard-coded to -1, which was safe while fox only ever targeted
+        // iGPUs: with unified memory "all layers" always fit, so there was nothing to
+        // decide. It stops being safe on a discrete GPU with a fixed VRAM budget — a
+        // model one gigabyte too large then fails to load outright instead of putting the
+        // layers that do fit on the GPU and the rest on the CPU, which is what
+        // `llama-server -ngl N` has always done.
+        model_params.n_gpu_layers = n_gpu_layers;
         model_params.main_gpu = main_gpu;
         model_params.split_mode = split_mode as ffi::llama_split_mode;
 
@@ -694,7 +703,38 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        let n_seq = (max_batch_size as u32).max(4) + 1; // +1: dedicated embeddings slot (last id)
+        //
+        // The floor of 4 is cheap insurance on a standard model — a spare sequence costs
+        // a few MiB of KV, and having some slack avoids pathological single-slot
+        // configurations. It is ruinous on a recurrent or hybrid one, where every
+        // sequence carries a full fixed-size state whether or not anything uses it.
+        //
+        // Measured on Qwen3.8-27B (arch `qwen35`) on 2026-08-16: 748 MiB of recurrent
+        // state per sequence. The floor alone therefore reserved ~3.7 GB even when the
+        // user asked for a single slot — `--max-batch-size 1` and `--max-batch-size 4`
+        // allocated exactly the same amount — and that was the memory standing between
+        // fox and roughly five more layers of GPU residency on a 16 GB card.
+        //
+        // The scheduler sizes its slot table from `max_batch_size` alone, so dropping the
+        // floor keeps the context and the scheduler in agreement rather than breaking it.
+        let recurrent_state = unsafe {
+            ffi::llama_model_is_recurrent(model.as_ptr())
+                || ffi::llama_model_is_hybrid(model.as_ptr())
+        };
+        // +1: dedicated embeddings slot (last id)
+        let n_seq = if recurrent_state {
+            max_batch_size as u32 + 1
+        } else {
+            (max_batch_size as u32).max(4) + 1
+        };
+        if recurrent_state {
+            tracing::info!(
+                n_seq,
+                max_batch_size,
+                "recurrent/hybrid architecture — skipping the n_seq floor, each sequence \
+                 carries a full recurrent state"
+            );
+        }
 
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
@@ -1118,6 +1158,16 @@ impl LlamaCppModel {
         // `llama_memory_seq_rm` does not undo it here (hybrid context), which is why
         // llama-server checkpoints the draft context around the step rather than trimming
         // it — `common_speculative_get_state`/`set_state`, server-context.cpp:2368,3326.
+        //
+        // NOTE (2026-08-16): removing this checkpoint was tried, on the reading that
+        // llama-server's get_state/set_state are slot checkpointing for the prompt cache
+        // (its per-step cycle really is draft:2997 → verify → accept:3888) and that
+        // `common_speculative_accept` already trims the head's KV to the accepted tokens.
+        // It changed nothing — acceptance stayed at ~2.5%. The reason is upstream of both
+        // readings: the head's `llama_decode` returns -1 on every call, so it never runs at
+        // all and emits a frozen candidate set ('system', '以及', ' `') no matter the prompt.
+        // Whatever acceptance has ever been measured here was coincidence, not drafting.
+        // Fix the decode first; only then is the checkpoint question even answerable.
         let saved = driver.save_state(seq_id);
 
         let mut out = vec![0i32; draft_len];

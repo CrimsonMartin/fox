@@ -2,11 +2,13 @@
 //
 // Sub-modules:
 //   sampling   — token sampling (temperature, top-k, top-p, repetition penalty)
+//   chat_template — Jinja chat-template compilation/rendering (llama.cpp-free)
 //   llama_cpp  — LlamaCppModel implementation (real + fox_stub variant)
 //   stub       — StubModel for tests / test-helpers feature
 
 use anyhow::{anyhow, Result};
 
+pub(crate) mod chat_template;
 pub(crate) mod llama_cpp;
 pub(crate) mod model_info;
 #[cfg(not(fox_stub))]

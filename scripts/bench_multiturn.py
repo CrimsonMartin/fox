@@ -30,11 +30,28 @@ Prints one line per turn index:
   "turn <i> <ttft_p50_ms> <cached_p50> <prompt_tokens_p50> <n>"
 """
 import json
+import os
 import statistics
 import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+
+# Extra request fields, as a JSON object, merged into every turn's body.
+#
+# Exists because engines need different flags to be put in the SAME MODE, and comparing
+# them in different modes measures the mode. Qwen3.8-27B, 2026-08-17: fox answers
+# directly while Ollama runs the model's thinking block, so Ollama generated a reasoning
+# preamble every turn AND the driver fed that text back as the assistant message — which
+# does not match the `<think>`-delimited form in Ollama's own KV, so its prefix diverged
+# and it re-prefilled the whole history each turn. Reading the result as fox's caching
+# being 10-20x better would have been wrong twice over.
+#
+#   BENCH_EXTRA_BODY='{"reasoning_effort":"none"}'   # Ollama: thinking off
+#
+# Note `"think": false` and `chat_template_kwargs.enable_thinking` are BOTH ignored by
+# Ollama's OpenAI-compatible endpoint (verified) — only `reasoning_effort` takes effect.
+EXTRA_BODY = json.loads(os.environ.get("BENCH_EXTRA_BODY", "{}"))
 
 URL, MODEL = sys.argv[1], sys.argv[2]
 CONVERSATIONS = int(sys.argv[3]) if len(sys.argv) > 3 else 4
@@ -98,6 +115,7 @@ def turn(messages):
         "top_k": 40,
         "stream": True,
         "stream_options": {"include_usage": True},
+        **EXTRA_BODY,
     }).encode()
     req = urllib.request.Request(
         URL + "/v1/chat/completions", data=body,

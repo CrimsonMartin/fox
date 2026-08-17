@@ -72,12 +72,19 @@ def delta_text(chunk):
     "TTFT" and `ITL p50 0.0`, published as a fox loss before the zeros were noticed.
     Counting both fields is what makes engines with different reasoning handling
     comparable at all.
+
+    Ollama spells the same field `reasoning` (and sends `content: ""` alongside it,
+    which is falsy, so it does not rescue the lookup). Missing it cost the same
+    measurement a second time on 2026-08-16, in the opposite direction: Qwen3.8-27B
+    multi-turn read as 46 s of "TTFT" per turn for Ollama against 0.7 s for fox — a
+    4x fox *win* that was really prefill + 96 decoded tokens with no token ever seen.
+    Any new engine goes in this list before its numbers are quoted.
     """
     ch = chunk.get("choices") or [{}]
     if not ch:
         return None
     d = ch[0].get("delta") or {}
-    return d.get("content") or d.get("reasoning_content")
+    return d.get("content") or d.get("reasoning_content") or d.get("reasoning")
 
 
 def turn(messages):

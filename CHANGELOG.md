@@ -9,6 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Prompt reuse corrupted hybrid/recurrent models (Qwen3.5, Qwen3.8, Qwen3-Next,
+  Falcon-H1, Jamba).** After the first request, a repeated prompt was served from a
+  sequence that had never actually been rewound to the divergence point, and replies
+  came back truncated or as a bare EOS. Measured on Qwen3.8-27B: six identical
+  requests returned 64, 1, 1, 1, 1, 64 tokens.
+
+  The reuse decision trusted `Model::trim_sequence`'s return value to refuse an
+  impossible rollback. It does not: `llama_memory_recurrent::seq_rm` only range-checks
+  the distance while the sequence's tail cell is live, and after an earlier full clear
+  invalidates it, a partial rollback skips the check and reports success without
+  rewinding anything.
+
+  Reuse is now bounded before it is accepted, via `Model::rollback_budget()` —
+  `None` for attention caches, `Some(n_rs_seq)` for recurrent/hybrid ones. Two limits,
+  because they differ: a slot decoding in place keeps its per-token state snapshots and
+  gets the full budget, while a checkpoint restored with `state_seq_load` gets zero
+  (the blob carries the recurrent state but not the snapshot history a rewind indexes
+  into). Attention caches are unaffected — the check is a strict no-op for them.
+
+  Multi-turn reuse is preserved: a 173-token third turn still cached 151 tokens.
+  `--kv-reuse false`, the workaround, is no longer needed.
+
+- **`top_p: 1.0` cost 4.5x in the sampler.** An unrestricted `top_p` truncates nothing,
+  but the adaptive candidate pool tested its requirement as `covered >= top_p` — and a
+  float sum of probabilities never reaches exactly 1.0. So the pool grew 64 → 256 → …
+  through the whole vocabulary, paying a selection pass and an allocation per step, and
+  the result was then sorted in full: 248,320 entries per token on Qwen3.8-27B.
+
+  Measured on that model, decode: `top_p: 1.0` **5.6 → 25.2 tok/s**; `min_p: 0.05` with
+  `top_p: 1.0` (the worst case, which also hit the full sort) **5.2 → 25.7 tok/s**.
+  Unaffected controls stay put: handler defaults 25.0, `top_p: 0.95` 25.6.
+
+  Three changes, all semantics-preserving except where noted: the pool goes straight to
+  the whole vocabulary when nothing truncates rather than growing into it; `top_p >= 1.0`
+  no longer holds the growth loop open, so `min_p` alone sizes the pool; and the
+  descending sort is skipped when no truncation step will consume its ordering.
+
+  Behaviour note: with a fixed `seed` and no truncation active, a seed no longer maps to
+  the same token it did before — the draw now walks the pool in vocabulary order. The
+  distribution is identical and seeded runs remain reproducible.
+
+  This is why `fox bench` reported ~6 tok/s: it hardcodes `top_p: 1.0` and `top_k: 0`.
+  It now reports 24.9, against Ollama's 26.6 and llama-bench's 27.35 on the same model.
+
+- `golden.rs` did not compile: both `LlamaCppModel::load` call sites were missing the
+  `split_mode` argument. Pre-existing on this branch and invisible to `make ci`'s
+  stub-built jobs — exactly the breakage `check-real` exists to catch, which is only
+  useful if it is actually run.
+
+### Testing
+
+- e2e check 17: an identical prompt ×6 with EOG left **armed**. Check 1 covers the same
+  lifecycle but pins `min_tokens`, which suppresses EOG — and an immediate EOG is the
+  symptom, so it could never have caught this. The check asserts replies reach
+  `max_tokens` rather than merely exceeding one token; verified against the pre-fix
+  binary, which returned 24, 8, 3, 24, 1, 24 and would have passed a ">1 token" bar.
+- `scheduler::tests::{out_of_budget,in_budget,unbounded}_rollback_*`: deterministic
+  cover for the budget arithmetic, which the e2e cannot provide on the dense model the
+  suite normally runs.
+
 ---
 
 ## [0.21.0] - 2026-08-08

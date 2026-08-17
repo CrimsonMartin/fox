@@ -545,9 +545,17 @@ pub trait Model: Send + Sync {
     /// Returns whether the trim actually happened. It can legitimately fail: on
     /// recurrent and hybrid caches a partial rollback is only possible while the
     /// distance is within the retained snapshot window (`n_rs_seq`,
-    /// `llama-memory-recurrent.cpp:181`), and outside it llama.cpp returns false rather
-    /// than corrupting the state. A caller that ignores this leaves the request
-    /// believing tokens are resident that were never trimmed back to.
+    /// `llama-memory-recurrent.cpp:181`).
+    ///
+    /// **`false` is reliable; `true` is not.** llama.cpp only performs that range check
+    /// while the sequence's tail cell is live. A preceding full clear sets `tail = -1`
+    /// ("invalidate tails which will be cleared"), and from then on a partial rollback
+    /// skips the check entirely, falls through, and returns `true` having rewound
+    /// nothing. Measured on Qwen3.8-27B on 2026-08-17: a 60-token rollback with
+    /// `n_rs_seq = 4` returned `true`, and every request after it answered with a bare
+    /// EOS. So the `false` branch is worth handling (callers re-prefill), but it is a
+    /// backstop, not the guard — bound the distance up front via
+    /// [`Self::rollback_budget`] instead.
     fn trim_sequence(&self, _seq_id: i32, _from_pos: usize) -> bool {
         true
     }
@@ -592,10 +600,37 @@ pub trait Model: Send + Sync {
     /// does exactly that kind on the same architectures and the same llama.cpp —
     /// measured reusing 14680 tokens on Qwen3.5-9B where fox reused none.
     ///
-    /// Default true: the real guard is [`Self::trim_sequence`]'s return value, checked
-    /// at the point of use, not a static prediction here.
+    /// Default true, because the question this asks really is "can KV be inherited at
+    /// all", and almost every model can.
+    ///
+    /// It is NOT the whole guard. This method says nothing about how far back a given
+    /// offer would have to rewind, and an earlier version of this comment claimed
+    /// [`Self::trim_sequence`]'s return value covered that at the point of use. It does
+    /// not — see [`Self::rollback_budget`], which is the distance check and must run
+    /// *before* the offer is accepted.
     fn supports_slot_reuse(&self) -> bool {
         true
+    }
+
+    /// How far back this model's memory can actually be rewound, in tokens.
+    ///
+    /// `None` means unbounded — an attention KV cache drops cells at any position, so
+    /// any divergence point is reachable. A recurrent or hybrid cache returns
+    /// `Some(n_rs_seq)`: it only keeps that many per-token state snapshots, and a
+    /// rollback further than that is impossible.
+    ///
+    /// This exists because [`Self::trim_sequence`]'s return value is **not** a
+    /// sufficient guard, contrary to what its own docs assumed.
+    /// `llama_memory_recurrent::seq_rm` only range-checks the rollback while the
+    /// sequence's tail cell is live; a preceding full clear sets `tail = -1`
+    /// (`llama-memory-recurrent.cpp`, "invalidate tails which will be cleared"), after
+    /// which a partial rollback skips the check entirely and reports success without
+    /// rewinding anything. Measured on Qwen3.8-27B (`qwen35`, hybrid) on 2026-08-17: a
+    /// 60-position rollback with `n_rs_seq = 4` returned `true`, and every request from
+    /// the next one on came back empty. Callers must therefore bound the distance
+    /// *before* deciding to reuse, not detect the failure afterwards.
+    fn rollback_budget(&self) -> Option<usize> {
+        None
     }
 
     /// Return the embedding dimension (n_embd) for the model.

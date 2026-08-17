@@ -136,7 +136,9 @@ impl InferenceEngine {
                 // skipping a prefix that is no longer where it thinks it is, so take the
                 // same escape hatch the prompt-cache restore failure uses: drop the
                 // sequence and prefill it from scratch. Slower, never wrong.
-                if !engine.model.trim_sequence(*seq_id, *keep_from) {
+                let trimmed = engine.model.trim_sequence(*seq_id, *keep_from);
+                tracing::debug!(seq_id, keep_from, trimmed, "KV trim applied");
+                if !trimmed {
                     tracing::warn!(
                         seq_id,
                         keep_from,

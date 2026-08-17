@@ -115,6 +115,18 @@ impl InferenceEngine {
         scheduler.set_prefix_reuse(supports_prefix_cache);
         let supports_slot_reuse = model.supports_slot_reuse();
         scheduler.set_slot_reuse(supports_slot_reuse);
+        // Slot reuse being *allowed* says nothing about how far back a given offer
+        // would have to rewind. The scheduler needs the distance limit too, because
+        // llama.cpp accepts over-long rollbacks silently — see `set_rollback_budget`.
+        let rollback_budget = model.rollback_budget();
+        scheduler.set_rollback_budget(rollback_budget);
+        if let Some(budget) = rollback_budget {
+            tracing::info!(
+                rollback_budget = budget,
+                "bounded-rollback cache: slot and checkpoint hits further back than \
+                 this are declined and re-prefilled (raise with --rs-rollback)"
+            );
+        }
         if supports_prefix_cache {
             tracing::info!("prefix caching enabled (model supports seq_cp)");
         } else {

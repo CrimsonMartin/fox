@@ -440,6 +440,12 @@ pub struct LlamaCppModel {
     /// scale. Empty for the overwhelming majority of models.
     pub(super) lora_adapters:
         std::collections::HashMap<String, (NonNull<ffi::llama_adapter_lora>, f32)>,
+    /// How far this context's memory can be rewound, in tokens. `None` for an
+    /// attention-only KV cache (any position is reachable); `Some(n_rs_seq)` for a
+    /// recurrent or hybrid one, whose per-token state snapshots are the only route
+    /// back. Captured at load because it is a context parameter, not a model property.
+    /// See [`Model::rollback_budget`] for why this must be checked up front.
+    pub(super) rollback_budget: Option<usize>,
 }
 
 /// The MTP head loaded alongside a model, plus llama.cpp's speculative driver over it.
@@ -937,6 +943,10 @@ impl LlamaCppModel {
             #[cfg(fox_mtp)]
             mtp: None,
             lora_adapters,
+            // `recurrent_state` is the same predicate that dropped the n_seq floor
+            // above: those are exactly the caches whose rollback is bounded, and
+            // `n_rs_seq` (from `--rs-rollback`) is the bound.
+            rollback_budget: recurrent_state.then_some(rs_rollback as usize),
         })
     }
 
@@ -1288,6 +1298,11 @@ impl LlamaCppModel {
             mtmd_ctx: None,
             #[cfg(fox_mtp)]
             mtp: None,
+            rollback_budget: unsafe {
+                ffi::llama_model_is_recurrent(model.as_ptr())
+                    || ffi::llama_model_is_hybrid(model.as_ptr())
+            }
+            .then_some(rs_rollback as usize),
             lora_adapters: std::collections::HashMap::new(),
         })
     }
@@ -1568,6 +1583,10 @@ impl Model for LlamaCppModel {
             let model = self._model.as_ptr();
             !ffi::llama_model_is_recurrent(model) && !ffi::llama_model_is_hybrid(model)
         }
+    }
+
+    fn rollback_budget(&self) -> Option<usize> {
+        self.rollback_budget
     }
 
     fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {

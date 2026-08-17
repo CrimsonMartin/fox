@@ -270,6 +270,17 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_API_KEY")]
     pub api_key: Option<String>,
 
+    /// Transformer layers to offload to the GPU. `-1` (default) offloads all of them,
+    /// `0` keeps the model on the CPU, and anything in between splits it: the first N
+    /// layers run on the GPU and the rest on the CPU. Mirrors `llama-server -ngl`.
+    ///
+    /// Set this when a model's weights do not fit in VRAM. With the default `-1` such a
+    /// model fails to load outright — llama.cpp is asked for every layer, and refuses.
+    /// Only activations cross PCIe per token, a few KB, so a narrow link does not
+    /// penalise the split; the cost is that CPU-side layers run at system-RAM bandwidth.
+    #[arg(long, default_value = "-1", env = "FOX_N_GPU_LAYERS")]
+    pub n_gpu_layers: i32,
+
     /// Primary GPU index (0-based) used when split_mode=none, or as the main GPU for splits.
     #[arg(long, default_value = "0", env = "FOX_MAIN_GPU")]
     pub main_gpu: i32,
@@ -562,6 +573,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .map(parse_tensor_split)
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
+        n_gpu_layers: args.n_gpu_layers,
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

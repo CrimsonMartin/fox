@@ -521,6 +521,7 @@ mod tests {
             keep_alive_secs,
             type_k: 1,
             type_v: 1,
+            n_gpu_layers: -1,
             main_gpu: 0,
             split_mode: 1,
             tensor_split: vec![],

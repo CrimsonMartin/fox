@@ -43,6 +43,11 @@ async fn load_draft_model(
             gpu_memory_fraction,
             type_k,
             type_v,
+            // n_gpu_layers — always all of them, regardless of what the target model was
+            // given. A draft is small, and it is only worth having if it is much faster
+            // than the target; offloading part of it to the CPU would defeat speculation
+            // rather than economise on VRAM.
+            -1,
             main_gpu,
             split_mode,
             &tensor_split,
@@ -92,6 +97,7 @@ pub(super) async fn load_model(
     let metrics = cfg.metrics.clone();
     let type_k = cfg.type_k;
     let type_v = cfg.type_v;
+    let n_gpu_layers = cfg.n_gpu_layers;
     let main_gpu = cfg.main_gpu;
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
@@ -128,6 +134,7 @@ pub(super) async fn load_model(
             gpu_memory_fraction,
             type_k,
             type_v,
+            n_gpu_layers,
             main_gpu,
             split_mode,
             &tensor_split,

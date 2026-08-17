@@ -96,6 +96,10 @@ pub struct RegistryConfig {
     pub type_k: u32,
     /// Value cache element type. See `kv_type` constants.
     pub type_v: u32,
+    /// Transformer layers to offload to the GPU. `-1` (the default) means all of them;
+    /// `0` keeps the model entirely on the CPU. Any value in between splits it, which is
+    /// the only way to run a model whose weights do not fit in VRAM.
+    pub n_gpu_layers: i32,
     /// Primary GPU index (0-based). Used when split_mode=NONE, or as the main GPU for splits.
     pub main_gpu: i32,
     /// How to distribute the model across GPUs: 0=none, 1=layer (default), 2=row.

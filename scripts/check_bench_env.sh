@@ -55,9 +55,14 @@ mem_avail_g()  { awk '/MemAvailable/{printf "%.1f", $2/1048576}' /proc/meminfo; 
 # Anything else on the GPU or eating cores makes the measurement about that instead.
 competitors() {
   local list=""
-  pgrep -f "release/fox serve"  >/dev/null 2>&1 && list="$list fox-serve"
-  pgrep -x "llama-server"       >/dev/null 2>&1 && list="$list llama-server"
-  pgrep -f "ollama"             >/dev/null 2>&1 && list="$list ollama"
+  # -x (match the executable name) not -f (match the whole command line): `pgrep -f`
+  # also matches the caller, because the caller's own command line contains the pattern.
+  # Observed repeatedly on 2026-08-16 — this function reported "fox-serve" and "ollama"
+  # as competitors when nothing at all was running, purely because the invoking shell
+  # mentioned them. A gate that cries wolf is a gate that gets ignored.
+  pgrep -x "fox"          >/dev/null 2>&1 && list="$list fox-serve"
+  pgrep -x "llama-server" >/dev/null 2>&1 && list="$list llama-server"
+  pgrep -x "ollama"       >/dev/null 2>&1 && list="$list ollama"
   pgrep -x "cargo|rustc|cc1plus|ninja|make" >/dev/null 2>&1 && list="$list build"
   docker ps -q 2>/dev/null | grep -q . && list="$list docker"
   echo "${list# }"

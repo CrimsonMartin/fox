@@ -11,7 +11,13 @@ use anyhow::{anyhow, Result};
 pub(crate) mod chat_template;
 pub(crate) mod llama_cpp;
 pub(crate) mod model_info;
-#[cfg(not(fox_stub))]
+// Not gated on `fox_stub` despite its only caller (`llama_cpp::batch`) being
+// gated: this module is pure math over `&[f32]` plus `rand`, with no llama.cpp
+// dependency at all. It *was* gated, which meant `make ci` — which runs with
+// FOX_SKIP_LLAMA=1 — never compiled it and never ran any of its ~60 tests. That
+// is how a NaN bug in `sample_greedy` survived. `dead_code` is expected in a stub
+// build: the tests are the point, not the callers.
+#[cfg_attr(fox_stub, allow(dead_code))]
 pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;

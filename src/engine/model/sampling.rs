@@ -129,9 +129,13 @@ fn select_top_n(logits: &[f32], n: usize) -> Vec<usize> {
     // NEG_INFINITY until the buffer fills, so every early element is taken.
     let mut threshold = f32::NEG_INFINITY;
     for (i, &l) in logits.iter().enumerate() {
-        // NaN compares false here and is therefore treated as smaller than everything,
-        // matching what `partial_cmp(...).unwrap_or(Equal)` did with it before.
-        if top.len() == n && !(l > threshold) {
+        // NaN compares false here and is therefore treated as smaller than everything.
+        // The negation is load-bearing and must not be rewritten as `l <= threshold`:
+        // that is false for NaN, which would *admit* a NaN into the candidate pool.
+        // Clippy cannot know which of the two a partial order was meant to pick.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let below_threshold = !(l > threshold);
+        if top.len() == n && below_threshold {
             continue;
         }
         let pos = top.partition_point(|&(_, v)| v > l);

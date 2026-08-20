@@ -7,13 +7,58 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 /// Sample the highest-probability token (deterministic).
+///
+/// Ties go to the **highest** token id, matching `Iterator::max_by`'s
+/// last-maximum rule, which this function used to be written in terms of and which
+/// callers at `temperature = 0` observe directly.
+///
+/// NaN never wins. That is not a refinement, it is a bug fix: `max_by` replaces its
+/// accumulator whenever the comparison is not `Greater`, and
+/// `partial_cmp(..).unwrap_or(Equal)` reports `Equal` for an incomparable NaN — so
+/// a NaN always displaced the running maximum, and every element after it competed
+/// from scratch. Measured against the old implementation:
+///
+/// ```text
+/// [5.0, NaN]       -> 1   the NaN itself
+/// [5.0, NaN, 1.0]  -> 2   neither the maximum nor the NaN
+/// ```
+///
+/// One NaN anywhere in a 128K-wide logit vector was enough to emit an essentially
+/// arbitrary token. NaN logits are reachable in practice — fp16 overflow, a bad
+/// quantisation, corrupted KV — so this was a live path, not a theoretical one.
+/// A vector that is *entirely* NaN has no meaningful answer; it returns 0, as the
+/// empty case does.
 pub(crate) fn sample_greedy(logits: &[f32]) -> i32 {
-    logits
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-        .map(|(i, _)| i as i32)
-        .unwrap_or(0)
+    let mut best = 0usize;
+    let mut best_logit = f32::NEG_INFINITY;
+    let mut have_candidate = false;
+    let mut nan_count = 0usize;
+
+    for (i, &l) in logits.iter().enumerate() {
+        if l.is_nan() {
+            nan_count += 1;
+            continue;
+        }
+        // `>=`, not `>`: keep the last maximum, so `[1.0, 1.0, 0.5]` picks 1.
+        if !have_candidate || l >= best_logit {
+            best = i;
+            best_logit = l;
+            have_candidate = true;
+        }
+    }
+
+    if nan_count > 0 {
+        // Worth a warning every time rather than once: the model is producing
+        // garbage, and which requests it happened on is the diagnostic.
+        tracing::warn!(
+            nan_count,
+            vocab = logits.len(),
+            picked = best,
+            "NaN logits in greedy sampling — ignored, but the forward pass is suspect"
+        );
+    }
+
+    best as i32
 }
 
 /// Apply repetition penalty in-place: divide positive logits and multiply negative ones.
@@ -413,6 +458,41 @@ mod tests {
     #[test]
     fn greedy_handles_single_token() {
         assert_eq!(sample_greedy(&[42.0f32]), 0);
+    }
+
+    #[test]
+    fn greedy_handles_empty_logits() {
+        assert_eq!(sample_greedy(&[]), 0);
+    }
+
+    #[test]
+    fn greedy_all_negative_infinity_keeps_the_last() {
+        // `max_by` returned the last element here; the rewrite must not change it.
+        assert_eq!(sample_greedy(&[f32::NEG_INFINITY; 3]), 2);
+    }
+
+    #[test]
+    fn greedy_ignores_a_nan_instead_of_picking_it() {
+        assert_eq!(sample_greedy(&[5.0, f32::NAN]), 0);
+        assert_eq!(sample_greedy(&[f32::NAN, 5.0]), 1);
+    }
+
+    #[test]
+    fn greedy_nan_does_not_destroy_the_running_maximum() {
+        // The regression that motivated the fix: the old implementation returned 2
+        // here — neither the maximum nor the NaN, just whatever followed it.
+        assert_eq!(sample_greedy(&[5.0, f32::NAN, 1.0]), 0);
+        assert_eq!(sample_greedy(&[1.0, f32::NAN, 5.0, 2.0]), 2);
+    }
+
+    #[test]
+    fn greedy_all_nan_returns_zero() {
+        assert_eq!(sample_greedy(&[f32::NAN; 4]), 0);
+    }
+
+    #[test]
+    fn greedy_nan_does_not_disturb_tie_breaking() {
+        assert_eq!(sample_greedy(&[1.0, f32::NAN, 1.0, 0.5]), 2);
     }
 
     // -----------------------------------------------------------------------

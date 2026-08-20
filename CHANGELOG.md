@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One NaN logit made greedy sampling pick an arbitrary token.** `sample_greedy`
+  compared with `partial_cmp(..).unwrap_or(Ordering::Equal)` and fed that to
+  `max_by`, which replaces its accumulator whenever the comparison is not `Greater`.
+  An incomparable NaN therefore reported `Equal` and always displaced the running
+  maximum: `[5.0, NaN]` returned the NaN, and `[5.0, NaN, 1.0]` returned `2` —
+  neither the maximum nor the NaN. The NaN did not merely win, it wiped the best
+  candidate so far and everything after it competed from scratch, so a single NaN
+  anywhere in a 128K-wide vector was enough to emit an arbitrary token on the
+  `temperature <= 0` path, which is exactly the path callers use when they want
+  determinism. NaN logits are reachable through fp16 overflow, a bad quantisation or
+  corrupted KV. Now an explicit scan that skips NaN and warns with the count; the tie
+  rule is preserved exactly (`>=` keeps the last maximum, as `max_by` did), and an
+  all-NaN vector returns 0 like the empty case.
+
+- **The sampler was never compiled, let alone tested, in CI.** `sampling` was gated
+  behind `#[cfg(not(fox_stub))]` and `make ci` runs everything with
+  `FOX_SKIP_LLAMA=1`, so the module that decides which token every request emits was
+  excluded from every clippy and test run CI has ever done — which is how the NaN bug
+  above survived. The gate followed the module's only caller (`llama_cpp::batch`);
+  the module itself depends on `std::cmp::Ordering` and `rand` and nothing else.
+  Ungating it costs a `dead_code` allow in stub builds and buys 33 existing tests in
+  CI. The first clippy pass over this code flagged `!(l > threshold)` in
+  `select_top_n`; that negation is deliberate NaN handling and is now documented
+  rather than "fixed" — `l <= threshold` is false for NaN, which would admit one into
+  the candidate pool.
+
 - **Prompt reuse corrupted hybrid/recurrent models (Qwen3.5, Qwen3.8, Qwen3-Next,
   Falcon-H1, Jamba).** After the first request, a repeated prompt was served from a
   sequence that had never actually been rewound to the divergence point, and replies

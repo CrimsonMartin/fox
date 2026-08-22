@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`main` and `develop` share history again.** `main` was an orphan branch — its own
+  root commit, no ancestor in common with `develop`, so `git merge-base main develop`
+  returned nothing and each release snapshot was a single-parent commit built by copying
+  a tree. That made `main` unmergeable and threw away the link between a published
+  version and the commit it came from. Fixed by grafting, not rewriting: from this
+  release the snapshot is a two-parent commit whose first parent is `main`'s tip — so
+  `git log --first-parent main` still shows only the release chain — and whose second is
+  the `release:` commit on the working branch. Every published tag keeps its SHA, and the
+  snapshot's tree is unchanged. `CONTRIBUTING.md` carries the new recipe and the two
+  checks to run before tagging.
+
 - **A llama.cpp sequence id is now a type, not an `i32`.** llama.cpp addresses its KV
   cells by `(seq_id, pos)`, and fox passed that id around as a bare integer. Two of its
   twelve verified KV lifecycle bugs came from exactly that, both in the *sequence*

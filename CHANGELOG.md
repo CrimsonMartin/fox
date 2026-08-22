@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **A llama.cpp sequence id is now a type, not an `i32`.** llama.cpp addresses its KV
+  cells by `(seq_id, pos)`, and fox passed that id around as a bare integer. Two of its
+  twelve verified KV lifecycle bugs came from exactly that, both in the *sequence*
+  lifecycle rather than the block pool — which is also why the typed-block refactor that
+  motivated the audit was rejected. `SeqId` has two named `pub(crate)` constructors:
+  `slot(i)` for the range the scheduler's slot table owns, and `dedicated(raw)` for the
+  two sequences that live outside it (the embeddings sequence, and the draft model's own
+  context). Sixty signatures take it, no raw `seq_id: i32` survives outside the FFI
+  layer, and `Option<SeqId>` replaces the `-1` sentinel `kv_seq_id` used to carry, so
+  "no sequence" is a variant rather than a magic number a comparison can miss — at a
+  cost of four bytes per slot, since a plain `i32` newtype has no niche.
+
+  **It does not make `a4171eb` impossible, and the module says so.** `llama_batch` is a
+  bag of bindgen pointers and no newtype reaches through one, so a raw store into
+  `batch.seq_id` stays expressible. What stops it is that `set_batch_row` is the only
+  sanctioned write path and it takes a `SeqId`: writing that literal again means
+  hand-rolling pointer arithmetic beside a helper that already exists, which shows up in
+  a diff instead of hiding inside a comment claiming the slot is dedicated. An invisible
+  literal becomes a visible act; a runtime bug does not become a compile error.
+
+  No performance change. The reasoning, the twelve-bug classification and the decision
+  rule agreed before it started are in `docs/design/kv-typed-classification.md`.
+
+---
+
 ## [0.22.0] - 2026-08-22
 
 ### Added

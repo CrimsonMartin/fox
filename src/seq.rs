@@ -16,11 +16,22 @@
 //! The guarantee this type provides is deliberately narrow, and worth stating
 //! exactly so nobody relies on more than it gives:
 //!
-//! * A bare integer is a **type error** wherever a sequence is expected. That is the
-//!   bug above, and it is now unwriteable.
+//! * A bare integer is a **type error** in every Rust signature that expects a
+//!   sequence — 60 of them, and no raw `seq_id: i32` survives outside the FFI layer.
 //! * Minting a `SeqId` is still possible — it has to be, since the ids ultimately
 //!   come from a range fox chooses — but only through the two named constructors
 //!   below, both `pub(crate)`, both greppable. It is an act, not an accident.
+//!
+//! What it does **not** do, stated here because an earlier version of this comment
+//! claimed it did: it does not make `a4171eb` unwriteable. `llama_batch` is a bag of
+//! bindgen pointers and no newtype reaches through one, so a raw store into
+//! `batch.seq_id` remains expressible — see `set_batch_row` in
+//! `engine/model/llama_cpp/batch.rs`, which says the same from the other side. What
+//! stops the bug is that `set_batch_row` is the only sanctioned write path and it
+//! takes a `SeqId`, so re-writing that literal means hand-rolling pointer arithmetic
+//! next to a helper that already exists. The type turns an invisible literal into a
+//! visible act; it does not turn a runtime bug into a compile error. Claiming
+//! otherwise would be the exact overselling this module was written to stop.
 //!
 //! It is *not* an ownership token: `SeqId` is `Copy`, and holding one says nothing
 //! about whether the sequence is still yours. That would be

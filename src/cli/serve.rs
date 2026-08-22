@@ -165,13 +165,21 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
 
+    /// EXPERIMENTAL, opt-in, and currently SLOWER than the default n-gram proposer —
+    /// do not enable it except to work on it. Acceptance is 4-17% against
+    /// `llama-server`'s ~60% with the same head, because a second driver desync
+    /// remains unfixed; the server warns about this at load. Deliberately absent from
+    /// `docs/cli/`, so it carries no Tier 1 compatibility promise and may change or be
+    /// removed in any release.
+    ///
     /// Name/path of the multi-token-prediction head GGUF paired with the main model
     /// (published as `mtp-<model>.gguf`), enabling MTP speculative decoding. Requires
     /// `--speculative true`; a value set without it is ignored, with a startup warning.
     /// Unlike `--draft-model` this is not a second model that generates on its own: it
-    /// is a trained NextN block reading the target's hidden states, so it is both far
-    /// smaller and steadier than n-gram drafting on text that does not repeat. A head
-    /// belonging to a different model is rejected at load time by hidden-state width.
+    /// is a trained NextN block reading the target's hidden states, which is why it is
+    /// expected to beat n-gram drafting on text that does not repeat once the desync is
+    /// fixed. A head belonging to a different model is rejected at load time by
+    /// hidden-state width.
     #[arg(long, env = "FOX_MTP_MODEL")]
     pub mtp_model: Option<String>,
 

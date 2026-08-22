@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a second desync remains. `mtp_propose` documents the state, what was ruled out and with
   which measurement, and how to diff the two engines' driver traces.
 
+  It is deliberately **not** documented under `docs/cli/`, which is what makes it exempt
+  from the Tier 1 flag promise in `COMPATIBILITY.md`: it may change shape or disappear in
+  any release while the desync is open. `--help` says the same.
+
 ### Fixed
 
 - **One NaN logit made greedy sampling pick an arbitrary token.** `sample_greedy`

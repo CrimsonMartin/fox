@@ -15,6 +15,30 @@ shipped.
 
 ## [Unreleased]
 
+### Legal
+
+- **`LICENSE-APACHE` was not the Apache License 2.0.** It was a paraphrase, present
+  since the first commit and shipped in all 27 releases, and three definitions differed
+  from the real text: `"Work"` dropped "whether in Source or Object form", `"Contribution"`
+  lost the subject of its own sentence, and `"Contributor"` read "Licensor and any Legal
+  Entity" where the licence says "Licensor and any **individual or** Legal Entity". That
+  last one is load-bearing — §3 grants the patent licence from "each Contributor", so
+  narrowing who counts as one narrows the grant that is the whole reason to offer
+  Apache-2.0 at all.
+
+  The file is now the text from `apache.org/licenses/LICENSE-2.0.txt`, byte-identical
+  except for the copyright line in the appendix. `LICENSE-MIT` was checked against a
+  known-good copy and is genuine, word for word.
+
+  This also explains why GitHub reported the repository as `NOASSERTION` rather than
+  detecting a licence: its detector compares against the canonical text and found too
+  little resemblance. Projects using the identical `LICENSE-APACHE` + `LICENSE-MIT`
+  layout — rust-lang/rust, serde, clap — are all detected correctly, so the layout was
+  never the problem. **fox stays dual-licensed MIT OR Apache-2.0.**
+
+- **Both licence files credited a project name abandoned two renames ago.** The copyright
+  line read "ferrum-engine contributors"; it now reads "the fox contributors".
+
 ### Documentation
 
 - **Six CHANGELOG entries are marked "never released".** 0.3.0, 0.4.0, 0.5.0, 0.7.0,

@@ -36,13 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of surfacing as an unresolved mangled symbol at link time. `FOX_NO_MTP=1` drops
   the whole thing.
 
-  **It is currently slower than the n-gram proposer, warns loudly at load, and should not
-  be turned on except to work on it.** Acceptance is 4-17% against `llama-server`'s ~60%
-  with the same head. The main cause was found and fixed — drafting advanced the head's
-  KV past the target, so llama.cpp refused every verification decode, and checkpointing
-  the driver state around the draft took the trace from +1 token per step to +4/+5 — but
-  a second desync remains. `mtp_propose` documents the state, what was ruled out and with
-  which measurement, and how to diff the two engines' driver traces.
+  **It does not work, and this entry corrects the one that shipped in the v0.22.0 release
+  notes.** That text said acceptance was 4-17% and that the main cause had been found and
+  fixed with a second desync remaining. All three claims are wrong: they were taken from
+  the commit that added the flag, and a later commit on the same branch superseded them.
+
+  What is true is that the head has **never drafted**. Its `llama_decode` returns `-1` on
+  every call, so it returns a frozen, context-blind candidate set — asked to count from
+  one to twenty it proposes the same three tokens at every step, identical across
+  positions and prompts. The ~2.5% the server reports is therefore not draft quality at
+  all: it is how often a fixed list happens to coincide with the target's output.
+  `llama-server` reaches ~60% with the very same head file, so neither the head nor its
+  quantization is at fault. The `save_state`/`restore_state` pair fox wraps around
+  `mtp_propose` is dead code — that implementation does not override
+  `get_state`/`set_state`, so the dispatcher returns false — and removing it left
+  acceptance unchanged. `STATUS.md` item 17 carries the mechanism and the two hypotheses
+  already eliminated.
 
   It is deliberately **not** documented under `docs/cli/`, which is what makes it exempt
   from the Tier 1 flag promise in `COMPATIBILITY.md`: it may change shape or disappear in

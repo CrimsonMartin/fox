@@ -25,10 +25,20 @@ shipped.
   0.8.0 → v0.9.0, 0.18.0 → v0.19.0. Nothing was deleted; the entries document real work
   and only the version numbers never existed.
 
-- **The README stops carrying the contributor manual.** `Project structure` and
-  `Make targets` move to `CONTRIBUTING.md` under the architecture overview they belong
-  to, 60 lines off a 585-line front page. `Requirements` stays — driver requirements per
-  backend are what someone evaluating fox needs to see.
+- **The README is a landing page again, 585 lines down to 295.** It had grown into a
+  second, smaller copy of the manual: 26 flags appeared both there and in
+  `docs/configuration.md`, which is 299 lines to the README's 50, and the same held for
+  installation, integrations, the API reference and benchmarks — `docs/` is over 3,000
+  lines and a strict superset. The duplicated sections are now a summary plus a link to
+  the page that already covers them, `Project structure` and `Make targets` move to
+  `CONTRIBUTING.md`, and a **Documentation** index makes the twelve pages under `docs/`
+  discoverable, which they were not. What stays in full is what someone deciding whether
+  to use fox needs on one screen: the quick start, the concurrency benchmark with its
+  methodology, how the engine works, the compatibility table, and the per-backend driver
+  requirements. Nothing was deleted without checking the page that replaces it.
+
+- **A stale version in the README's install example.** The tarball walkthrough pinned
+  `V=0.20.2`, three releases behind, and it is gone with the section.
 
 - **`CLAUDE.md` no longer tells you to update a file that does not exist.** It asked for
   new CLI docs to be added to `mkdocs.yml`'s nav; the docs site was parked in 0.13 and

@@ -83,7 +83,6 @@ Numbers against Ollama are pending re-measurement on current hardware. The figur
 used to sit here were from an RTX 4060 with no recorded methodology, and this project's
 rule is that a before/after claim comes from `scripts/ab_bench.sh` or it does not get
 published.
-
 ---
 
 ## How it works
@@ -108,6 +107,9 @@ hardware actually holds.
 requests in the same pass, so a long generation for one client does not delay a short
 question from another.
 
+More on the engine — prompt reuse, speculative decoding, structured output, vision, LoRA,
+multi-GPU — in [`docs/features.md`](docs/features.md).
+
 ---
 
 ## Works with every tool you already use
@@ -124,8 +126,6 @@ question from another.
 | `ollama` CLI | Ollama | ✓ Works out of the box |
 | `openai` Python SDK | OpenAI | ✓ Works out of the box |
 
-### Python
-
 ```python
 from openai import OpenAI
 
@@ -138,337 +138,39 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-### Node.js
-
-```ts
-import OpenAI from "openai";
-
-const openai = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "sk-local" });
-
-const resp = await openai.chat.completions.create({
-  model: "qwen3.6",
-  messages: [{ role: "user", content: "Say hi in 5 words." }],
-});
-console.log(resp.choices[0].message?.content);
-```
-
-### IDE configuration
-
-**VSCode / Cursor**
-```json
-{ "github.copilot.advanced": { "serverUrl": "http://localhost:8080" } }
-```
-
-**Continue.dev** (`~/.continue/config.json`)
-```json
-{
-  "models": [{
-    "title": "fox (local)",
-    "provider": "openai",
-    "model": "qwen3.6",
-    "apiBase": "http://localhost:8080/v1"
-  }]
-}
-```
-
-See [`examples/`](examples/) for more integration guides.
-
----
-
-## GPU support
-
-Fox detects CUDA, ROCm, Metal, and Vulkan at runtime — **one binary runs on any hardware**.
-
-| Platform | GPU backends |
-|----------|--------------|
-| Linux x86_64 | CUDA, ROCm, Vulkan |
-| Windows x86_64 | CUDA, Vulkan |
-| macOS Apple Silicon | Metal |
-| macOS Intel | CPU only |
-| Linux ARM64 | CPU only |
-
-Backends are compiled as shared libraries and loaded at runtime, which is why one
-binary covers all of them rather than needing a build per vendor.
-
-Auto-detection priority: **CUDA → ROCm → Vulkan → Metal → CPU**.
+JavaScript, LangChain, LlamaIndex and IDE configuration are in
+[`docs/integrations.md`](docs/integrations.md); runnable snippets in
+[`examples/`](examples/). Coming from Ollama, start at
+[`docs/migration-from-ollama.md`](docs/migration-from-ollama.md).
 
 ---
 
 ## Installation
 
-### Linux x86_64
-
 ```bash
+# Linux x86_64 — picks the Vulkan build when a GPU is present, CPU otherwise
 curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 ```
 
-It detects `/dev/dri` and installs the **Vulkan** build when a GPU is present (AMD/Intel
-iGPUs included) or the **CPU** build otherwise, verifies the published checksum, and
-tells you if `$PREFIX/bin` is not on your `PATH`. Override with `--vulkan`, `--cpu`,
-`--version vX.Y.Z` or `--prefix ~/.local`.
-
-Or take the tarball yourself — two variants per release:
+It detects `/dev/dri`, verifies the published checksum, and tells you if `$PREFIX/bin` is
+not on your `PATH`. Override with `--vulkan`, `--cpu`, `--version vX.Y.Z` or `--prefix`.
 
 ```bash
-V=0.20.2
-curl -LO https://github.com/ferrumox/fox/releases/download/v$V/fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz
-tar xzf fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz     # drop -vulkan for the CPU build
-```
-
-The `.so` files in the tarball must stay beside the binary: `fox` is linked with
-`RPATH=$ORIGIN` and looks for its backends nowhere else.
-
-### macOS and Windows
-
-No prebuilt binaries yet — the release workflow builds Linux x86_64 only. Either run the
-Linux installer under WSL2, or build from source:
-
-```bash
+# From source — --recurse-submodules is not optional, llama.cpp is vendored
 git clone --recurse-submodules https://github.com/ferrumox/fox
-cd fox && cargo build --release --bin fox
-```
+cd fox && cargo build --release
 
-`--recurse-submodules` is not optional: llama.cpp is vendored, not a system dependency.
-
-### Build from source
-
-```bash
-git clone --recurse-submodules https://github.com/ferrumox/fox
-cd fox
-cargo build --release
-```
-
-GPU backend is detected at runtime — no recompilation needed when switching between CPU, CUDA, and Metal.
-
-### Docker
-
-```bash
-docker run -p 8080:8080 \
-  -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
+# Docker
+docker run -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
   ferrumox/fox serve
-
-# Or with docker compose
-docker compose up
 ```
 
----
+Prebuilt binaries are Linux x86_64 for now; macOS and Windows build from source or run the
+installer under WSL2. Tarball layout, checksum verification and model storage are in
+[`docs/installation.md`](docs/installation.md).
 
-## Usage
-
-```bash
-# Search HuggingFace for GGUF models
-fox search gemma
-fox search qwen coder --limit 5
-
-# Pull a model
-fox pull qwen3.6            # top result, balanced quantization
-fox pull gemma3:12b          # specific size
-fox pull gemma3:12b-q4       # specific quantization
-fox pull bartowski/gemma-3-12b-it-GGUF  # specific HF repo
-
-# Start the server
-fox serve                    # lazy loading — no model needed upfront
-fox serve --max-models 3     # keep up to 3 models loaded simultaneously
-
-# Interactive REPL
-fox run
-fox run "Explain ownership in Rust"  # single-shot
-
-# Manage models
-fox list                     # list downloaded models
-fox show qwen3.6            # model info: architecture, quantization, size
-fox ps                       # list currently loaded models
-fox models                   # browse curated model catalogue
-fox rm qwen3.6              # remove a downloaded model
-
-# Manage aliases
-fox alias set q36 Qwen3.6-35B-A3B-UD-Q4_K_M
-fox alias list
-
-# Benchmark
-fox bench qwen3.6
-fox bench qwen3.6 --runs 10
-
-# Benchmark KV cache quantization types side by side
-fox bench-kv qwen3.6
-fox bench-kv qwen3.6 --types f16,q8_0,q4_0 --runs 3
-```
-
----
-
-## API endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/v1/chat/completions` | Chat completions — streaming + non-streaming (OpenAI) |
-| POST | `/v1/completions` | Text completions (OpenAI) |
-| POST | `/v1/embeddings` | Embeddings (OpenAI) |
-| GET | `/v1/models` | List all models on disk (OpenAI) |
-| GET | `/v1/models/:model` | Single model info (OpenAI) |
-| POST | `/api/chat` | Chat — NDJSON streaming (Ollama) |
-| POST | `/api/generate` | Generate — NDJSON streaming (Ollama) |
-| POST | `/api/embed` | Embeddings (Ollama) |
-| GET | `/api/tags` | List models on disk (Ollama) |
-| GET | `/api/ps` | List loaded models (Ollama) |
-| POST | `/api/show` | Model metadata (Ollama) |
-| DELETE | `/api/delete` | Remove a model file (Ollama) |
-| POST | `/api/pull` | Pull a model from HuggingFace (SSE) |
-| POST | `/api/copy` | Duplicate a model under a new name (Ollama) |
-| POST | `/api/create` | Create a model from a Modelfile (Ollama) |
-| POST | `/api/models/:name/load` | Load a model into memory on demand |
-| POST | `/api/models/:name/unload` | Evict a loaded model from memory |
-| GET | `/api/version` | Server version — for Ollama client detection |
-| POST | `/infill` | Fill-in-the-middle completion for editor plugins |
-| POST | `/rerank`, `/v1/rerank` | Score documents against a query (needs `--reranking`) |
-| POST | `/tokenize`, `/detokenize` | Convert between text and token ids |
-| POST | `/apply-template` | Render messages through the model's chat template |
-| GET | `/props` | Server and model introspection, sampling defaults |
-| GET | `/slots` | Per-sequence state, resident tokens, KV pool occupancy |
-| GET/POST | `/lora-adapters` | Inspect loaded LoRA adapters and re-scale them at runtime |
-| GET | `/health` | Health + KV cache metrics |
-| GET | `/metrics` | Prometheus scrape endpoint |
-
----
-
-## Features
-
-Runs any GGUF model: Llama, Mistral, Gemma, Qwen, DeepSeek and the rest.
-
-**Two APIs, no code changes.** OpenAI-compatible `/v1/*` and Ollama-compatible `/api/*`
-on the same port. Point an existing client at `localhost:8080` and it works.
-
-**Prompt reuse that survives concurrency.** Sequences keep the tokens they hold,
-including generated ones, and a new request skips the prefill for whatever prefix it
-shares. Requests arriving together can copy a shared prefix out of a sequence that is
-still decoding, and they share the block budget for it rather than each reserving a copy.
-
-**Continuous batching.** Concurrent requests decode in the same pass instead of queueing.
-
-**Speculative decoding.** N-gram proposal built in, or a draft model via `--draft-model`.
-
-**Multi-model serving** with lazy loading and LRU eviction. No model needs naming up
-front; fox loads it on first request and evicts by `--max-models` and `--keep-alive-secs`.
-
-**Structured output and function calling.** JSON Schema compiled to GBNF, raw GBNF
-grammars accepted directly, and tool-call parsers for Hermes, Mistral and Llama 3.
-
-**Vision** via llama.cpp mtmd (`--mmproj`), **embeddings**, and **reranking**.
-
-**LoRA adapters** loaded at startup and re-scaled at runtime without a restart.
-
-**Runs where the memory is.** Multi-GPU layer split (`--split-mode`, `--tensor-split`,
-`--main-gpu`), MoE expert offload to RAM (`--moe-cpu`), KV cache quantization (`f16`,
-`q8_0`, `q4_0`), and a host-RAM prompt cache (`--cache-ram`) for conversations that
-should stay warm without holding GPU blocks.
-
-**Survives real traffic.** Closing a connection frees its GPU memory immediately.
-Context rolling keeps a generation going when the window fills. Decode failures retry by
-batch bisection instead of dropping the request.
-
-**Operable.** Prometheus metrics, optional `FOX_API_KEY` auth, permissive CORS, a config
-file at `~/.config/ferrumox/config.toml`, model aliases, Docker and systemd units.
-
----
-
-## Configuration
-
-All flags can also be set via environment variable or `~/.config/ferrumox/config.toml`.
-
-| Flag | Env | Default | Description |
-|------|-----|---------|-------------|
-| `--model-path` | `FOX_MODEL_PATH` | — | GGUF model to pre-load (optional; supports nested paths) |
-| `--port` | `FOX_PORT` | `8080` | Bind port |
-| `--host` | `FOX_HOST` | `0.0.0.0` | Bind host |
-| `--max-models` | `FOX_MAX_MODELS` | `1` | Max models in memory simultaneously (LRU eviction) |
-| `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | `300` | Evict idle models after N seconds (0 = never) |
-| `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | auto | Context window size (auto-detects from model if omitted) |
-| `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU RAM allocated to the KV cache |
-| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache type for both K and V: `f16`, `q8_0`, `q4_0` |
-| `--type-k` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`) |
-| `--type-v` | `FOX_TYPE_V` | — | Override V cache type independently (same values as `--type-kv`) |
-| `--main-gpu` | `FOX_MAIN_GPU` | `0` | Primary GPU index (0-based) |
-| `--split-mode` | `FOX_SPLIT_MODE` | `layer` | Multi-GPU split: `none`, `layer` (layer distribution), `row` (tensor-parallel) |
-| `--tensor-split` | `FOX_TENSOR_SPLIT` | auto | Comma-separated VRAM proportions, e.g. `"3,1"` for 75%/25% (omit for auto-balance) |
-| `--moe-cpu` | `FOX_MOE_CPU` | `false` | Offload MoE expert layers to CPU RAM (DeepSeek, Mixtral) |
-| `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | `32` | Continuous batch size |
-| `--swap-fraction` | `FOX_SWAP_FRACTION` | `0.0` | GPU↔CPU KV-cache swap space fraction |
-| `--block-size` | `FOX_BLOCK_SIZE` | `16` | Tokens per KV block |
-| `--system-prompt` | `FOX_SYSTEM_PROMPT` | `"You are a helpful assistant."` | System prompt injected in every request |
-| `--api-key` | `FOX_API_KEY` | — | Require `Authorization: Bearer <key>` on all requests |
-| `--hf-token` | `HF_TOKEN` | — | HuggingFace token for private repos |
-| `--alias-file` | `FOX_ALIAS_FILE` | `~/.config/ferrumox/aliases.toml` | Short name → model stem mapping |
-| `--json-logs` | `FOX_JSON_LOGS` | `false` | Structured JSON logs |
-
-### Config file (`~/.config/ferrumox/config.toml`)
-
-```toml
-port = 8080
-max_models = 3
-keep_alive_secs = 300
-system_prompt = "You are a helpful assistant."
-
-# KV cache quantization (f16, q8_0, q4_0)
-type_kv = "f16"
-# type_k = "q8_0"     # override K independently
-# type_v = "f16"      # override V independently
-
-# Multi-GPU
-split_mode = "layer"   # none | layer | row
-# main_gpu = 0
-# tensor_split = "3,1" # manual VRAM proportions
-
-# MoE CPU offload (DeepSeek, Mixtral)
-# moe_cpu = true
-```
-
-### Aliases (`~/.config/ferrumox/aliases.toml`)
-
-```toml
-[aliases]
-"q36"      = "Qwen3.6-35B-A3B-UD-Q4_K_M"
-"mistral"  = "Mistral-7B-Instruct-v0.3-Q4_K_M"
-```
-
----
-
-## Benchmark
-
-```bash
-# Compare fox vs Ollama side by side
-./target/release/fox-bench \
-  --url http://localhost:8080 \
-  --compare-url http://localhost:11434 \
-  --model qwen3.6
-
-# JSON output for CI
-./target/release/fox-bench \
-  --url http://localhost:8080 \
-  --compare-url http://localhost:11434 \
-  --model qwen3.6 \
-  --output json
-
-# Reproducible benchmark vs Ollama
-./scripts/benchmark.sh qwen3.6 4 50
-```
-
-Output shape (run it for your own numbers):
-
-```
-┌─────────────────┬──────────────┬──────────────┬──────────┐
-│ Metric          │     fox      │    ollama    │ Δ        │
-├─────────────────┼──────────────┼──────────────┼──────────┤
-│ TTFT P50        │           ...│           ...│ ...      │
-│ TTFT P95        │           ...│           ...│ ...      │
-│ Latency P50     │           ...│           ...│ ...      │
-│ Latency P95     │           ...│           ...│ ...      │
-│ Latency P99     │           ...│           ...│ ...      │
-│ Throughput      │           ...│           ...│ ...      │
-└─────────────────┴──────────────┴──────────────┴──────────┘
-```
-
----
-
-## Requirements
+**One binary, any GPU.** Backends are compiled as shared libraries and chosen at runtime —
+CUDA → ROCm → Vulkan → Metal → CPU, in that order of preference.
 
 | Backend | Requirement |
 |---------|-------------|
@@ -478,9 +180,81 @@ Output shape (run it for your own numbers):
 | Metal | macOS 13+, Apple Silicon |
 | Vulkan | Vulkan SDK 1.3+, Linux or Windows x86_64 |
 
-No runtime dependencies beyond GPU drivers. The release bundle is the `fox` binary plus
-the ggml backend libraries next to it; those are loaded at runtime, which is what lets one
-build cover CPU, CUDA, ROCm, Vulkan and Metal.
+There are no runtime dependencies beyond GPU drivers. The `.so` files in the release
+tarball must stay beside the binary: `fox` is linked `RPATH=$ORIGIN` and looks nowhere
+else.
+
+---
+
+## Everyday commands
+
+```bash
+fox search qwen coder        # search HuggingFace for GGUF models
+fox pull qwen3.6             # or gemma3:12b-q4, or a full HF repo path
+fox serve                    # lazy loading — no model needed upfront
+fox run                      # interactive REPL
+fox list / ps / show / rm    # manage what is on disk and what is loaded
+fox bench qwen3.6            # measure it yourself
+```
+
+Every subcommand and flag is documented in [`docs/cli/`](docs/cli/); a guided first run is
+in [`docs/quickstart.md`](docs/quickstart.md).
+
+---
+
+## APIs
+
+Both families are served on the same port, so an existing client only needs its base URL
+changed.
+
+- **OpenAI-compatible** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+  `/v1/models`. Reference: [`docs/api/openai.md`](docs/api/openai.md).
+- **Ollama-compatible** — `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags`,
+  `/api/ps`, `/api/show`, `/api/pull`. Reference:
+  [`docs/api/ollama.md`](docs/api/ollama.md).
+- **Beyond both** — `/infill`, `/rerank`, `/tokenize`, `/apply-template`, `/props`,
+  `/slots`, `/lora-adapters`, `/health`, and `/metrics` for Prometheus.
+
+What fox promises not to break across versions, and what it does not, is written down in
+[`COMPATIBILITY.md`](COMPATIBILITY.md).
+
+---
+
+## Configuration
+
+Every flag has a `FOX_*` environment variable and a key in
+`~/.config/ferrumox/config.toml`. Precedence is flag > env > file.
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--port` | `8080` | Bind port |
+| `--max-models` | `1` | Models held in memory at once, LRU eviction |
+| `--keep-alive-secs` | `300` | Evict an idle model after N seconds (0 = never) |
+| `--gpu-memory-fraction` | `0.85` | Share of GPU RAM given to the KV cache |
+| `--type-kv` | `f16` | KV cache quantization: `f16`, `q8_0`, `q4_0` |
+| `--api-key` | — | Require `Authorization: Bearer <key>` |
+
+The full table — multi-GPU split, MoE offload, batch and block sizing, aliases, logging —
+is in [`docs/configuration.md`](docs/configuration.md).
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [Quick start](docs/quickstart.md) | First run, start to finish |
+| [Installation](docs/installation.md) | Binaries, Docker, source, model storage |
+| [Configuration](docs/configuration.md) | Every flag, env var and config key |
+| [How fox works](docs/features.md) | The engine, in depth |
+| [OpenAI API](docs/api/openai.md) · [Ollama API](docs/api/ollama.md) | Endpoint reference |
+| [CLI](docs/cli/) | Every subcommand |
+| [Integrations](docs/integrations.md) | Python, JS, LangChain, IDEs |
+| [Migrating from Ollama](docs/migration-from-ollama.md) | What changes, what does not |
+| [Benchmarks](docs/benchmarks.md) | How to measure fox yourself |
+| [Troubleshooting](docs/troubleshooting.md) · [FAQ](docs/faq.md) | When it does not work |
+| [Deployment](docs/deployment.md) | systemd, Docker, reverse proxies |
+| [Feature status](STATUS.md) | What works, what does not, honestly |
 
 ---
 
@@ -488,15 +262,11 @@ build cover CPU, CUDA, ROCm, Vulkan and Metal.
 
 - **Bug reports**: [GitHub Issues](https://github.com/ferrumox/fox/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/ferrumox/fox/discussions)
-- **Feature status**: [STATUS.md](STATUS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md)
-- **Compatibility policy**: [COMPATIBILITY.md](COMPATIBILITY.md) — what fox promises not to break, and what it does not
-- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
-
-To run tests:
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md) — build, test, architecture, and how a release is cut
 
 ```bash
-FOX_SKIP_LLAMA=1 cargo test --all
+FOX_SKIP_LLAMA=1 cargo test --all    # the suite, without needing llama.cpp or a GPU
 ```
 
 ---

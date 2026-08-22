@@ -4,16 +4,20 @@ A living inventory of **everything fox does** and an honest assessment of **what
 and what doesn't**. Use it to decide what to fix, in what order, and to track progress
 per release.
 
-- **Tracks through:** 0.20.2 (branch `feature/0.20`); `main`/`develop` are at 0.13.0
-  as of this writing — 0.14 through 0.20.2 are done and closed but not yet merged up
-  (deliberate, releases are being cut gradually). This file describes the code, not
+- **Tracks through:** 0.22.0 (branch `release/0.22.0`). `main` is at v0.21.0 and
+  `develop` carries 0.22.0's nineteen commits; the backlog this line used to describe —
+  0.14 through 0.20.2 done but unmerged — is closed. This file describes the code, not
   what's tagged.
 - **0.19 in one line:** a llama-server gap audit
   ([`llama-server-gap-analysis.md`](docs/design/llama-server-gap-analysis.md)), the KV
   reuse rework it motivated (34× mean / 94× p90 on a multi-conversation working set),
   shared-prefill forking for `n>1` (3.4×), and the API-parity and correctness fixes the
   audit exposed along the way.
-- **Last updated:** 2026-08-16
+- **0.22 in one line:** the fixes that had accumulated unreleased since 0.21.0 —
+  greedy sampling's NaN, the sampler's absence from CI, prompt reuse on
+  hybrid/recurrent models, `top_p: 1.0`, native tool-call replay — plus
+  `--n-gpu-layers` and an experimental, opt-in `--mtp-model`.
+- **Last updated:** 2026-08-22
 - **Companion:** [Model-architecture correctness rework](docs/design/model-architecture-rework.md)
   — the design that resolved most of the ❌/⚠️ items below (see "Known issues" for what's
   still open). [`docs/design/vllm-gap-analysis.md`](docs/design/vllm-gap-analysis.md) is the

@@ -134,7 +134,7 @@ if true; then
     # Naming a harness, quoting its output shape, or describing direct
     # instrumentation all count — the bar is "a reader can tell how this was
     # obtained", not "you used one specific tool".
-    EVIDENCE_RE='ab_bench|repeat_bench|fox-bench|bench_engines|bench_multiturn|bench_decode|bench_noisy|ab_shared_prefix|alternating|alternated|INCONCLUSIVE|median=|range=\[|back-to-back|measured alone|one server at a time|rounds|instrument|phase log|phase timing|profiler|perf record|rocprof|rondas|rangos disjuntos|rangos\b|medido|medida|un servidor cada vez|perfil|solapan'
+    EVIDENCE_RE='ab_bench|repeat_bench|fox-bench|bench_engines|bench_multiturn|bench_decode|bench_noisy|ab_shared_prefix|alternating|alternated|INCONCLUSIVE|median=|range=\[|back-to-back|measured alone|one server at a time|rounds|instrument|phase log|phase timing|profiler|perf record|rocprof|rondas|rangos disjuntos|methodology|metodología|rangos\b|medido|medida|un servidor cada vez|perfil|solapan'
     # A *retraction* quotes a number in order to withdraw it, and reads identically to
     # a claim: "a 4x fox win that was really prefill with no token counted" trips both
     # regexes above. Withdrawing a false number is the behaviour this hook exists to

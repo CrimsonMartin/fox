@@ -5,7 +5,127 @@ All notable changes to ferrumox are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Six early entries — 0.3.0, 0.4.0, 0.5.0, 0.7.0, 0.8.0 and 0.18.0 — are marked **never
+released**. They were written up and then skipped, and their content went out under the
+next tag. So this file lists 32 versions while 26 were published; `git tag` and the
+[releases page](https://github.com/ferrumox/fox/releases) are the record of what actually
+shipped.
+
 ---
+
+## [Unreleased]
+
+### Changed
+
+- **The release page stops being a wall of text.** `scripts/release_notes.py` published
+  the whole CHANGELOG section verbatim — v0.22.0's page was 15,298 characters of
+  measurements and reasoning, on a page people open to learn what changed and which file
+  to download. Every entry here opens with a bold lead sentence and then explains itself,
+  so the leads already were the summary: the notes now carry those, grouped by section,
+  and link to the CHANGELOG at that tag for the rest. v0.22.0 comes out at 2,700
+  characters. An entry that does not follow the bold-lead pattern keeps its first
+  sentence rather than being dropped, so a stray format cannot silently remove a change
+  from the notes.
+
+- **`golden.rs` was documented twice in 0.22.0.** Writing up the entries that were
+  missing, I added a fix that was already three sections above. The summary above is what
+  found it, by putting the two leads side by side.
+
+- **The pre-push performance gate stops being blind when skipped, and stops flagging
+  retractions.** Two changes, from two failures on the same day. It flagged the commit
+  adding `--mtp-model` for quoting "4-17%" with no harness named, `FOX_SKIP_PERF_CHECK=1`
+  was set without reading the list, and those numbers turned out to be wrong — the head
+  had never drafted at all. Skipping now prints exactly what it would have blocked, so
+  the decision is made with the list in view. Separately, a commit that quotes a number
+  in order to *withdraw* it reads identically to one making a claim, so two commits
+  retracting false measurements were flagged as if they had made them; withdrawing a
+  false number is the behaviour the hook exists to encourage, and it is now exempt.
+  Verified against the six real commits involved: both retractions pass, and the MTP
+  claim is still caught.
+
+- **Git hooks are installed as a shim, not a copy.** `install-hooks.sh` used `cp`, and a
+  copy drifts in silence: the pre-push checks were edited three times on 2026-08-22 and
+  every push that day ran the version installed on 2026-08-03, because nothing re-runs
+  the installer and nothing reports that the two have diverged. It surfaced as the hook
+  flagging a commit that the tracked hook passes, which reads as a bug in the check
+  rather than as a stale install. `.git/hooks/<name>` is now two lines that exec the
+  tracked file: it cannot go stale, it follows branch checkouts, and it avoids symlinks,
+  which are awkward on Windows.
+
+- **`scripts/release.sh` gains two gates, one per way this repository has already gone
+  wrong.** A version in the CHANGELOG must have a tag or say it never shipped — 0.18.0
+  was written up and skipped, and five early versions had the same shape, so the file
+  advertised 32 releases against 26 published. And a flag added since the previous
+  release must appear in the new entry: 0.22.0 documented 4 of its 19 commits and the two
+  it missed were `--n-gpu-layers` and `--mtp-model`, precisely the two that made it a
+  minor rather than a patch. The flag check reads clap's derive rather than commit
+  messages, so a message naming an existing flag in passing does not fail the release,
+  and its baseline is the previous `release:` commit rather than `git describe --tags` —
+  tags live on `main` and are not ancestors of the working branch, so "since the last
+  tag" does not compute here.
+
+### Legal
+
+- **`LICENSE-APACHE` was not the Apache License 2.0.** It was a paraphrase, present
+  since the first commit and shipped in all 27 releases, and three definitions differed
+  from the real text: `"Work"` dropped "whether in Source or Object form", `"Contribution"`
+  lost the subject of its own sentence, and `"Contributor"` read "Licensor and any Legal
+  Entity" where the licence says "Licensor and any **individual or** Legal Entity". That
+  last one is load-bearing — §3 grants the patent licence from "each Contributor", so
+  narrowing who counts as one narrows the grant that is the whole reason to offer
+  Apache-2.0 at all.
+
+  The file is now the text from `apache.org/licenses/LICENSE-2.0.txt`, byte-identical
+  except for the copyright line in the appendix. `LICENSE-MIT` was checked against a
+  known-good copy and is genuine, word for word.
+
+  This also explains why GitHub reported the repository as `NOASSERTION` rather than
+  detecting a licence: its detector compares against the canonical text and found too
+  little resemblance. Projects using the identical `LICENSE-APACHE` + `LICENSE-MIT`
+  layout — rust-lang/rust, serde, clap — are all detected correctly, so the layout was
+  never the problem. **fox stays dual-licensed MIT OR Apache-2.0.**
+
+- **Both licence files credited a project name abandoned two renames ago.** The copyright
+  line read "ferrum-engine contributors"; it now reads "the fox contributors".
+
+### Documentation
+
+- **Six CHANGELOG entries are marked "never released".** 0.3.0, 0.4.0, 0.5.0, 0.7.0,
+  0.8.0 and 0.18.0 were written up and then skipped, so this file listed 32 versions
+  while 26 were tagged — a gap anyone comparing the CHANGELOG with the releases page
+  would hit with no explanation. Each now says so at its heading and names the tag its
+  content actually shipped under: 0.3.0 → v0.3.1, 0.4.0 and 0.5.0 → v0.5.1, 0.7.0 and
+  0.8.0 → v0.9.0, 0.18.0 → v0.19.0. Nothing was deleted; the entries document real work
+  and only the version numbers never existed.
+
+- **The README is a landing page again, 585 lines down to 295.** It had grown into a
+  second, smaller copy of the manual: 26 flags appeared both there and in
+  `docs/configuration.md`, which is 299 lines to the README's 50, and the same held for
+  installation, integrations, the API reference and benchmarks — `docs/` is over 3,000
+  lines and a strict superset. The duplicated sections are now a summary plus a link to
+  the page that already covers them, `Project structure` and `Make targets` move to
+  `CONTRIBUTING.md`, and a **Documentation** index makes the twelve pages under `docs/`
+  discoverable, which they were not. What stays in full is what someone deciding whether
+  to use fox needs on one screen: the quick start, the concurrency benchmark with its
+  methodology, how the engine works, the compatibility table, and the per-backend driver
+  requirements. Nothing was deleted without checking the page that replaces it.
+
+- **A stale version in the README's install example.** The tarball walkthrough pinned
+  `V=0.20.2`, three releases behind, and it is gone with the section.
+
+- **`CLAUDE.md` no longer tells you to update a file that does not exist.** It asked for
+  new CLI docs to be added to `mkdocs.yml`'s nav; the docs site was parked in 0.13 and
+  the file went with it.
+
+### Changed
+
+- **The six `Dockerfile` variants move to `docker/`.** The repository root listed seven
+  Dockerfiles, two of them (`llama-server-rocm`, `llama-server-vulkan`) reference images
+  for a *different* engine, built only to benchmark against it. `Dockerfile` stays at the
+  root, because `.github/workflows/docker.yml` builds with `context: .` and no `file:`
+  key — moving it would have broken the image published on every tag, silently. Makefile
+  targets, the three scripts and `CONTRIBUTING.md` are updated; CHANGELOG history is not
+  rewritten.
 
 ## [0.22.1] - 2026-08-22
 
@@ -192,11 +312,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   This is why `fox bench` reported ~6 tok/s: it hardcodes `top_p: 1.0` and `top_k: 0`.
   It now reports 24.9, against Ollama's 26.6 and llama-bench's 27.35 on the same model.
-
-- `golden.rs` did not compile: both `LlamaCppModel::load` call sites were missing the
-  `split_mode` argument. Pre-existing on this branch and invisible to `make ci`'s
-  stub-built jobs — exactly the breakage `check-real` exists to catch, which is only
-  useful if it is actually run.
 
 - **Tool calls already in the conversation were replayed in a syntax no model was
   trained on.** A past call was flattened back into the prompt as
@@ -1432,7 +1547,12 @@ build fix. No engine changes.
   from llama.cpp, documented at the call site: fox's window covers only
   *generated* tokens, never the prompt, which is what fox has always done.
 
-## [0.18.0]
+## [0.18.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.19.0** (2026-08-03, tagged the same day as v0.17.0). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2083,7 +2203,12 @@ Re-baselines the project after retracting a premature `1.0.0`. The version line 
 
 ---
 
-## [0.8.0] - 2026-03-15
+## [0.8.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.9.0** (tagged the same day). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2123,7 +2248,12 @@ Re-baselines the project after retracting a premature `1.0.0`. The version line 
 
 ---
 
-## [0.7.0] - 2026-03-14
+## [0.7.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.9.0** (the next tag, 2026-03-15). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2261,7 +2391,12 @@ Ollama URL to `http://localhost:8080`. No other configuration change is required
 
 ---
 
-## [0.5.0] - 2026-03-12
+## [0.5.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.5.1** (tagged the same day). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2315,7 +2450,12 @@ Ollama URL to `http://localhost:8080`. No other configuration change is required
 
 ---
 
-## [0.4.0] - 2026-03-11
+## [0.4.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.5.1** (the next tag, 2026-03-12). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2441,7 +2581,12 @@ Ollama URL to `http://localhost:8080`. No other configuration change is required
 
 ---
 
-## [0.3.0] - 2026-03-10
+## [0.3.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.3.1** (tagged the same day; this entry's content shipped there). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 

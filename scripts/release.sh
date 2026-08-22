@@ -66,6 +66,82 @@ BODY=$(awk -v v="^## \\\\[$VERSION\\\\]" '$0 ~ v {f=1; next} /^## \[/ {f=0} f' C
 (( BODY >= 3 )) || die "la entrada de $VERSION tiene $BODY líneas con contenido — escríbela antes"
 ok "$BODY líneas"
 
+# 4b. Every version in the CHANGELOG must have a tag, or say it never shipped.
+#
+#     0.18.0 was written up and then skipped: v0.17.0 and v0.19.0 were tagged the same
+#     day and its LoRA / n / MLA-sizing work went out inside v0.19.0. Nobody noticed for
+#     three weeks, and six early versions had the same shape. A CHANGELOG that lists
+#     versions nobody can download is a CHANGELOG people stop trusting.
+step "cada versión del CHANGELOG tiene etiqueta o se declara no publicada"
+GHOSTS=""
+while read -r v; do
+    [[ "$v" == "$VERSION" ]] && continue                       # la que estamos cortando
+    git rev-parse -q --verify "refs/tags/v$v" >/dev/null && continue
+    grep -q "^## \[$v\][[:space:]]*—[[:space:]]*never released" CHANGELOG.md && continue
+    GHOSTS+="  $v"$'\n'
+done < <(grep -oP '^## \[\K[0-9][^\]]*' CHANGELOG.md)
+if [[ -n "$GHOSTS" ]]; then
+    echo -e "${RED}Estas versiones del CHANGELOG no tienen etiqueta:${NC}"
+    echo "$GHOSTS"
+    echo "Etiquétalas, o marca la cabecera como '## [X.Y.Z] — never released'"
+    echo "diciendo bajo qué etiqueta salió su contenido."
+    die "el CHANGELOG anuncia versiones que no existen"
+fi
+ok "sin versiones fantasma"
+
+# 4c. A flag added since the previous release must appear in this version's entry.
+#
+#     0.22.0 shipped 19 commits with 4 written up, and the two missing were
+#     `--n-gpu-layers` and `--mtp-model` — precisely the two that decided the version
+#     number, since a new flag makes it a minor rather than a patch.
+#
+#     Two things this gets right that the obvious version does not. The baseline is the
+#     previous `release:` commit on this branch, *not* `git describe --tags`: tags live
+#     on `main`, which carries release snapshots, so they are not ancestors of the branch
+#     and "since the last tag" does not compute here. And a flag counts as new when it
+#     appears in the clap derive, not when a commit message mentions it — otherwise every
+#     message that names an existing flag in passing fails the release.
+step "las banderas nuevas están documentadas"
+BASE=$(git log --format='%H %s' HEAD | grep -m1 -E ' release: [0-9]+\.[0-9]+\.[0-9]+$' | cut -d' ' -f1 || true)
+if [[ -n "$BASE" ]]; then
+    read -r -d '' FLAG_PY <<'PYFLAGS' || true
+import re, subprocess, sys
+rev = sys.argv[1]
+files = subprocess.run(['git','ls-tree','-r','--name-only',rev,'--','src/cli/'],
+                       capture_output=True, text=True).stdout.split()
+out = set()
+for f in files:
+    if not f.endswith('.rs'):
+        continue
+    src = subprocess.run(['git','show',f'{rev}:{f}'], capture_output=True, text=True).stdout
+    for m in re.finditer(r'#\[arg\(([^)]*)\)\]\s*(?:///[^\n]*\n\s*)*pub\s+(\w+)\s*:', src):
+        attrs, field = m.group(1), m.group(2)
+        explicit = re.search(r'long\s*=\s*"([^"]+)"', attrs)
+        if explicit:
+            out.add('--' + explicit.group(1))
+        elif re.search(r'\blong\b', attrs):
+            out.add('--' + field.replace('_', '-'))
+print('\n'.join(out))
+PYFLAGS
+    NEW_FLAGS=$(comm -13 <(python3 -c "$FLAG_PY" "$BASE" | sort) <(python3 -c "$FLAG_PY" HEAD | sort))
+    ENTRY=$(awk -v v="^## \\\\[$VERSION\\\\]" '$0 ~ v {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md)
+    UNDOC=""
+    for flag in $NEW_FLAGS; do
+        echo "$ENTRY" | grep -qF -- "$flag" || UNDOC+="  $flag"$'\n'
+    done
+    if [[ -n "$UNDOC" ]]; then
+        echo -e "${RED}Banderas nuevas desde $(git log -1 --format=%s "$BASE") que no aparecen en la entrada de $VERSION:${NC}"
+        echo "$UNDOC"
+        echo "Documéntalas en el CHANGELOG. Si una es experimental y deliberadamente no"
+        echo "lleva promesa de compatibilidad, dilo en la entrada — eso también es documentarla."
+        die "bandera nueva sin documentar"
+    fi
+    NNEW=$(echo "$NEW_FLAGS" | grep -c '[^[:space:]]' || true)
+    ok "$NNEW bandera(s) nueva(s), todas en el CHANGELOG"
+else
+    ok "no hay release previa en esta rama, nada que comparar"
+fi
+
 # 5. The gates. `make ci` includes the real-llama.cpp check; `make e2e` is the one that
 #    sees cross-request prefix-cache lifecycle bugs, which unit and golden tests do not.
 step "make ci"

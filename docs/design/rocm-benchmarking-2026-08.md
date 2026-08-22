@@ -38,12 +38,12 @@ hardware, same GGUF weights, same underlying llama.cpp lineage.
 Both engines run in Docker (host stayed unmodified — no ROCm/Vulkan dev
 packages installed outside containers):
 
-- **fox:vulkan** — `Dockerfile.vulkan` (already existed), Ubuntu 24.04 +
+- **fox:vulkan** — `docker/Dockerfile.vulkan` (already existed), Ubuntu 24.04 +
   `glslc`/Vulkan dev headers at build time.
-- **fox:rocm** — new `Dockerfile.rocm`, `rocm/dev-ubuntu-24.04` base so
+- **fox:rocm** — new `docker/Dockerfile.rocm`, `rocm/dev-ubuntu-24.04` base so
   `hipcc`/clang are present at build time. Pinned to ROCm 7.2 (see Results).
 - **ollama:rocm** — official `ollama/ollama:rocm` image.
-- **llamacpp:rocm** — `Dockerfile.llama-server-rocm` (committed), compiling
+- **llamacpp:rocm** — `docker/Dockerfile.llama-server-rocm` (committed), compiling
   vanilla `llama.cpp`'s own `llama-server` from the **exact same vendored
   commit fox uses** and with the **same ggml/HIP flags `build.rs` sets**, so
   a comparison against it differs only in the serving layer. Used to isolate
@@ -81,7 +81,7 @@ every comparison.
    takes that branch, so it's a no-op for this GPU regardless of what fox
    sets.
 
-`Dockerfile.rocm` (new) mirrors `Dockerfile.vulkan`'s two-stage structure;
+`docker/Dockerfile.rocm` (new) mirrors `docker/Dockerfile.vulkan`'s two-stage structure;
 its header comment has the exact build/run commands, including the
 `--device /dev/kfd --device /dev/dri --group-add video --group-add <render-gid>`
 passthrough (get the render GID via `getent group render` — passing the
@@ -112,7 +112,7 @@ Theories tested and ruled out, in the order investigated:
   `--max-context-len 4096` didn't move throughput. Not the cause.
 - **ROCm library version** — pinning to Ollama's exact ROCm 7.2 gave a
   statistically identical result to the original ROCm 7.14 build. Not the
-  cause. (`Dockerfile.rocm` stays pinned to 7.2 anyway, for a cleaner
+  cause. (`docker/Dockerfile.rocm` stays pinned to 7.2 anyway, for a cleaner
   apples-to-apples comparison going forward.)
 - **A newer llama.cpp version/patches than fox's vendored commit** — Ollama
   pins `b10091` (2026-07-22), ~3-4 weeks ahead of fox's vendored `6f4f53f2b`
@@ -606,7 +606,7 @@ like a *regression* (76.6 t/s) purely because of this.
 
 Earlier passes cited "173 t/s" for `llama-server` as the ceiling without
 this session having measured it. Now measured directly, with
-`Dockerfile.llama-server-rocm` (committed): upstream's own server built from
+`docker/Dockerfile.llama-server-rocm` (committed): upstream's own server built from
 **the same vendored llama.cpp commit** with **the same ggml/HIP flags
 `build.rs` uses**, so the comparison differs only in the serving layer.
 Confirmed on-GPU via its own log (`ROCm0 — AMD Radeon 890M`, layers assigned
@@ -877,7 +877,7 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
    internals and not the batching layer (ubatch width is already 3.90/4).
 3. Profile `llama-server` itself with `rocprofv3` to confirm it hits
    `ncols_dst=4` consistently, as a sanity check against fox's now-fixed
-   dispatch pattern. This is now much easier: `Dockerfile.llama-server-rocm`
+   dispatch pattern. This is now much easier: `docker/Dockerfile.llama-server-rocm`
    builds it from a ROCm dev base that can host the profiler, unlike
    Ollama's minimal image which ships none.
 4. Re-run a `rocprofv3` capture on fox's own fixed build to directly
@@ -885,7 +885,7 @@ the code to restore is: cap `n_batch`/`n_ubatch` at
    aggregate throughput; a kernel-level reconfirmation would be the last
    piece of direct evidence, blocked this session by the ROCm runtime image
    missing `libdw.so.1`, a `rocprofv3` dependency not installed in
-   `Dockerfile.rocm`'s minimal runtime stage).
+   `docker/Dockerfile.rocm`'s minimal runtime stage).
 5. The independent 7-13% `n_batch`/`n_ubatch` win in the section above, if
    someone builds the causal/non-causal model detection it needs.
 
@@ -994,8 +994,8 @@ retracted in `e3b447a`) — it was drift, and an alternating A/B shows no effect
 | Concern | File |
 |---|---|
 | `AMDGPU_TARGETS` passthrough | `build.rs` (ROCm/HIP auto-detection block) |
-| ROCm Docker build | `Dockerfile.rocm` |
-| **Reference `llama-server`** — same vendored commit, same ggml/HIP flags | `Dockerfile.llama-server-rocm` |
+| ROCm Docker build | `docker/Dockerfile.rocm` |
+| **Reference `llama-server`** — same vendored commit, same ggml/HIP flags | `docker/Dockerfile.llama-server-rocm` |
 | **Thread count** — never inherit ggml's 4-thread default | `src/engine/model/llama_cpp/mod.rs` (`resolve_n_threads`, `FOX_N_THREADS`) |
 | Repeated/statistically-sound benchmarking (servers you already run) | `scripts/repeat_bench.sh` |
 | **A/B of two builds** — owns server lifecycle, alternates, verifies what loaded, refuses to call overlapping ranges a win | `scripts/ab_bench.sh` |
@@ -1019,7 +1019,7 @@ retracted in `e3b447a`) — it was drift, and an alternating A/B shows no effect
 The measurements above are ROCm and predate 0.19's KV-reuse rework. This section
 re-measures on **Vulkan** (Radeon 890M, RADV GFX1150) against `llama-server` built
 from the **same vendored llama.cpp** with the **same toolchain**
-(`Dockerfile.vulkan` and `Dockerfile.llama-server-vulkan`, both Ubuntu 24.04 +
+(`docker/Dockerfile.vulkan` and `docker/Dockerfile.llama-server-vulkan`, both Ubuntu 24.04 +
 glslc + SPIRV-Headers), so what is left is the serving layer rather than a version
 or compiler difference. Model: `llama-3.2-1b-instruct-q8_0`, 4 concurrent clients,
 16 requests × 128 tokens, one server at a time, arms alternated.

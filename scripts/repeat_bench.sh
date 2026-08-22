@@ -18,7 +18,7 @@
 # This script does NOT start/stop your servers — point it at two URLs you
 # already have serving (Docker containers, native processes, whatever). That
 # keeps it usable regardless of which of fox's several benchmarking setups
-# (native, Dockerfile.vulkan, Dockerfile.rocm, docker-compose.bench.yml) you're
+# (native, docker/Dockerfile.vulkan, docker/Dockerfile.rocm, docker-compose.bench.yml) you're
 # currently running.
 #
 # Usage:

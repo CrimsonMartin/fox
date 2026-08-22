@@ -43,6 +43,15 @@ shipped.
   Verified against the six real commits involved: both retractions pass, and the MTP
   claim is still caught.
 
+- **Git hooks are installed as a shim, not a copy.** `install-hooks.sh` used `cp`, and a
+  copy drifts in silence: the pre-push checks were edited three times on 2026-08-22 and
+  every push that day ran the version installed on 2026-08-03, because nothing re-runs
+  the installer and nothing reports that the two have diverged. It surfaced as the hook
+  flagging a commit that the tracked hook passes, which reads as a bug in the check
+  rather than as a stale install. `.git/hooks/<name>` is now two lines that exec the
+  tracked file: it cannot go stale, it follows branch checkouts, and it avoids symlinks,
+  which are awkward on Windows.
+
 - **`scripts/release.sh` gains two gates, one per way this repository has already gone
   wrong.** A version in the CHANGELOG must have a tag or say it never shipped — 0.18.0
   was written up and skipped, and five early versions had the same shape, so the file

@@ -57,11 +57,11 @@ Note that installing a package does **not** make cargo re-run `build.rs`, so aft
 `FOX_FORCE_VULKAN=1` changes the environment and re-runs the check.
 
 On Windows the same rule applies to the LunarG SDK: 1.3.246 and older ship `glslc` and
-the loader but no `SPIRV-HeadersConfig.cmake`, so they need a newer SDK. The reproducible way to build + run is [`Dockerfile.vulkan`](Dockerfile.vulkan):
+the loader but no `SPIRV-HeadersConfig.cmake`, so they need a newer SDK. The reproducible way to build + run is [`docker/Dockerfile.vulkan`](docker/Dockerfile.vulkan):
 
 ```bash
 # Build the image (installs the toolchain above and compiles the Vulkan backend)
-docker build -f Dockerfile.vulkan -t fox:vulkan .
+docker build -f docker/Dockerfile.vulkan -t fox:vulkan .
 
 # Run with the host GPU passed through (the image ships the Mesa driver)
 docker run --rm --device /dev/dri --group-add video \
@@ -168,6 +168,66 @@ KV cache (src/kv_cache/)
 6. Tokens are sent back through an `mpsc` token channel
 7. Handler streams tokens as SSE (OpenAI) or NDJSON (Ollama) to the client
 8. When the client disconnects, `send().is_err()` signals the engine to preempt
+
+### Project structure
+
+```
+fox/
+├── src/
+│   ├── main.rs              # Entry point, config, signal handling
+│   ├── metrics.rs           # Prometheus metrics registry
+│   ├── config.rs            # Config file loading
+│   ├── registry.rs          # Model discovery helpers
+│   ├── model_registry/      # Multi-model registry (DashMap) + LRU eviction, loader
+│   ├── api/                 # REST API (OpenAI + Ollama compat)
+│   │   ├── router.rs        # Axum router setup
+│   │   ├── routes.rs        # Route table
+│   │   ├── auth.rs          # API key middleware
+│   │   ├── error.rs         # Unified error types
+│   │   ├── pull_handler.rs  # POST /api/pull SSE streaming
+│   │   ├── types/           # Request/response types (v1, ollama, embeddings, …)
+│   │   ├── v1/              # OpenAI-compat handlers (chat, completions, embeddings, models)
+│   │   ├── ollama/          # Ollama-compat handlers (chat, generate, embed, management)
+│   │   └── shared/          # Shared helpers (inference, streaming, digest, extractor)
+│   ├── scheduler/           # Continuous batching + prefix cache
+│   ├── kv_cache/            # PagedAttention-style ref-counted block manager
+│   ├── engine/              # Inference engine, sampling, output filtering
+│   │   └── model/llama_cpp/ # llama.cpp FFI backend (+ fox_stub no-op model)
+│   └── cli/                 # Subcommands: serve, run, pull, list, rm, show, probe, ps, models, search, alias, bench, bench-kv
+├── examples/
+│   ├── curl.sh              # curl examples for all API routes
+│   ├── langchain.py         # LangChain integration
+│   └── openwebui.md         # Open WebUI setup guide
+├── scripts/
+│   └── benchmark.sh         # Reproducible benchmark vs Ollama
+├── vendor/llama.cpp/        # Git submodule
+├── Dockerfile
+├── docker-compose.yml
+├── fox.service              # systemd unit
+├── install.sh               # One-liner installer
+├── Makefile
+├── CHANGELOG.md
+└── Cargo.toml
+```
+
+---
+
+### Make targets
+
+```
+make build           Compile release binaries (fox + fox-bench)
+make run             Build and start the server
+make dev             Start with RUST_LOG=debug
+make test            Run unit tests
+make check           Fast type-check (cargo check)
+make bench           Run fox-bench against a running server
+make docker          Build Docker image
+make docker-run      Start via docker compose
+make install-rust    Install Rust toolchain
+make download-model  Download default model (Qwen3.5 0.8B Q4_K_M)
+```
+
+---
 
 ## Adding a new API endpoint
 

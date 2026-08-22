@@ -441,4 +441,4 @@ The vendored tree removed `--draft`, `--draft-n`, `--draft-max`, `--draft-min` a
 `--spec-draft-n-min`. fox uses its own flag names (`--spec-draft-len`, `--spec-ngram`) and
 its own speculative implementation, so nothing breaks — but any tooling or docs that shell
 out to `llama-server` for A/B comparison (`scripts/ab_bench.sh`,
-`Dockerfile.llama-server-rocm`) must use the new names.
+`docker/Dockerfile.llama-server-rocm`) must use the new names.

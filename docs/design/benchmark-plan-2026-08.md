@@ -359,8 +359,8 @@ GPU. Read from `/sys/class/kfd/kfd/topology/nodes/*/properties`.
 
 | Engine | State | How |
 |---|---|---|
-| fox | ready | `Dockerfile.vulkan` → bundle; `make vulkan` |
-| `llama-server` | ready, **flags audited** | `Dockerfile.llama-server-vulkan`, same vendored llama.cpp |
+| fox | ready | `docker/Dockerfile.vulkan` → bundle; `make vulkan` |
+| `llama-server` | ready, **flags audited** | `docker/Dockerfile.llama-server-vulkan`, same vendored llama.cpp |
 | vLLM | **serves, measured** | `rocm/vllm:latest` + `HSA_OVERRIDE_GFX_VERSION=11.0.0`; `scripts/bench_vllm.sh` |
 | Ollama | **runs on GPU**, verified | `ollama/ollama:rocm` + `OLLAMA_IGPU_ENABLE=1`; `scripts/try_ollama_rocm.sh` |
 
@@ -431,8 +431,8 @@ same model file.**
 
 | engine | Vulkan | ROCm | consumes the GGUF |
 |---|---|---|---|
-| fox | yes (`Dockerfile.vulkan`) | yes (`Dockerfile.rocm`) | yes |
-| `llama-server` | yes (`Dockerfile.llama-server-vulkan`) | yes | yes |
+| fox | yes (`docker/Dockerfile.vulkan`) | yes (`docker/Dockerfile.rocm`) | yes |
+| `llama-server` | yes (`docker/Dockerfile.llama-server-vulkan`) | yes | yes |
 | Ollama | yes, but only the `:latest` image (0.30.10) | yes, only the `:rocm` image (0.32.5) | yes, via Modelfile |
 | vLLM | **no Vulkan path at all** | yes | no — needs its own artifact |
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record the README demo GIF. The session is real: fox serves a real GGUF and answers.
 #
-#   docker build -f Dockerfile.demo -t fox:demo .
+#   docker build -f docker/Dockerfile.demo -t fox:demo .
 #   MODEL=~/.cache/ferrumox/models/some-model.gguf scripts/record_demo.sh
 #
 # Needs a fox bundle (binary + ggml libraries). `make vulkan` produces one; any build

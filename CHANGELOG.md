@@ -5,7 +5,44 @@ All notable changes to ferrumox are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Six early entries — 0.3.0, 0.4.0, 0.5.0, 0.7.0, 0.8.0 and 0.18.0 — are marked **never
+released**. They were written up and then skipped, and their content went out under the
+next tag. So this file lists 32 versions while 26 were published; `git tag` and the
+[releases page](https://github.com/ferrumox/fox/releases) are the record of what actually
+shipped.
+
 ---
+
+## [Unreleased]
+
+### Documentation
+
+- **Six CHANGELOG entries are marked "never released".** 0.3.0, 0.4.0, 0.5.0, 0.7.0,
+  0.8.0 and 0.18.0 were written up and then skipped, so this file listed 32 versions
+  while 26 were tagged — a gap anyone comparing the CHANGELOG with the releases page
+  would hit with no explanation. Each now says so at its heading and names the tag its
+  content actually shipped under: 0.3.0 → v0.3.1, 0.4.0 and 0.5.0 → v0.5.1, 0.7.0 and
+  0.8.0 → v0.9.0, 0.18.0 → v0.19.0. Nothing was deleted; the entries document real work
+  and only the version numbers never existed.
+
+- **The README stops carrying the contributor manual.** `Project structure` and
+  `Make targets` move to `CONTRIBUTING.md` under the architecture overview they belong
+  to, 60 lines off a 585-line front page. `Requirements` stays — driver requirements per
+  backend are what someone evaluating fox needs to see.
+
+- **`CLAUDE.md` no longer tells you to update a file that does not exist.** It asked for
+  new CLI docs to be added to `mkdocs.yml`'s nav; the docs site was parked in 0.13 and
+  the file went with it.
+
+### Changed
+
+- **The six `Dockerfile` variants move to `docker/`.** The repository root listed seven
+  Dockerfiles, two of them (`llama-server-rocm`, `llama-server-vulkan`) reference images
+  for a *different* engine, built only to benchmark against it. `Dockerfile` stays at the
+  root, because `.github/workflows/docker.yml` builds with `context: .` and no `file:`
+  key — moving it would have broken the image published on every tag, silently. Makefile
+  targets, the three scripts and `CONTRIBUTING.md` are updated; CHANGELOG history is not
+  rewritten.
 
 ## [0.22.1] - 2026-08-22
 
@@ -1432,7 +1469,12 @@ build fix. No engine changes.
   from llama.cpp, documented at the call site: fox's window covers only
   *generated* tokens, never the prompt, which is what fox has always done.
 
-## [0.18.0]
+## [0.18.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.19.0** (2026-08-03, tagged the same day as v0.17.0). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2083,7 +2125,12 @@ Re-baselines the project after retracting a premature `1.0.0`. The version line 
 
 ---
 
-## [0.8.0] - 2026-03-15
+## [0.8.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.9.0** (tagged the same day). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2123,7 +2170,12 @@ Re-baselines the project after retracting a premature `1.0.0`. The version line 
 
 ---
 
-## [0.7.0] - 2026-03-14
+## [0.7.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.9.0** (the next tag, 2026-03-15). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2261,7 +2313,12 @@ Ollama URL to `http://localhost:8080`. No other configuration change is required
 
 ---
 
-## [0.5.0] - 2026-03-12
+## [0.5.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.5.1** (tagged the same day). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2315,7 +2372,12 @@ Ollama URL to `http://localhost:8080`. No other configuration change is required
 
 ---
 
-## [0.4.0] - 2026-03-11
+## [0.4.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.5.1** (the next tag, 2026-03-12). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 
@@ -2441,7 +2503,12 @@ Ollama URL to `http://localhost:8080`. No other configuration change is required
 
 ---
 
-## [0.3.0] - 2026-03-10
+## [0.3.0] — never released
+
+> **This version was never tagged or published.** It was written up here and then
+> skipped; the work it describes shipped in **v0.3.1** (tagged the same day; this entry's content shipped there). Left in place
+> because the entry documents real changes — only the version number never existed.
+
 
 ### Added
 

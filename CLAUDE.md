@@ -99,7 +99,7 @@ Module map (note: this layout supersedes the older flat paths described in `CONT
 ## Conventions when extending
 
 - **New API endpoint**: add types under `src/api/types/`, write the handler in the matching `v1/` or `ollama/` module (reuse `shared/` helpers), register the route in `src/api/router.rs`/`routes.rs`, document under `docs/api/`.
-- **New CLI command**: add `src/cli/<cmd>.rs` with `<Cmd>Args` + `run_<cmd>()`, add a variant to `Command` in `src/cli/mod.rs` and wire its match arm, document under `docs/cli/` and add to `mkdocs.yml` nav.
+- **New CLI command**: add `src/cli/<cmd>.rs` with `<Cmd>Args` + `run_<cmd>()`, add a variant to `Command` in `src/cli/mod.rs` and wire its match arm, document under `docs/cli/`. (There is no docs site: mkdocs was parked in 0.13 until it earns its keep, so `docs/` is read as markdown in-tree.)
 - **New registry model**: add an entry to `registry.json`, verify with `fox models` and `fox pull <alias>`.
 
 ## Why these choices (load-bearing for changes)

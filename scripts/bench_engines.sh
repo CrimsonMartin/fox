@@ -139,7 +139,7 @@ ENG_CONT="fox-bench-engine"     # fox / llama-server when they run from an image
 # at the end of the run rather than left behind with a printed reminder.
 OLLAMA_DATA="${OLLAMA_DATA:-$HOME/.cache/ferrumox/bench-ollama}"
 # gfx1150 has no ROCm kernels of its own; both images are compiled for gfx1100 and the
-# override makes the runtime present the iGPU as one. Same value Dockerfile.rocm builds
+# override makes the runtime present the iGPU as one. Same value docker/Dockerfile.rocm builds
 # against — if they disagree the server loads and then faults mid-decode.
 HSA_OVERRIDE="${HSA_OVERRIDE:-11.0.0}"
 # Pass the render group by GID, not by name: minimal container images have no `render`

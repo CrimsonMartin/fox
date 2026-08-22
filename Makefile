@@ -141,13 +141,13 @@ e2e:
 # Build a Vulkan-enabled fox bundle in Docker and extract it to ./fox-vulkan/ so you
 # can run it natively on any host with a Vulkan driver (AMD/Intel iGPU, etc.) — no
 # build toolchain needed on the host. Building needs glslc/spirv-headers, which the
-# Dockerfile.vulkan image provides; running only needs the Mesa/Vulkan driver.
+# docker/Dockerfile.vulkan image provides; running only needs the Mesa/Vulkan driver.
 #   make vulkan && ./fox-vulkan/fox serve --model-path <model.gguf>
 VULKAN_OUT ?= fox-vulkan
 vulkan:
 	@command -v docker >/dev/null 2>&1 || \
 		(echo "Docker not found — needed to build the Vulkan bundle." && exit 1)
-	docker build -f Dockerfile.vulkan -t fox:vulkan .
+	docker build -f docker/Dockerfile.vulkan -t fox:vulkan .
 	@id=$$(docker create fox:vulkan); \
 		rm -rf $(VULKAN_OUT) && mkdir -p $(VULKAN_OUT); \
 		docker cp "$$id:/usr/local/lib/fox/." "$(VULKAN_OUT)/"; \

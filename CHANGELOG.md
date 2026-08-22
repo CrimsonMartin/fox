@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.22.1] - 2026-08-22
+
+### Documentation
+
+- **The v0.22.0 release notes described `--mtp-model` as drafting badly. It does not
+  draft at all.** The entry was written from the commit that added the flag and missed
+  that a later commit on the same branch had superseded its numbers, so three claims went
+  out wrong: that acceptance is 4-17%, that the main cause had been found and fixed, and
+  that "a second desync remains". There was no first one. The head's `llama_decode`
+  returns `-1` on every call, so it returns a frozen candidate set — the same three
+  tokens at every step, blind to prompt and position — and the ~2.5% the server reports
+  is how often that fixed list coincides with the target's output, not draft quality.
+  `llama-server` reaches ~60% with the same head file. The `save_state`/`restore_state`
+  pair fox wraps around `mtp_propose` is dead code: that implementation does not override
+  `get_state`/`set_state`, so the dispatcher returns false, and removing it changed
+  nothing. `STATUS.md` item 17 had this already and the CHANGELOG contradicted it inside
+  the same release. Corrected in the 0.22.0 entry above, in `--help`, and recorded here;
+  the text published under the `v0.22.0` tag cannot be recalled.
+
+- **`src/seq.rs` claimed a guarantee its own FFI helper contradicts.** The module header
+  said a bare integer is a type error "wherever a sequence is expected" and that
+  `a4171eb` "is now unwriteable", while `set_batch_row` in the same change says a raw
+  store into `batch.seq_id` stays expressible because no newtype reaches through a
+  bindgen pointer. The honest one is `set_batch_row`'s, and the header now says so
+  explicitly, naming the claim it replaces.
 
 ### Changed
 

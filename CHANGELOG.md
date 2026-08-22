@@ -15,6 +15,46 @@ shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- **The release page stops being a wall of text.** `scripts/release_notes.py` published
+  the whole CHANGELOG section verbatim — v0.22.0's page was 15,298 characters of
+  measurements and reasoning, on a page people open to learn what changed and which file
+  to download. Every entry here opens with a bold lead sentence and then explains itself,
+  so the leads already were the summary: the notes now carry those, grouped by section,
+  and link to the CHANGELOG at that tag for the rest. v0.22.0 comes out at 2,700
+  characters. An entry that does not follow the bold-lead pattern keeps its first
+  sentence rather than being dropped, so a stray format cannot silently remove a change
+  from the notes.
+
+- **`golden.rs` was documented twice in 0.22.0.** Writing up the entries that were
+  missing, I added a fix that was already three sections above. The summary above is what
+  found it, by putting the two leads side by side.
+
+- **The pre-push performance gate stops being blind when skipped, and stops flagging
+  retractions.** Two changes, from two failures on the same day. It flagged the commit
+  adding `--mtp-model` for quoting "4-17%" with no harness named, `FOX_SKIP_PERF_CHECK=1`
+  was set without reading the list, and those numbers turned out to be wrong — the head
+  had never drafted at all. Skipping now prints exactly what it would have blocked, so
+  the decision is made with the list in view. Separately, a commit that quotes a number
+  in order to *withdraw* it reads identically to one making a claim, so two commits
+  retracting false measurements were flagged as if they had made them; withdrawing a
+  false number is the behaviour the hook exists to encourage, and it is now exempt.
+  Verified against the six real commits involved: both retractions pass, and the MTP
+  claim is still caught.
+
+- **`scripts/release.sh` gains two gates, one per way this repository has already gone
+  wrong.** A version in the CHANGELOG must have a tag or say it never shipped — 0.18.0
+  was written up and skipped, and five early versions had the same shape, so the file
+  advertised 32 releases against 26 published. And a flag added since the previous
+  release must appear in the new entry: 0.22.0 documented 4 of its 19 commits and the two
+  it missed were `--n-gpu-layers` and `--mtp-model`, precisely the two that made it a
+  minor rather than a patch. The flag check reads clap's derive rather than commit
+  messages, so a message naming an existing flag in passing does not fail the release,
+  and its baseline is the previous `release:` commit rather than `git describe --tags` —
+  tags live on `main` and are not ancestors of the working branch, so "since the last
+  tag" does not compute here.
+
 ### Legal
 
 - **`LICENSE-APACHE` was not the Apache License 2.0.** It was a paraphrase, present
@@ -263,11 +303,6 @@ shipped.
 
   This is why `fox bench` reported ~6 tok/s: it hardcodes `top_p: 1.0` and `top_k: 0`.
   It now reports 24.9, against Ollama's 26.6 and llama-bench's 27.35 on the same model.
-
-- `golden.rs` did not compile: both `LlamaCppModel::load` call sites were missing the
-  `split_mode` argument. Pre-existing on this branch and invisible to `make ci`'s
-  stub-built jobs — exactly the breakage `check-real` exists to catch, which is only
-  useful if it is actually run.
 
 - **Tool calls already in the conversation were replayed in a syntax no model was
   trained on.** A past call was flattened back into the prompt as

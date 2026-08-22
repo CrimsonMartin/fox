@@ -22,7 +22,7 @@
 #
 # To skip in an emergency: git push --no-verify
 # To skip only check 4:    FOX_SKIP_REAL_CHECK=1 git push
-# To skip only check 5:    FOX_SKIP_PERF_CHECK=1 git push
+# To skip only check 5:    FOX_SKIP_PERF_CHECK=1 git push  (still prints what it found)
 
 set -euo pipefail
 
@@ -104,9 +104,13 @@ fi
 # only that the claim carries its methodology, so a future reader can tell an
 # alternating ab_bench.sh run from a single hopeful pair.
 step "performance-claim check"
-if [[ -n "${FOX_SKIP_PERF_CHECK:-}" ]]; then
-    ok "perf claims (skipped via FOX_SKIP_PERF_CHECK)"
-else
+# The offenders are computed even when the check is skipped. A gate you can wave
+# through silently stops being a gate: on 2026-08-22 this hook correctly flagged the
+# commit introducing --mtp-model for quoting "4-17%" with no harness named, the flag
+# was set without reading the list, and those numbers turned out to be wrong — the
+# head had never drafted at all. Skipping now prints exactly what it would have
+# blocked, so the decision is made with the list in view.
+if true; then
     # git feeds pre-push "<local ref> <local sha> <remote ref> <remote sha>" on
     # stdin. Collect the commits actually being pushed; for a brand-new branch
     # (remote sha all zeros) fall back to whatever is not on any other branch.
@@ -131,18 +135,31 @@ else
     # instrumentation all count — the bar is "a reader can tell how this was
     # obtained", not "you used one specific tool".
     EVIDENCE_RE='ab_bench|repeat_bench|fox-bench|bench_engines|bench_multiturn|bench_decode|bench_noisy|ab_shared_prefix|alternating|alternated|INCONCLUSIVE|median=|range=\[|back-to-back|measured alone|one server at a time|rounds|instrument|phase log|phase timing|profiler|perf record|rocprof|rondas|rangos disjuntos|rangos\b|medido|medida|un servidor cada vez|perfil|solapan'
+    # A *retraction* quotes a number in order to withdraw it, and reads identically to
+    # a claim: "a 4x fox win that was really prefill with no token counted" trips both
+    # regexes above. Withdrawing a false number is the behaviour this hook exists to
+    # encourage, so it must not be the thing it blocks.
+    RETRACT_RE='retract|withdrew|withdrawn|was not real|were not real|not a real|never real|turned out to be|invented|fabricat|was wrong|were wrong|is wrong|refut|corrects|correction|supersed|drift|clock had drifted|falsa|falsas|retirad|no era real|no eran reales|se retira|that was really|which was really|was really just|read as|really prefill'
 
     OFFENDERS=""
     for sha in $RANGE_COMMITS; do
         msg=$(git log -1 --format='%B' "$sha")
         if echo "$msg" | grep -qiE "$UNIT_RE" && echo "$msg" | grep -qiE "$FRAME_RE"; then
-            if ! echo "$msg" | grep -qiE "$EVIDENCE_RE"; then
+            if ! echo "$msg" | grep -qiE "$EVIDENCE_RE" && ! echo "$msg" | grep -qiE "$RETRACT_RE"; then
                 OFFENDERS+="  $(git log -1 --format='%h %s' "$sha")"$'\n'
             fi
         fi
     done
 
-    if [[ -n "$OFFENDERS" ]]; then
+    if [[ -n "$OFFENDERS" && -n "${FOX_SKIP_PERF_CHECK:-}" ]]; then
+        echo ""
+        echo -e "${YELLOW}Skipped, but these commits state a performance number with no methodology:${NC}"
+        echo "$OFFENDERS"
+        echo -e "${YELLOW}Read them before you rely on those numbers.${NC}"
+        ok "perf claims (skipped via FOX_SKIP_PERF_CHECK)"
+    elif [[ -n "${FOX_SKIP_PERF_CHECK:-}" ]]; then
+        ok "perf claims (skipped via FOX_SKIP_PERF_CHECK — nothing would have been flagged)"
+    elif [[ -n "$OFFENDERS" ]]; then
         echo ""
         echo -e "${RED}These commits state a performance number without saying how it was measured:${NC}"
         echo "$OFFENDERS"
@@ -158,8 +175,9 @@ else
         echo "Or, if the number is illustrative rather than a claim:"
         echo "  FOX_SKIP_PERF_CHECK=1 git push"
         fail "performance claim without methodology"
+    else
+        ok "perf claims"
     fi
-    ok "perf claims"
 fi
 
 echo ""

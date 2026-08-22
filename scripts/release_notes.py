@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a GitHub release body: this version's CHANGELOG section, plus which file to download.
+"""Build a GitHub release body: a summary of this version's CHANGELOG, plus which file to download.
 
 Releases used to publish with no notes at all — `softprops/action-gh-release` was
 only ever handed files, so the page was a bare list of six assets. Two of them are
@@ -82,12 +82,63 @@ def section(changelog: str, version: str) -> str:
     return "\n".join(body).strip()
 
 
+def summarise(body: str, version: str) -> str:
+    """The lead sentence of every entry, keeping the `### ` groupings.
+
+    v0.22.0's release page was 15,298 characters — the whole CHANGELOG section, every
+    measurement and every piece of reasoning, on a page people open to find out what
+    changed and which file to download. The detail is worth having and the release page
+    is the wrong place for it.
+
+    Every entry in this CHANGELOG opens with a bold lead sentence and then explains
+    itself, so the leads already are the summary; this keeps those and links the rest.
+    An entry that does not follow the pattern keeps its first line, so a stray format
+    never silently drops a change from the notes.
+    """
+    out, kept = [], 0
+    for para in re.split(r"\n(?=- |### )", body):
+        para = para.strip()
+        if not para:
+            continue
+        if para.startswith("### "):
+            out.append("\n" + para.splitlines()[0])
+            continue
+        if not para.startswith("- "):
+            continue
+        kept += 1
+        lead = re.match(r"- \*\*(.+?)\*\*", para, re.S)
+        if lead:
+            out.append("- **" + " ".join(lead.group(1).split()) + "**")
+        else:
+            flat = " ".join(para[2:].split())
+            # First sentence, but only a full stop counts and only once the line has
+            # said something: "e2e check 17: ..." must not be cut at the colon, and
+            # "`fn_name`." must not end the entry at its own trailing dot.
+            cut = next(
+                (m.end() - 1 for m in re.finditer(r"\.\s", flat) if m.start() >= 40),
+                None,
+            )
+            if cut and cut <= 220:
+                first = flat[:cut]
+            elif len(flat) > 197:
+                first = flat[:197].rstrip() + "…"
+            else:
+                first = flat
+            out.append("- " + first)
+    tail = (
+        f"\n\n{kept} change{'s' if kept != 1 else ''} in this release. Each one is written up in full — with the "
+        f"measurements behind it, and what was ruled out — in "
+        f"[CHANGELOG.md](https://github.com/ferrumox/fox/blob/v{version}/CHANGELOG.md)."
+    )
+    return "\n".join(out).strip() + tail
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: release_notes.py X.Y.Z")
     version = sys.argv[1]
     changelog = pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md"
-    print(section(changelog.read_text(), version))
+    print(summarise(section(changelog.read_text(), version), version))
     print(DOWNLOAD_GUIDE)
 
 

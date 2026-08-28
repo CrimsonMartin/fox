@@ -1,5 +1,5 @@
 // `fox mcp` — start an MCP (Model Context Protocol) server over stdio.
-// Designed for IDE integration (Cursor, VS Code, Claude Code).
+// Designed for IDE integration (Cursor, VS Code, and other MCP clients).
 
 use std::path::PathBuf;
 use std::sync::Arc;

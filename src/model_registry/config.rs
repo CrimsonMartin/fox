@@ -111,3 +111,46 @@ pub struct RegistryConfig {
     /// Useful for MoE models (e.g. DeepSeek, Mixtral) where expert weights don't fit in VRAM.
     pub moe_offload_cpu: bool,
 }
+
+impl RegistryConfig {
+    /// Config for embedded entry points that host a registry without going through
+    /// `fox serve` (e.g. `fox mcp`, tests). Values mirror `ServeArgs`' flag defaults;
+    /// when a default changes there, change it here too.
+    pub fn embedded(models_dir: PathBuf, gpu_memory_bytes: usize) -> Self {
+        Self {
+            models_dir,
+            max_models: 1,
+            max_batch_size: 32,
+            max_queue_depth: 0,
+            max_prefill_chunk: 512,
+            rs_rollback: 4,
+            context_shift: true,
+            context_keep: 0,
+            reranking: false,
+            cache_ram_bytes: 0,
+            kv_reuse: true,
+            slot_prompt_similarity: 0.1,
+            speculative: false,
+            spec_ngram: 2,
+            spec_draft_len: 4,
+            draft_model: None,
+            mmproj: None,
+            mtp_model: None,
+            lora_modules: Vec::new(),
+            primary_model: None,
+            max_context_len: None,
+            block_size: 16,
+            gpu_memory_bytes,
+            gpu_memory_fraction: 0.85,
+            metrics: None,
+            keep_alive_secs: 300,
+            type_k: kv_type::F16,
+            type_v: kv_type::F16,
+            n_gpu_layers: -1,
+            main_gpu: 0,
+            split_mode: 1,
+            tensor_split: Vec::new(),
+            moe_offload_cpu: false,
+        }
+    }
+}

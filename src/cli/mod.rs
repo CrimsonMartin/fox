@@ -6,6 +6,7 @@ pub mod bench_kv;
 pub mod bench_prefill;
 pub mod bench_spec;
 pub mod list;
+pub mod mcp;
 pub mod models;
 pub mod probe;
 pub mod ps;
@@ -67,6 +68,8 @@ pub enum Command {
     Search(search::SearchArgs),
     /// Manage model name aliases
     Alias(alias::AliasArgs),
+    /// Start an MCP (Model Context Protocol) server over stdio for IDE integration
+    Mcp(mcp::McpArgs),
 }
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
@@ -86,6 +89,7 @@ const SUBCOMMANDS: &[&str] = &[
     "models",
     "search",
     "alias",
+    "mcp",
     "help",
 ];
 
@@ -123,5 +127,6 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Models(args) => models::run_models(args).await,
         Command::Search(args) => search::run_search(args).await,
         Command::Alias(args) => alias::run_alias(args).await,
+        Command::Mcp(args) => mcp::run_mcp(args).await,
     }
 }

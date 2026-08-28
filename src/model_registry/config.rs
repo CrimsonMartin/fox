@@ -66,6 +66,11 @@ pub struct RegistryConfig {
     /// whatever model is currently loaded. A mismatched pairing (mmproj for a
     /// different architecture) fails at load time rather than corrupting output.
     pub mmproj: Option<String>,
+    /// Number of mtmd contexts loaded per vision model (`--vision-contexts`).
+    /// 1 = single context (concurrent encodes serialize on it); N>1 = a checkout
+    /// pool, so up to N requests CLIP-encode their images in parallel at roughly
+    /// one mmproj's VRAM footprint per extra context. Meaningless without `mmproj`.
+    pub vision_contexts: usize,
     /// Name/path of the multi-token-prediction head GGUF paired with the main model
     /// (`mtp-*.gguf`), enabling MTP speculative decoding. Like `draft_model` and
     /// `mmproj`, one global pairing against whichever model is loaded. Only takes
@@ -135,6 +140,7 @@ impl RegistryConfig {
             spec_draft_len: 4,
             draft_model: None,
             mmproj: None,
+            vision_contexts: 1,
             mtp_model: None,
             lora_modules: Vec::new(),
             primary_model: None,

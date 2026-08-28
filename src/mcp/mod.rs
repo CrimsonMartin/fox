@@ -396,16 +396,8 @@ impl McpServer {
         let engine = &entry.engine;
 
         let messages = vec![("user".to_string(), prompt.to_string())];
-        let prompt_text = engine.apply_chat_template(&messages).unwrap_or_else(|_| {
-            messages
-                .iter()
-                .map(|(r, c)| format!("{r}: {c}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-
         let tokens = engine
-            .tokenize(&prompt_text)
+            .build_prompt_tokens(&messages, false, None)
             .map_err(|e| (INTERNAL_ERROR, format!("tokenize failed: {e}")))?;
 
         let text = run_inference(engine, tokens, max_tokens, temperature).await?;
@@ -455,16 +447,8 @@ impl McpServer {
             .map_err(|e| (INTERNAL_ERROR, format!("failed to load model: {e}")))?;
         let engine = &entry.engine;
 
-        let prompt_text = engine.apply_chat_template(&messages).unwrap_or_else(|_| {
-            messages
-                .iter()
-                .map(|(r, c)| format!("{r}: {c}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-
         let tokens = engine
-            .tokenize(&prompt_text)
+            .build_prompt_tokens(&messages, false, None)
             .map_err(|e| (INTERNAL_ERROR, format!("tokenize failed: {e}")))?;
 
         let text = run_inference(engine, tokens, max_tokens, temperature).await?;
